@@ -1,0 +1,8 @@
+build/
+build-*/
+build_*/
+build_review*/
+.agent_backup_*/
+dist/
+wheelhouse/
+__pycache__/

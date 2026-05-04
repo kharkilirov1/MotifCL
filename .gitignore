@@ -1,0 +1,44 @@
+# Build outputs
+build/
+build-*/
+build_*/
+build*/
+cmake-build-*/
+out/
+
+# Local review/build artifacts
+build_review*/
+motifcl_tuning.json
+.agent_backup*/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.dll
+*.dylib
+*.egg-info/
+dist/
+wheelhouse/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+_deps/
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

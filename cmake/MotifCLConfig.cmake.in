@@ -1,0 +1,28 @@
+@PACKAGE_INIT@
+
+find_package(OpenCL QUIET)
+if(NOT OpenCL_FOUND AND NOT TARGET OpenCL::OpenCL)
+    if(WIN32 AND NOT MOTIFCL_OPENCL_LIBRARY)
+        foreach(_motifcl_opencl_candidate
+                "$ENV{SystemRoot}/System32/OpenCL.dll"
+                "$ENV{WINDIR}/System32/OpenCL.dll"
+                "C:/Windows/System32/OpenCL.dll")
+            if(EXISTS "${_motifcl_opencl_candidate}")
+                set(MOTIFCL_OPENCL_LIBRARY "${_motifcl_opencl_candidate}" CACHE FILEPATH "OpenCL ICD loader library" FORCE)
+                break()
+            endif()
+        endforeach()
+    endif()
+    find_library(MOTIFCL_OPENCL_LIBRARY NAMES OpenCL libOpenCL.so.1 OpenCL.dll)
+    if(NOT MOTIFCL_OPENCL_LIBRARY)
+        message(FATAL_ERROR "MotifCL requires an OpenCL ICD loader/library. Set MOTIFCL_OPENCL_LIBRARY or install OpenCL.")
+    endif()
+    add_library(OpenCL::OpenCL UNKNOWN IMPORTED)
+    set_target_properties(OpenCL::OpenCL PROPERTIES
+        IMPORTED_LOCATION "${MOTIFCL_OPENCL_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include"
+    )
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/MotifCLTargets.cmake")
+check_required_components(MotifCL)

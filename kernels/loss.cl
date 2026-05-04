@@ -1,0 +1,66 @@
+__kernel void mse_loss_partial_f32(__global const float* pred,
+                                   __global const float* target,
+                                   __global float* partial,
+                                   int n) {
+    int gid = get_global_id(0);
+    int start = gid * 256;
+    if (start >= n) return;
+    float acc = 0.0f;
+    for (int i = 0; i < 256; ++i) {
+        int idx = start + i;
+        if (idx < n) {
+            float d = pred[idx] - target[idx];
+            acc += d * d;
+        }
+    }
+    partial[gid] = acc;
+}
+
+__kernel void mse_backward_f32(__global const float* pred,
+                               __global const float* target,
+                               __global const float* grad_out,
+                               __global float* grad_pred,
+                               int n) {
+    int gid = get_global_id(0);
+    if (gid < n) grad_pred[gid] = grad_out[0] * 2.0f * (pred[gid] - target[gid]) / (float)n;
+}
+
+__kernel void softmax_cross_entropy_partial_f32_i32(__global const float* logits,
+                                                     __global const int* targets,
+                                                     __global float* partial,
+                                                     int rows,
+                                                     int cols) {
+    int row = get_global_id(0);
+    if (row >= rows) return;
+    int base = row * cols;
+    int target = targets[row];
+    float maxv = logits[base];
+    for (int c = 1; c < cols; ++c) maxv = fmax(maxv, logits[base + c]);
+    float sum = 0.0f;
+    for (int c = 0; c < cols; ++c) sum += exp(logits[base + c] - maxv);
+    float logsum = log(sum) + maxv;
+    if (target < 0 || target >= cols) partial[row] = 0.0f;
+    else partial[row] = logsum - logits[base + target];
+}
+
+__kernel void softmax_cross_entropy_backward_f32_i32(__global const float* logits,
+                                                      __global const int* targets,
+                                                      __global const float* grad_out,
+                                                      __global float* grad_logits,
+                                                      int rows,
+                                                      int cols) {
+    int row = get_global_id(0);
+    if (row >= rows) return;
+    int base = row * cols;
+    int target = targets[row];
+    float maxv = logits[base];
+    for (int c = 1; c < cols; ++c) maxv = fmax(maxv, logits[base + c]);
+    float sum = 0.0f;
+    for (int c = 0; c < cols; ++c) sum += exp(logits[base + c] - maxv);
+    float scale = grad_out[0] / (float)rows;
+    for (int c = 0; c < cols; ++c) {
+        float p = exp(logits[base + c] - maxv) / sum;
+        float y = (c == target) ? 1.0f : 0.0f;
+        grad_logits[base + c] = scale * (p - y);
+    }
+}
