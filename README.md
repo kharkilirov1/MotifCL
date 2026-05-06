@@ -8,10 +8,10 @@ This release is a productionized source tree rather than a single-file kernel de
 
 - Runtime: OpenCL context/device selection, command queue with profiling, shared OpenCL runtime-state ownership for buffers/programs/kernels/replay, RAII buffers, programs, kernels, events, profiler, kernel cache.
 - Tensor engine: `Tensor`, `Storage`, `Shape`, `DType`, views, CPU upload/download, `empty`, `zeros`, `ones`, `full`, `randn`, `uniform`.
-- Ops: elementwise math, scalar ops, row bias, workgroup row reductions, register-blocked F32 matmul, generated F32 matmul tile variants, Q8_0/Q4_0 symmetric quantize/dequantize, per-tensor/per-axis/blockwise quantization metadata, mixed Q8/Q4 quantized matmul, register-blocked unscaled quantized matmul paths, extension-gated Q8 integer-dot path with portable fallback, activations, softmax rows, causal mask, FlashAttention-style tiled multi-head attention forward/backward, workgroup-reduced RMSNorm/LayerNorm, MSE loss, softmax cross entropy for I32 targets, Adam and SGD kernels.
+- Ops: elementwise math, scalar ops, row bias, workgroup row reductions, register-blocked F32 matmul, generated F32 matmul tile variants, Q8_0/Q4_0 symmetric quantize/dequantize, per-tensor/per-axis/blockwise quantization metadata, mixed Q8/Q4 quantized matmul, register-blocked unscaled quantized matmul paths, extension-gated Q8 integer-dot path with portable fallback, activations including SwiGLU, GPU dropout/masked-fill, softmax rows, causal mask, RoPE, fused QKV split, GQA/MQA attention with staged backward for GPT-sized shapes, KV-cache append, FlashAttention-style tiled multi-head attention forward/backward, workgroup-reduced RMSNorm/LayerNorm, MSE loss, softmax cross entropy for I32 targets, Adam and SGD kernels.
 - Autograd: eager backward path for add/sub/mul/div/scale, matmul, ReLU, GELU, MSE, softmax-cross-entropy logits, RMSNorm, token/position embedding, and correctness-first fused multi-head attention backward.
 - Graph capture: thread-local static op-sequence tracing through `CapturedGraph`, `GraphCaptureGuard`, tensor IDs, replayable captured OpenCL kernel launches, host-reduction replay for scalar MSE / softmax-cross-entropy reductions, linear scheduler/executor, tensor-spec metadata, buffer-planning liveness estimates, shape-polymorphic signatures, and C++/Python APIs for inspecting/executing captured dependencies.
-- NN: `Parameter`, `Module`, `Linear`, `ReLU`, `GELU`, `Sequential`, `Embedding`, `RMSNorm`, `SelfAttention`, `MLP`, `TransformerBlock`, `GPTModel`.
+- NN: `Parameter`, `Module`, `Linear`, `ReLU`, `GELU`, `Sequential`, `Embedding`, `RMSNorm`, legacy `SelfAttention`/`MLP`/`TransformerBlock`/`GPTModel`, plus `TransformerConfig`, `ModernSelfAttention`, `ModernMLP`, `ModernTransformerBlock`, `ModernGPTModel`, and `KVCache`.
 - Motif/research: `MotifLinear`, `MotifLoRA`, `Router`, `MotifTransformerBlock`, `SARCResidual`.
 - Training: `Adam`, `SGD`, generic `Trainer` with dataloader and loss callback.
 - Python: pybind11 extension source plus thin package wrappers.
@@ -120,6 +120,7 @@ Set `MOTIFCL_MATMUL_F32_TILE=4|8|16` to force a generated F32 tiled matmul varia
 ## Additional docs
 
 - `docs/ARCHITECTURE.md` — runtime/tensor/ops/autograd/graph/training layering and dynamic graph status.
+- `docs/MODERN_TRANSFORMER.md` — RoPE, fused QKV, GQA/MQA, SwiGLU, mask/dropout, KV-cache, and `TransformerConfig`.
 - `docs/TRAINING.md` — dataloaders, schedulers, gradient clipping, history, checkpoints.
 - `docs/PYTHON_API.md` — Python wrapper/stub usage.
 - `docs/PERFORMANCE.md` — tuning and regression workflow.

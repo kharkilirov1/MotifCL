@@ -119,9 +119,13 @@ std::string KernelCache::source_file_for_kernel(const std::string& kernel_name) 
     if (contains(kernel_name, "matmul")) return "matmul.cl";
     if (contains(kernel_name, "quantize") || contains(kernel_name, "dequantize")) return "quant.cl";
     if (contains(kernel_name, "mse") || contains(kernel_name, "cross_entropy") || contains(kernel_name, "mean_reduce")) return "loss.cl";
-    if (contains(kernel_name, "softmax") || contains(kernel_name, "causal") || contains(kernel_name, "attention")) return "attention.cl";
+    if (contains(kernel_name, "softmax") || contains(kernel_name, "causal") || contains(kernel_name, "attention") ||
+        contains(kernel_name, "rope") || contains(kernel_name, "qkv") || contains(kernel_name, "gqa") || contains(kernel_name, "grouped_query") ||
+        contains(kernel_name, "kv_cache")) return "attention.cl";
     if (contains(kernel_name, "rms") || contains(kernel_name, "norm")) return "norm.cl";
-    if (contains(kernel_name, "relu") || contains(kernel_name, "gelu") || contains(kernel_name, "silu") || contains(kernel_name, "exp_") || contains(kernel_name, "sqrt") || contains(kernel_name, "rsqrt")) return "activation.cl";
+    if (contains(kernel_name, "relu") || contains(kernel_name, "gelu") || contains(kernel_name, "silu") ||
+        contains(kernel_name, "swiglu") || contains(kernel_name, "exp_") || contains(kernel_name, "sqrt") ||
+        contains(kernel_name, "rsqrt")) return "activation.cl";
     if (contains(kernel_name, "embedding") || contains(kernel_name, "token_position")) return "embedding.cl";
     if (contains(kernel_name, "adam") || contains(kernel_name, "sgd")) return "optim.cl";
     if (contains(kernel_name, "sum") || contains(kernel_name, "max") || contains(kernel_name, "reduce")) return "reduce.cl";

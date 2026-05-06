@@ -72,6 +72,11 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_property_readonly("dtype", &motifcl::Tensor::dtype)
         .def_property_readonly("requires_grad", &motifcl::Tensor::requires_grad);
 
+    py::class_<motifcl::QKV>(m, "QKV")
+        .def_readonly("q", &motifcl::QKV::q)
+        .def_readonly("k", &motifcl::QKV::k)
+        .def_readonly("v", &motifcl::QKV::v);
+
     py::class_<motifcl::autograd::GraphNodeInfo>(m, "GraphNodeInfo")
         .def_readonly("op", &motifcl::autograd::GraphNodeInfo::op)
         .def_readonly("inputs", &motifcl::autograd::GraphNodeInfo::inputs)
@@ -232,6 +237,7 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("scale_inplace", &motifcl::scale_inplace);
     m.def("relu", &motifcl::relu);
     m.def("gelu", &motifcl::gelu);
+    m.def("swiglu", &motifcl::swiglu);
     m.def("softmax_rows", &motifcl::softmax_rows);
     m.def("sum_rows", &motifcl::sum_rows);
     m.def("sum_all", &motifcl::sum_all);
@@ -244,6 +250,24 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("multihead_attention", &motifcl::multihead_attention,
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("n_head"),
           py::arg("causal") = false, py::arg("batch_size") = 1, py::arg("seq_len") = 0);
+    m.def("qkv_split", &motifcl::qkv_split,
+          py::arg("packed"), py::arg("q_dim"), py::arg("kv_dim"));
+    m.def("rope", &motifcl::rope,
+          py::arg("x"), py::arg("n_head"), py::arg("batch_size"), py::arg("seq_len"),
+          py::arg("theta") = 10000.0f, py::arg("rotary_dim") = 0, py::arg("token_offset") = 0);
+    m.def("grouped_query_attention", &motifcl::grouped_query_attention,
+          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("n_head"), py::arg("n_kv_head"),
+          py::arg("causal") = true, py::arg("batch_size") = 1, py::arg("query_len") = 0,
+          py::arg("key_len") = 0, py::arg("query_offset") = 0);
+    m.def("grouped_query_attention_masked", &motifcl::grouped_query_attention_masked,
+          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask"),
+          py::arg("n_head"), py::arg("n_kv_head"), py::arg("causal") = true,
+          py::arg("batch_size") = 1, py::arg("query_len") = 0,
+          py::arg("key_len") = 0, py::arg("query_offset") = 0,
+          py::arg("additive_mask") = false);
+    m.def("kv_cache_append", &motifcl::kv_cache_append,
+          py::arg("new_k"), py::arg("new_v"), py::arg("cache_k"), py::arg("cache_v"),
+          py::arg("batch_size"), py::arg("new_tokens"), py::arg("max_tokens"), py::arg("start_pos"));
     m.def("rmsnorm", &motifcl::rmsnorm, py::arg("x"), py::arg("weight"), py::arg("eps") = 1e-6f);
     m.def("layernorm", &motifcl::layernorm, py::arg("x"), py::arg("weight"), py::arg("bias"), py::arg("eps") = 1e-6f);
     m.def("mse_loss", &motifcl::mse_loss);
@@ -280,6 +304,110 @@ PYBIND11_MODULE(_motifcl, m) {
         .def(py::init<motifcl::Backend&, int, int, int, int, int, int>(), py::arg("backend"), py::arg("vocab_size"), py::arg("block_size"), py::arg("n_embd"), py::arg("n_head"), py::arg("n_layer"), py::arg("mlp_hidden"))
         .def("forward", &motifcl::nn::GPTModel::forward)
         .def("parameters", &motifcl::nn::GPTModel::parameters, py::return_value_policy::reference);
+
+    py::class_<motifcl::nn::TransformerConfig>(m, "TransformerConfig")
+        .def(py::init<>())
+        .def_readwrite("vocab_size", &motifcl::nn::TransformerConfig::vocab_size)
+        .def_readwrite("block_size", &motifcl::nn::TransformerConfig::block_size)
+        .def_readwrite("n_embd", &motifcl::nn::TransformerConfig::n_embd)
+        .def_readwrite("n_head", &motifcl::nn::TransformerConfig::n_head)
+        .def_readwrite("n_kv_head", &motifcl::nn::TransformerConfig::n_kv_head)
+        .def_readwrite("n_layer", &motifcl::nn::TransformerConfig::n_layer)
+        .def_readwrite("mlp_hidden", &motifcl::nn::TransformerConfig::mlp_hidden)
+        .def_readwrite("dropout", &motifcl::nn::TransformerConfig::dropout)
+        .def_readwrite("use_rope", &motifcl::nn::TransformerConfig::use_rope)
+        .def_readwrite("use_swiglu", &motifcl::nn::TransformerConfig::use_swiglu)
+        .def_readwrite("use_qkv_bias", &motifcl::nn::TransformerConfig::use_qkv_bias)
+        .def_readwrite("causal", &motifcl::nn::TransformerConfig::causal)
+        .def_readwrite("learned_position_embeddings", &motifcl::nn::TransformerConfig::learned_position_embeddings)
+        .def_readwrite("rope_theta", &motifcl::nn::TransformerConfig::rope_theta)
+        .def_readwrite("rotary_dim", &motifcl::nn::TransformerConfig::rotary_dim);
+
+    py::class_<motifcl::nn::KVCache>(m, "KVCache")
+        .def(py::init<>())
+        .def(py::init<motifcl::Backend&, int64_t, int64_t, int, int>(),
+             py::arg("backend"), py::arg("batch_size"), py::arg("max_seq_len"),
+             py::arg("n_kv_head"), py::arg("head_dim"))
+        .def_readwrite("k", &motifcl::nn::KVCache::k)
+        .def_readwrite("v", &motifcl::nn::KVCache::v)
+        .def_readwrite("batch_size", &motifcl::nn::KVCache::batch_size)
+        .def_readwrite("max_seq_len", &motifcl::nn::KVCache::max_seq_len)
+        .def_readwrite("length", &motifcl::nn::KVCache::length)
+        .def_readwrite("n_kv_head", &motifcl::nn::KVCache::n_kv_head)
+        .def_readwrite("head_dim", &motifcl::nn::KVCache::head_dim)
+        .def("reset", &motifcl::nn::KVCache::reset);
+
+    py::class_<motifcl::nn::ModernMLP, motifcl::nn::Module, std::shared_ptr<motifcl::nn::ModernMLP>>(m, "ModernMLP")
+        .def(py::init<motifcl::Backend&, int, int, bool, bool, float>(),
+             py::arg("backend"), py::arg("n_embd"), py::arg("hidden"),
+             py::arg("use_swiglu") = true, py::arg("use_bias") = false, py::arg("dropout") = 0.0f)
+        .def("forward", &motifcl::nn::ModernMLP::forward)
+        .def("parameters", &motifcl::nn::ModernMLP::parameters, py::return_value_policy::reference)
+        .def_readwrite("use_swiglu", &motifcl::nn::ModernMLP::use_swiglu)
+        .def_readwrite("dropout_p", &motifcl::nn::ModernMLP::dropout_p);
+
+    py::class_<motifcl::nn::ModernSelfAttention, motifcl::nn::Module, std::shared_ptr<motifcl::nn::ModernSelfAttention>>(m, "ModernSelfAttention")
+        .def(py::init<motifcl::Backend&, const motifcl::nn::TransformerConfig&>(),
+             py::arg("backend"), py::arg("config"))
+        .def("forward", py::overload_cast<const motifcl::Tensor&>(&motifcl::nn::ModernSelfAttention::forward))
+        .def("forward", py::overload_cast<const motifcl::Tensor&, int64_t, int64_t, bool>(&motifcl::nn::ModernSelfAttention::forward),
+             py::arg("x"), py::arg("batch_size"), py::arg("seq_len"), py::arg("causal") = true)
+        .def("forward_masked", &motifcl::nn::ModernSelfAttention::forward_masked,
+             py::arg("x"), py::arg("mask"), py::arg("batch_size"), py::arg("seq_len"), py::arg("causal") = true)
+        .def("forward_with_cache", &motifcl::nn::ModernSelfAttention::forward_with_cache,
+             py::arg("x"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
+        .def("forward_with_cache_masked", &motifcl::nn::ModernSelfAttention::forward_with_cache_masked,
+             py::arg("x"), py::arg("mask"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
+        .def("parameters", &motifcl::nn::ModernSelfAttention::parameters, py::return_value_policy::reference)
+        .def("n_head", &motifcl::nn::ModernSelfAttention::n_head)
+        .def("n_kv_head", &motifcl::nn::ModernSelfAttention::n_kv_head)
+        .def("head_dim", &motifcl::nn::ModernSelfAttention::head_dim);
+
+    py::class_<motifcl::nn::ModernTransformerBlock, motifcl::nn::Module, std::shared_ptr<motifcl::nn::ModernTransformerBlock>>(m, "ModernTransformerBlock")
+        .def(py::init<motifcl::Backend&, const motifcl::nn::TransformerConfig&>(),
+             py::arg("backend"), py::arg("config"))
+        .def("forward", py::overload_cast<const motifcl::Tensor&>(&motifcl::nn::ModernTransformerBlock::forward))
+        .def("forward", py::overload_cast<const motifcl::Tensor&, int64_t, int64_t>(&motifcl::nn::ModernTransformerBlock::forward),
+             py::arg("x"), py::arg("batch_size"), py::arg("seq_len"))
+        .def("forward_masked", &motifcl::nn::ModernTransformerBlock::forward_masked,
+             py::arg("x"), py::arg("mask"), py::arg("batch_size"), py::arg("seq_len"))
+        .def("forward_with_cache", &motifcl::nn::ModernTransformerBlock::forward_with_cache,
+             py::arg("x"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
+        .def("forward_with_cache_masked", &motifcl::nn::ModernTransformerBlock::forward_with_cache_masked,
+             py::arg("x"), py::arg("mask"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
+        .def("parameters", &motifcl::nn::ModernTransformerBlock::parameters, py::return_value_policy::reference);
+
+    py::class_<motifcl::nn::ModernGPTModel, motifcl::nn::Module, std::shared_ptr<motifcl::nn::ModernGPTModel>>(m, "ModernGPTModel")
+        .def(py::init<motifcl::Backend&, const motifcl::nn::TransformerConfig&>(),
+             py::arg("backend"), py::arg("config"))
+        .def("forward", &motifcl::nn::ModernGPTModel::forward)
+        .def("forward_masked", &motifcl::nn::ModernGPTModel::forward_masked,
+             py::arg("token_ids"), py::arg("mask"))
+        .def("forward_with_cache", [](motifcl::nn::ModernGPTModel& model,
+                                      const motifcl::Tensor& token_ids,
+                                      py::list cache_list) {
+            std::vector<motifcl::nn::KVCache*> caches;
+            caches.reserve(static_cast<std::size_t>(py::len(cache_list)));
+            for (py::handle item : cache_list) {
+                caches.push_back(&item.cast<motifcl::nn::KVCache&>());
+            }
+            return model.forward_with_cache(token_ids, caches);
+        }, py::arg("token_ids"), py::arg("caches"))
+        .def("forward_with_cache_masked", [](motifcl::nn::ModernGPTModel& model,
+                                             const motifcl::Tensor& token_ids,
+                                             const motifcl::Tensor& mask,
+                                             py::list cache_list) {
+            std::vector<motifcl::nn::KVCache*> caches;
+            caches.reserve(static_cast<std::size_t>(py::len(cache_list)));
+            for (py::handle item : cache_list) {
+                caches.push_back(&item.cast<motifcl::nn::KVCache&>());
+            }
+            return model.forward_with_cache_masked(token_ids, mask, caches);
+        }, py::arg("token_ids"), py::arg("mask"), py::arg("caches"))
+        .def("parameters", &motifcl::nn::ModernGPTModel::parameters, py::return_value_policy::reference)
+        .def("create_kv_cache", &motifcl::nn::ModernGPTModel::create_kv_cache,
+             py::arg("backend"), py::arg("batch_size"))
+        .def_readwrite("config", &motifcl::nn::ModernGPTModel::config);
 
     py::class_<motifcl::optim::Adam>(m, "Adam")
         .def(py::init<std::vector<motifcl::nn::Parameter*>, float, float, float, float>(), py::arg("params"), py::arg("lr") = 1e-3f, py::arg("beta1") = 0.9f, py::arg("beta2") = 0.999f, py::arg("eps") = 1e-8f)

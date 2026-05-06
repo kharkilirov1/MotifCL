@@ -4,17 +4,23 @@
 #include <motifcl/autograd/node.hpp>
 #include <motifcl/core/error.hpp>
 #include <motifcl/ops/basic_ops.hpp>
+#include <motifcl/runtime/backend.hpp>
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <numeric>
+#include <atomic>
 #include <vector>
 
 namespace motifcl {
 
 namespace {
+constexpr std::size_t kLocal1D = 256;
+std::size_t round_up(std::size_t x, std::size_t multiple) { return ((x + multiple - 1) / multiple) * multiple; }
+
+std::atomic<std::uint32_t> g_dropout_counter{0x12345678u};
 
 std::size_t element_size(DType dtype) {
     return dtype_storage_nbytes(dtype, 1);
@@ -72,15 +78,29 @@ struct SliceRowsBackwardNode : autograd::Node {
 
 struct MaskedFillBackwardNode : autograd::Node {
     Tensor x;
-    Tensor keep;
-    MaskedFillBackwardNode(Tensor x_value, Tensor keep_value) : x(std::move(x_value)), keep(std::move(keep_value)) {}
+    Tensor mask;
+    MaskedFillBackwardNode(Tensor x_value, Tensor mask_value) : x(std::move(x_value)), mask(std::move(mask_value)) {}
     std::vector<Tensor> inputs() const override { return {x}; }
     void backward(const Tensor& grad_output) override {
-        if (x.requires_grad()) x.backward(mul(grad_output, keep));
+        if (x.requires_grad()) x.backward(masked_fill(grad_output, mask, 0.0f));
+    }
+};
+
+struct DropoutBackwardNode : autograd::Node {
+    Tensor x;
+    Tensor mask;
+    DropoutBackwardNode(Tensor x_value, Tensor mask_value) : x(std::move(x_value)), mask(std::move(mask_value)) {}
+    std::vector<Tensor> inputs() const override { return {x}; }
+    void backward(const Tensor& grad_output) override {
+        if (x.requires_grad()) x.backward(mul(grad_output, mask));
     }
 };
 
 } // namespace
+
+void dropout_manual_seed(std::uint32_t seed) {
+    g_dropout_counter.store(seed ^ 0x12345678u, std::memory_order_relaxed);
+}
 
 Tensor sum_all(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::F32, "sum_all supports f32 only");
@@ -136,14 +156,26 @@ Tensor dropout(const Tensor& x, float p, bool training) {
     MCL_CHECK(x.dtype() == DType::F32, "dropout supports f32 only");
     MCL_CHECK(p >= 0.0f && p < 1.0f, "dropout probability must be in [0, 1)");
     if (!training || p == 0.0f) return mul_scalar(x, 1.0f);
-    const auto random = Tensor::uniform(x.backend(), x.shape(), 0.0f, 1.0f);
-    const auto rv = random.to_vector<float>();
-    std::vector<float> mask(rv.size(), 0.0f);
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    auto mask_tensor = Tensor::empty(x.backend(), x.shape(), DType::F32);
     const float keep_scale = 1.0f / (1.0f - p);
-    for (std::size_t i = 0; i < rv.size(); ++i) mask[i] = rv[i] >= p ? keep_scale : 0.0f;
-    auto mask_tensor = Tensor::from_cpu(x.backend(), x.shape(), DType::F32, mask.data());
-    auto out = mul(x, mask_tensor);
-    autograd::record_op("dropout_f32", {x.id(), mask_tensor.id()}, {out.id()}, false);
+    const std::uint32_t seed = g_dropout_counter.fetch_add(0x9e3779b9u, std::memory_order_relaxed) ^
+                               static_cast<std::uint32_t>(x.id() * 0x85ebca6bu);
+    auto k = x.backend().kernels.get("dropout_f32");
+    const int n = static_cast<int>(x.numel());
+    k.set_arg(0, x.buffer());
+    k.set_arg(1, out.buffer());
+    k.set_arg(2, mask_tensor.buffer());
+    k.set_arg(3, n);
+    k.set_arg(4, p);
+    k.set_arg(5, keep_scale);
+    k.set_arg(6, seed);
+    k.launch1d(round_up(static_cast<std::size_t>(n), kLocal1D), kLocal1D);
+    autograd::record_op("dropout_f32", {x.id()}, {out.id(), mask_tensor.id()});
+    if (autograd::is_enabled() && x.requires_grad()) {
+        out.set_requires_grad(true);
+        out._set_grad_fn(std::make_shared<DropoutBackwardNode>(x, mask_tensor));
+    }
     return out;
 }
 
@@ -151,30 +183,24 @@ Tensor masked_fill(const Tensor& x, const Tensor& mask, float value) {
     MCL_CHECK(x.dtype() == DType::F32, "masked_fill supports f32 input only");
     MCL_CHECK(x.shape() == mask.shape(), "masked_fill requires same-shape mask");
     MCL_CHECK(x.backend_ptr() == mask.backend_ptr(), "masked_fill requires tensors on same backend");
-    const auto xv = x.to_vector<float>();
-    std::vector<float> keep(xv.size(), 1.0f);
-    if (mask.dtype() == DType::F32) {
-        const auto mv = mask.to_vector<float>();
-        for (std::size_t i = 0; i < mv.size(); ++i) keep[i] = mv[i] != 0.0f ? 0.0f : 1.0f;
-    } else if (mask.dtype() == DType::I32) {
-        const auto mv = mask.to_vector<std::int32_t>();
-        for (std::size_t i = 0; i < mv.size(); ++i) keep[i] = mv[i] != 0 ? 0.0f : 1.0f;
-    } else if (mask.dtype() == DType::U8) {
-        const auto mv = mask.to_vector<std::uint8_t>();
-        for (std::size_t i = 0; i < mv.size(); ++i) keep[i] = mv[i] != 0 ? 0.0f : 1.0f;
-    } else {
-        MCL_CHECK(false, "masked_fill mask must be f32, i32, or u8");
-    }
-    std::vector<float> out_host(xv.size(), value);
-    for (std::size_t i = 0; i < xv.size(); ++i) {
-        if (keep[i] != 0.0f) out_host[i] = xv[i];
-    }
-    auto out = Tensor::from_cpu(x.backend(), x.shape(), DType::F32, out_host.data());
-    auto keep_tensor = Tensor::from_cpu(x.backend(), x.shape(), DType::F32, keep.data());
-    autograd::record_op("masked_fill_f32", {x.id(), mask.id()}, {out.id()}, false);
+    std::string kernel_name;
+    if (mask.dtype() == DType::F32) kernel_name = "masked_fill_f32_mask_f32";
+    else if (mask.dtype() == DType::I32) kernel_name = "masked_fill_f32_mask_i32";
+    else if (mask.dtype() == DType::U8) kernel_name = "masked_fill_f32_mask_u8";
+    else MCL_CHECK(false, "masked_fill mask must be f32, i32, or u8");
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    auto k = x.backend().kernels.get(kernel_name);
+    const int n = static_cast<int>(x.numel());
+    k.set_arg(0, x.buffer());
+    k.set_arg(1, mask.buffer());
+    k.set_arg(2, out.buffer());
+    k.set_arg(3, value);
+    k.set_arg(4, n);
+    k.launch1d(round_up(static_cast<std::size_t>(n), kLocal1D), kLocal1D);
+    autograd::record_op(kernel_name, {x.id(), mask.id()}, {out.id()});
     if (autograd::is_enabled() && x.requires_grad()) {
         out.set_requires_grad(true);
-        out._set_grad_fn(std::make_shared<MaskedFillBackwardNode>(x, keep_tensor));
+        out._set_grad_fn(std::make_shared<MaskedFillBackwardNode>(x, mask));
     }
     return out;
 }

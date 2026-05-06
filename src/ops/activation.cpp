@@ -59,6 +59,15 @@ struct GeluBackwardNode : autograd::Node {
     }
 };
 
+struct SwiGLUBackwardNode : autograd::Node {
+    Tensor packed;
+    explicit SwiGLUBackwardNode(Tensor packed_value) : packed(std::move(packed_value)) {}
+    std::vector<Tensor> inputs() const override { return {packed}; }
+    void backward(const Tensor& grad_output) override {
+        if (packed.requires_grad()) packed.backward(swiglu_backward_op(packed, grad_output));
+    }
+};
+
 } // namespace
 
 Tensor relu(const Tensor& x) {
@@ -88,6 +97,45 @@ Tensor gelu_backward_op(const Tensor& x, const Tensor& grad_out) {
 }
 
 Tensor silu(const Tensor& x) { return unary(x, "silu_f32"); }
+
+Tensor swiglu(const Tensor& packed) {
+    MCL_CHECK(packed.dtype() == DType::F32, "swiglu supports f32 only");
+    MCL_CHECK(packed.ndim() == 2 && packed.shape()[1] % 2 == 0, "swiglu expects [rows, 2*hidden]");
+    const int rows = static_cast<int>(packed.shape()[0]);
+    const int hidden = static_cast<int>(packed.shape()[1] / 2);
+    auto out = Tensor::empty(packed.backend(), {packed.shape()[0], hidden}, DType::F32);
+    auto k = packed.backend().kernels.get("swiglu_f32");
+    k.set_arg(0, packed.buffer());
+    k.set_arg(1, out.buffer());
+    k.set_arg(2, rows);
+    k.set_arg(3, hidden);
+    k.launch1d(round_up(static_cast<std::size_t>(rows * hidden), kLocal), kLocal);
+    autograd::record_op("swiglu_f32", {packed.id()}, {out.id()});
+    if (autograd::is_enabled() && packed.requires_grad()) {
+        out.set_requires_grad(true);
+        out._set_grad_fn(std::make_shared<SwiGLUBackwardNode>(packed));
+    }
+    return out;
+}
+
+Tensor swiglu_backward_op(const Tensor& packed, const Tensor& grad_out) {
+    MCL_CHECK(packed.dtype() == DType::F32 && grad_out.dtype() == DType::F32, "swiglu_backward supports f32 only");
+    MCL_CHECK(packed.ndim() == 2 && packed.shape()[1] % 2 == 0, "swiglu_backward expects packed [rows, 2*hidden]");
+    MCL_CHECK(grad_out.shape() == Shape({packed.shape()[0], packed.shape()[1] / 2}), "swiglu_backward grad_out shape mismatch");
+    const int rows = static_cast<int>(packed.shape()[0]);
+    const int hidden = static_cast<int>(packed.shape()[1] / 2);
+    auto out = Tensor::empty(packed.backend(), packed.shape(), DType::F32);
+    auto k = packed.backend().kernels.get("swiglu_backward_f32");
+    k.set_arg(0, packed.buffer());
+    k.set_arg(1, grad_out.buffer());
+    k.set_arg(2, out.buffer());
+    k.set_arg(3, rows);
+    k.set_arg(4, hidden);
+    k.launch1d(round_up(static_cast<std::size_t>(packed.numel()), kLocal), kLocal);
+    autograd::record_op("swiglu_backward_f32", {packed.id(), grad_out.id()}, {out.id()});
+    return out;
+}
+
 Tensor exp(const Tensor& x) { return unary(x, "exp_f32"); }
 Tensor sqrt(const Tensor& x) { return unary(x, "sqrt_f32"); }
 Tensor rsqrt(const Tensor& x) { return unary(x, "rsqrt_f32"); }

@@ -15,6 +15,8 @@
 
 namespace motifcl {
 
+void dropout_manual_seed(std::uint32_t seed);
+
 namespace {
 std::atomic<int> g_next_tensor_id{1};
 struct BackwardEngine;
@@ -95,6 +97,7 @@ struct BackwardEngine {
 
 void manual_seed(std::uint32_t seed) {
     host_rng().seed(seed);
+    dropout_manual_seed(seed);
 }
 
 Tensor::Tensor(Backend& backend, Shape shape, DType dtype, std::shared_ptr<Storage> storage, std::size_t offset) {
