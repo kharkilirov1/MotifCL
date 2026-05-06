@@ -8,6 +8,8 @@ class Adam : public Optimizer {
 public:
     Adam(std::vector<nn::Parameter*> params, float lr = 1e-3f, float beta1 = 0.9f, float beta2 = 0.999f, float eps = 1e-8f);
     void step() override;
+    void set_lr(float lr) override { lr_ = lr; }
+    float lr() const override { return lr_; }
 
 private:
     std::vector<Tensor> m_;

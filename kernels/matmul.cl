@@ -148,6 +148,158 @@ __kernel void matmul_flags_f32(__global const float* A,
     C[row * N + col] = acc;
 }
 
+__kernel void matmul_transa_rb4_f32(__global const float* A,
+                                    __global const float* B,
+                                    __global float* C,
+                                    int M,
+                                    int N,
+                                    int K) {
+    int lcol = get_local_id(0);
+    int lrow = get_local_id(1);
+    int lid = lrow * RB_LX + lcol;
+    int block_col = get_group_id(0) * RB_N;
+    int block_row = get_group_id(1) * RB_M;
+
+    __local float As[RB_M][RB_K];
+    __local float Bs[RB_K][RB_N];
+
+    float acc00 = 0.0f, acc01 = 0.0f, acc02 = 0.0f, acc03 = 0.0f;
+    float acc10 = 0.0f, acc11 = 0.0f, acc12 = 0.0f, acc13 = 0.0f;
+    float acc20 = 0.0f, acc21 = 0.0f, acc22 = 0.0f, acc23 = 0.0f;
+    float acc30 = 0.0f, acc31 = 0.0f, acc32 = 0.0f, acc33 = 0.0f;
+
+    for (int kt = 0; kt < K; kt += RB_K) {
+        for (int idx = lid; idx < RB_M * RB_K; idx += RB_LX * RB_LY) {
+            int kk = idx / RB_M;
+            int r = idx - kk * RB_M;
+            int gr = block_row + r;
+            int gk = kt + kk;
+            As[r][kk] = (gr < M && gk < K) ? A[gk * M + gr] : 0.0f;
+        }
+        for (int idx = lid; idx < RB_K * RB_N; idx += RB_LX * RB_LY) {
+            int kk = idx / RB_N;
+            int c = idx - kk * RB_N;
+            int gk = kt + kk;
+            int gc = block_col + c;
+            Bs[kk][c] = (gk < K && gc < N) ? B[gk * N + gc] : 0.0f;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        int rr = lrow * RB_THREAD_M;
+        int cc = lcol * RB_THREAD_N;
+        for (int kk = 0; kk < RB_K; ++kk) {
+            float a0 = As[rr + 0][kk];
+            float a1 = As[rr + 1][kk];
+            float a2 = As[rr + 2][kk];
+            float a3 = As[rr + 3][kk];
+            float b0 = Bs[kk][cc + 0];
+            float b1 = Bs[kk][cc + 1];
+            float b2 = Bs[kk][cc + 2];
+            float b3 = Bs[kk][cc + 3];
+            acc00 += a0 * b0; acc01 += a0 * b1; acc02 += a0 * b2; acc03 += a0 * b3;
+            acc10 += a1 * b0; acc11 += a1 * b1; acc12 += a1 * b2; acc13 += a1 * b3;
+            acc20 += a2 * b0; acc21 += a2 * b1; acc22 += a2 * b2; acc23 += a2 * b3;
+            acc30 += a3 * b0; acc31 += a3 * b1; acc32 += a3 * b2; acc33 += a3 * b3;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    int row0 = block_row + lrow * RB_THREAD_M;
+    int col0 = block_col + lcol * RB_THREAD_N;
+    if (row0 + 0 < M && col0 + 0 < N) C[(row0 + 0) * N + col0 + 0] = acc00;
+    if (row0 + 0 < M && col0 + 1 < N) C[(row0 + 0) * N + col0 + 1] = acc01;
+    if (row0 + 0 < M && col0 + 2 < N) C[(row0 + 0) * N + col0 + 2] = acc02;
+    if (row0 + 0 < M && col0 + 3 < N) C[(row0 + 0) * N + col0 + 3] = acc03;
+    if (row0 + 1 < M && col0 + 0 < N) C[(row0 + 1) * N + col0 + 0] = acc10;
+    if (row0 + 1 < M && col0 + 1 < N) C[(row0 + 1) * N + col0 + 1] = acc11;
+    if (row0 + 1 < M && col0 + 2 < N) C[(row0 + 1) * N + col0 + 2] = acc12;
+    if (row0 + 1 < M && col0 + 3 < N) C[(row0 + 1) * N + col0 + 3] = acc13;
+    if (row0 + 2 < M && col0 + 0 < N) C[(row0 + 2) * N + col0 + 0] = acc20;
+    if (row0 + 2 < M && col0 + 1 < N) C[(row0 + 2) * N + col0 + 1] = acc21;
+    if (row0 + 2 < M && col0 + 2 < N) C[(row0 + 2) * N + col0 + 2] = acc22;
+    if (row0 + 2 < M && col0 + 3 < N) C[(row0 + 2) * N + col0 + 3] = acc23;
+    if (row0 + 3 < M && col0 + 0 < N) C[(row0 + 3) * N + col0 + 0] = acc30;
+    if (row0 + 3 < M && col0 + 1 < N) C[(row0 + 3) * N + col0 + 1] = acc31;
+    if (row0 + 3 < M && col0 + 2 < N) C[(row0 + 3) * N + col0 + 2] = acc32;
+    if (row0 + 3 < M && col0 + 3 < N) C[(row0 + 3) * N + col0 + 3] = acc33;
+}
+
+__kernel void matmul_transb_rb4_f32(__global const float* A,
+                                    __global const float* B,
+                                    __global float* C,
+                                    int M,
+                                    int N,
+                                    int K) {
+    int lcol = get_local_id(0);
+    int lrow = get_local_id(1);
+    int lid = lrow * RB_LX + lcol;
+    int block_col = get_group_id(0) * RB_N;
+    int block_row = get_group_id(1) * RB_M;
+
+    __local float As[RB_M][RB_K];
+    __local float Bs[RB_K][RB_N];
+
+    float acc00 = 0.0f, acc01 = 0.0f, acc02 = 0.0f, acc03 = 0.0f;
+    float acc10 = 0.0f, acc11 = 0.0f, acc12 = 0.0f, acc13 = 0.0f;
+    float acc20 = 0.0f, acc21 = 0.0f, acc22 = 0.0f, acc23 = 0.0f;
+    float acc30 = 0.0f, acc31 = 0.0f, acc32 = 0.0f, acc33 = 0.0f;
+
+    for (int kt = 0; kt < K; kt += RB_K) {
+        for (int idx = lid; idx < RB_M * RB_K; idx += RB_LX * RB_LY) {
+            int r = idx / RB_K;
+            int kk = idx - r * RB_K;
+            int gr = block_row + r;
+            int gk = kt + kk;
+            As[r][kk] = (gr < M && gk < K) ? A[gr * K + gk] : 0.0f;
+        }
+        for (int idx = lid; idx < RB_K * RB_N; idx += RB_LX * RB_LY) {
+            int c = idx / RB_K;
+            int kk = idx - c * RB_K;
+            int gk = kt + kk;
+            int gc = block_col + c;
+            Bs[kk][c] = (gk < K && gc < N) ? B[gc * K + gk] : 0.0f;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        int rr = lrow * RB_THREAD_M;
+        int cc = lcol * RB_THREAD_N;
+        for (int kk = 0; kk < RB_K; ++kk) {
+            float a0 = As[rr + 0][kk];
+            float a1 = As[rr + 1][kk];
+            float a2 = As[rr + 2][kk];
+            float a3 = As[rr + 3][kk];
+            float b0 = Bs[kk][cc + 0];
+            float b1 = Bs[kk][cc + 1];
+            float b2 = Bs[kk][cc + 2];
+            float b3 = Bs[kk][cc + 3];
+            acc00 += a0 * b0; acc01 += a0 * b1; acc02 += a0 * b2; acc03 += a0 * b3;
+            acc10 += a1 * b0; acc11 += a1 * b1; acc12 += a1 * b2; acc13 += a1 * b3;
+            acc20 += a2 * b0; acc21 += a2 * b1; acc22 += a2 * b2; acc23 += a2 * b3;
+            acc30 += a3 * b0; acc31 += a3 * b1; acc32 += a3 * b2; acc33 += a3 * b3;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    int row0 = block_row + lrow * RB_THREAD_M;
+    int col0 = block_col + lcol * RB_THREAD_N;
+    if (row0 + 0 < M && col0 + 0 < N) C[(row0 + 0) * N + col0 + 0] = acc00;
+    if (row0 + 0 < M && col0 + 1 < N) C[(row0 + 0) * N + col0 + 1] = acc01;
+    if (row0 + 0 < M && col0 + 2 < N) C[(row0 + 0) * N + col0 + 2] = acc02;
+    if (row0 + 0 < M && col0 + 3 < N) C[(row0 + 0) * N + col0 + 3] = acc03;
+    if (row0 + 1 < M && col0 + 0 < N) C[(row0 + 1) * N + col0 + 0] = acc10;
+    if (row0 + 1 < M && col0 + 1 < N) C[(row0 + 1) * N + col0 + 1] = acc11;
+    if (row0 + 1 < M && col0 + 2 < N) C[(row0 + 1) * N + col0 + 2] = acc12;
+    if (row0 + 1 < M && col0 + 3 < N) C[(row0 + 1) * N + col0 + 3] = acc13;
+    if (row0 + 2 < M && col0 + 0 < N) C[(row0 + 2) * N + col0 + 0] = acc20;
+    if (row0 + 2 < M && col0 + 1 < N) C[(row0 + 2) * N + col0 + 1] = acc21;
+    if (row0 + 2 < M && col0 + 2 < N) C[(row0 + 2) * N + col0 + 2] = acc22;
+    if (row0 + 2 < M && col0 + 3 < N) C[(row0 + 2) * N + col0 + 3] = acc23;
+    if (row0 + 3 < M && col0 + 0 < N) C[(row0 + 3) * N + col0 + 0] = acc30;
+    if (row0 + 3 < M && col0 + 1 < N) C[(row0 + 3) * N + col0 + 1] = acc31;
+    if (row0 + 3 < M && col0 + 2 < N) C[(row0 + 3) * N + col0 + 2] = acc32;
+    if (row0 + 3 < M && col0 + 3 < N) C[(row0 + 3) * N + col0 + 3] = acc33;
+}
+
 __kernel void matmul_q8_0_f32(__global const char* A,
                               __global const char* B,
                               __global float* C,

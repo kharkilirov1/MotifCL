@@ -13,8 +13,10 @@
 #include <motifcl/runtime/program.hpp>
 #include <motifcl/tensor/tensor.hpp>
 #include <motifcl/ops/basic_ops.hpp>
+#include <motifcl/ops/fp16.hpp>
 #include <motifcl/ops/matmul.hpp>
 #include <motifcl/ops/reduce.hpp>
+#include <motifcl/ops/indexing.hpp>
 #include <motifcl/ops/activation.hpp>
 #include <motifcl/ops/norm.hpp>
 #include <motifcl/ops/attention.hpp>
@@ -37,6 +39,10 @@
 #include <motifcl/motif/sarc_residual.hpp>
 #include <motifcl/train/adam.hpp>
 #include <motifcl/train/sgd.hpp>
+#include <motifcl/train/dataloader.hpp>
+#include <motifcl/train/scheduler.hpp>
+#include <motifcl/train/training_utils.hpp>
 #include <motifcl/train/trainer.hpp>
+#include <motifcl/serialization.hpp>
 
 namespace mcl = motifcl;

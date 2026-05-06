@@ -23,5 +23,9 @@ install(TARGETS _motifcl
     RUNTIME DESTINATION motifcl
     ARCHIVE DESTINATION motifcl
 )
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/motifcl/ DESTINATION motifcl FILES_MATCHING PATTERN "*.py")
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/motifcl/ DESTINATION motifcl FILES_MATCHING
+    PATTERN "*.py"
+    PATTERN "*.pyi"
+    PATTERN "py.typed"
+)
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/kernels DESTINATION motifcl)

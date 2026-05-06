@@ -102,6 +102,16 @@ int main() {
             if (std::fabs(replayed[i] - replay_ref[i]) > 1e-5f) return 17;
         }
 
+        auto executor = ag::compile_graph_executor(graph);
+        if (!executor.replayable() || !executor.runtime_plan().compatible || executor.runtime_plan().bindings.empty()) return 32;
+        motifcl::scale_inplace(E, 0.0f);
+        executor.execute();
+        if (executor.executions() != 1) return 33;
+        auto executor_values = V.to_vector<float>();
+        for (std::size_t i = 0; i < replay_ref.size(); ++i) {
+            if (std::fabs(executor_values[i] - replay_ref[i]) > 1e-5f) return 34;
+        }
+
         ag::GraphCaptureGuard guard;
         auto R = motifcl::relu(C);
         auto guarded = guard.finish();

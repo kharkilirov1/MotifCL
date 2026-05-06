@@ -18,6 +18,8 @@ namespace autograd { class Node; }
 
 class Tensor;
 
+void manual_seed(std::uint32_t seed);
+
 struct TensorImpl {
     int id = 0;
     Backend* backend = nullptr;

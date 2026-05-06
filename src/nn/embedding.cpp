@@ -20,7 +20,7 @@ Tensor embedding_weight_backward(const Tensor& indices, const Tensor& grad_out, 
     const int vocab_size = static_cast<int>(weight_shape[0]);
     const int embed_dim = static_cast<int>(weight_shape[1]);
     MCL_CHECK(grad_out.numel() == indices.numel() * embed_dim, "embedding_weight_backward grad_out shape mismatch");
-    auto out = Tensor::zeros(indices.backend(), weight_shape, DType::F32);
+    auto out = Tensor::empty(indices.backend(), weight_shape, DType::F32);
     auto k = indices.backend().kernels.get("embedding_weight_backward_f32_i32");
     int n = vocab_size * embed_dim;
     k.set_arg(0, indices.buffer());
@@ -41,7 +41,7 @@ Tensor position_embedding_backward(const Tensor& grad_out, const Shape& position
     const int embed_dim = static_cast<int>(position_shape[1]);
     MCL_CHECK(position_shape[0] >= seq_len, "position_embedding_backward position table shorter than sequence");
     MCL_CHECK(grad_out.numel() == batch * seq_len * embed_dim, "position_embedding_backward grad_out shape mismatch");
-    auto out = Tensor::zeros(grad_out.backend(), position_shape, DType::F32);
+    auto out = Tensor::empty(grad_out.backend(), position_shape, DType::F32);
     auto k = grad_out.backend().kernels.get("position_embedding_backward_f32_i32");
     int n = static_cast<int>(seq_len * embed_dim);
     k.set_arg(0, grad_out.buffer());
@@ -62,6 +62,8 @@ struct EmbeddingBackwardNode : autograd::Node {
     EmbeddingBackwardNode(Tensor indices_value, Tensor weight_value)
         : indices(std::move(indices_value)), weight(std::move(weight_value)) {}
 
+    std::vector<Tensor> inputs() const override { return {weight}; }
+
     void backward(const Tensor& grad_output) override {
         if (weight.requires_grad()) weight.backward(embedding_weight_backward(indices, grad_output, weight.shape()));
     }
@@ -81,6 +83,8 @@ struct TokenPositionEmbeddingBackwardNode : autograd::Node {
           position_weight(std::move(position_weight_value)),
           batch(batch_value),
           seq_len(seq_len_value) {}
+
+    std::vector<Tensor> inputs() const override { return {token_weight, position_weight}; }
 
     void backward(const Tensor& grad_output) override {
         if (token_weight.requires_grad()) {
@@ -107,7 +111,7 @@ Tensor Embedding::forward(const Tensor& indices) {
 
     const int64_t token_count = indices.numel();
     Shape out_shape = indices.ndim() == 1 ? Shape{token_count, embed_dim_} : Shape{indices.shape()[0], indices.shape()[1], embed_dim_};
-    auto out = Tensor::zeros(indices.backend(), out_shape, DType::F32);
+    auto out = Tensor::empty(indices.backend(), out_shape, DType::F32);
     auto k = indices.backend().kernels.get("embedding_gather_f32_i32");
     int n = static_cast<int>(token_count * embed_dim_);
     k.set_arg(0, weight.data.buffer());
@@ -138,7 +142,7 @@ Tensor token_position_embedding(const Tensor& token_ids, const Tensor& token_wei
     MCL_CHECK(position_weight.shape()[1] == D, "position embedding dim mismatch");
     MCL_CHECK(position_weight.shape()[0] >= T, "position embedding table is shorter than sequence length");
 
-    auto out = Tensor::zeros(token_ids.backend(), {B * T, D}, DType::F32);
+    auto out = Tensor::empty(token_ids.backend(), {B * T, D}, DType::F32);
     auto k = token_ids.backend().kernels.get("token_position_embedding_f32_i32");
     int n = static_cast<int>(B * T * D);
     k.set_arg(0, token_weight.buffer());

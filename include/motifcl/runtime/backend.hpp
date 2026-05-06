@@ -17,7 +17,7 @@ struct BackendLifetime {
 class KernelCache {
 public:
     KernelCache() = default;
-    KernelCache(OpenCLContext& ctx, std::string kernel_dir);
+    KernelCache(OpenCLContext& ctx, std::string kernel_dir, Profiler* profiler = nullptr);
 
     Kernel get(const std::string& kernel_name);
     Kernel get_matmul_tiled_variant(int tile);
@@ -26,6 +26,7 @@ public:
 
 private:
     OpenCLContext* ctx_ = nullptr;
+    Profiler* profiler_ = nullptr;
     std::string kernel_dir_;
     std::unordered_map<std::string, std::shared_ptr<Program>> programs_;
 

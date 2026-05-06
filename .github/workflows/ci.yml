@@ -18,7 +18,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ocl-icd-opencl-dev pocl-opencl-icd clinfo
+          sudo apt-get install -y ocl-icd-opencl-dev pocl-opencl-icd clinfo clang-tidy
 
       - name: Configure
         run: >
@@ -36,6 +36,10 @@ jobs:
       - name: Test
         if: runner.os == 'Linux'
         run: ctest --test-dir build -C Debug --output-on-failure
+
+      - name: Clang-tidy smoke
+        if: runner.os == 'Linux'
+        run: clang-tidy --version
 
       - name: Skip runtime tests on Windows hosted runners
         if: runner.os == 'Windows'
@@ -59,3 +63,38 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel
+
+      - name: Wheel smoke
+        run: |
+          python -m pip install dist/*.whl pytest
+          python - <<'PY'
+          import motifcl as mcl
+          b = mcl.Backend.create()
+          mcl.manual_seed(123)
+          x = mcl.ones(b, [2, 3])
+          bias = mcl.tensor_f32(b, [3], [1, 2, 3])
+          assert mcl.add(x, bias).cpu() == [2, 3, 4, 2, 3, 4]
+          print("python smoke passed")
+          PY
+          pytest tests/python
+
+  sanitizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux OpenCL ICD loader
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ocl-icd-opencl-dev pocl-opencl-icd
+
+      - name: Configure ASan/UBSan
+        run: cmake --preset asan
+
+      - name: Build ASan/UBSan
+        run: cmake --build --preset asan --parallel 2
+
+      - name: Test ASan/UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: ctest --preset asan --output-on-failure

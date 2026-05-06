@@ -19,6 +19,7 @@ std::size_t round_up(std::size_t x, std::size_t multiple) { return ((x + multipl
 constexpr std::size_t kFlashAttentionWorkgroup = 128;
 constexpr int64_t kFlashAttentionMaxHeadDim = 128;
 constexpr std::size_t kFlashAttentionLocalBytes = 24 * 1024;
+constexpr int64_t kStagedAttentionMaxSeqLen = 128;
 
 struct MultiHeadShape {
     int64_t total_tokens = 0;
@@ -58,6 +59,10 @@ bool supports_flash_attention_kernel(const Backend& backend, const MultiHeadShap
            info.local_mem_size >= kFlashAttentionLocalBytes;
 }
 
+bool supports_staged_attention_backward_kernel(const Backend& backend, const MultiHeadShape& s) {
+    return supports_flash_attention_kernel(backend, s) && s.seq_len <= kStagedAttentionMaxSeqLen;
+}
+
 struct MultiHeadAttentionGradients {
     Tensor dq;
     Tensor dk;
@@ -65,7 +70,7 @@ struct MultiHeadAttentionGradients {
 };
 
 MultiHeadAttentionGradients multihead_attention_backward_fused(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& grad_out,
-                                                               int n_head, bool causal, int64_t batch_size, int64_t seq_len);
+                                                                int n_head, bool causal, int64_t batch_size, int64_t seq_len);
 
 struct MultiHeadAttentionBackwardNode : autograd::Node {
     Tensor q, k, v;
@@ -85,6 +90,8 @@ struct MultiHeadAttentionBackwardNode : autograd::Node {
           batch_size(batch_size_value),
           seq_len(seq_len_value) {}
 
+    std::vector<Tensor> inputs() const override { return {q, k, v}; }
+
     void backward(const Tensor& grad_output) override {
         if (!(q.requires_grad() || k.requires_grad() || v.requires_grad())) return;
         auto grads = multihead_attention_backward_fused(q, k, v, grad_output, n_head, causal, batch_size, seq_len);
@@ -98,7 +105,7 @@ struct MultiHeadAttentionBackwardNode : autograd::Node {
 Tensor softmax_rows(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::F32, "softmax_rows supports f32 only");
     MCL_CHECK(x.ndim() == 2, "softmax_rows expects rank-2 tensor");
-    auto out = Tensor::zeros(x.backend(), x.shape(), DType::F32);
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     auto k = x.backend().kernels.get("softmax_rows_f32");
     int rows = static_cast<int>(x.shape()[0]);
     int cols = static_cast<int>(x.shape()[1]);
@@ -114,7 +121,7 @@ Tensor softmax_rows(const Tensor& x) {
 Tensor causal_mask(const Tensor& scores, float mask_value) {
     MCL_CHECK(scores.dtype() == DType::F32, "causal_mask supports f32 only");
     MCL_CHECK(scores.ndim() == 2, "causal_mask expects rank-2 tensor");
-    auto out = Tensor::zeros(scores.backend(), scores.shape(), DType::F32);
+    auto out = Tensor::empty(scores.backend(), scores.shape(), DType::F32);
     auto k = scores.backend().kernels.get("causal_mask_f32");
     int rows = static_cast<int>(scores.shape()[0]);
     int cols = static_cast<int>(scores.shape()[1]);
@@ -141,7 +148,7 @@ Tensor attention_apply(const Tensor& probs, const Tensor& v) {
 Tensor multihead_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                            int n_head, bool causal, int64_t batch_size, int64_t seq_len) {
     auto s = validate_multihead_attention(q, k, v, n_head, batch_size, seq_len, "multihead_attention");
-    auto out = Tensor::zeros(q.backend(), q.shape(), DType::F32);
+    auto out = Tensor::empty(q.backend(), q.shape(), DType::F32);
     const bool use_flash = supports_flash_attention_kernel(q.backend(), s);
     const std::string kernel_name = use_flash ? "multihead_attention_flash_f32" : "multihead_attention_f32";
     auto kernel = q.backend().kernels.get(kernel_name);
@@ -176,13 +183,129 @@ Tensor multihead_attention(const Tensor& q, const Tensor& k, const Tensor& v,
 
 namespace {
 
+MultiHeadAttentionGradients multihead_attention_backward_staged(const Tensor& q, const Tensor& k, const Tensor& v,
+                                                                const Tensor& grad_out,
+                                                                int n_head, bool causal,
+                                                                const MultiHeadShape& s) {
+    auto dq = Tensor::empty(q.backend(), q.shape(), DType::F32);
+    auto dk = Tensor::empty(k.backend(), k.shape(), DType::F32);
+    auto dv = Tensor::empty(v.backend(), v.shape(), DType::F32);
+
+    const auto rows = static_cast<std::size_t>(s.batch_size * n_head * s.seq_len);
+    const auto pairs = rows * static_cast<std::size_t>(s.seq_len);
+    auto probs = Tensor::empty(q.backend(), {static_cast<int64_t>(rows), s.seq_len}, DType::F32);
+    auto dp = Tensor::empty(q.backend(), probs.shape(), DType::F32);
+    auto ds = Tensor::empty(q.backend(), probs.shape(), DType::F32);
+    const int batch_i = static_cast<int>(s.batch_size);
+    const int tokens_i = static_cast<int>(s.seq_len);
+    const int channels_i = static_cast<int>(s.channels);
+    const int head_dim_i = static_cast<int>(s.head_dim);
+    const int causal_i = causal ? 1 : 0;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(s.head_dim));
+
+    {
+        auto kernel = q.backend().kernels.get("attention_backward_probs_f32");
+        kernel.set_arg(0, q.buffer());
+        kernel.set_arg(1, k.buffer());
+        kernel.set_arg(2, probs.buffer());
+        kernel.set_arg(3, batch_i);
+        kernel.set_arg(4, tokens_i);
+        kernel.set_arg(5, channels_i);
+        kernel.set_arg(6, n_head);
+        kernel.set_arg(7, head_dim_i);
+        kernel.set_arg(8, causal_i);
+        kernel.set_arg(9, scale);
+        kernel.launch2d(kFlashAttentionWorkgroup, rows, kFlashAttentionWorkgroup, 1);
+    }
+
+    {
+        auto kernel = q.backend().kernels.get("attention_backward_dp_f32");
+        kernel.set_arg(0, grad_out.buffer());
+        kernel.set_arg(1, v.buffer());
+        kernel.set_arg(2, dp.buffer());
+        kernel.set_arg(3, batch_i);
+        kernel.set_arg(4, tokens_i);
+        kernel.set_arg(5, channels_i);
+        kernel.set_arg(6, n_head);
+        kernel.set_arg(7, head_dim_i);
+        kernel.set_arg(8, causal_i);
+        kernel.launch1d(round_up(pairs, 256), 256);
+    }
+
+    {
+        auto kernel = q.backend().kernels.get("attention_backward_ds_f32");
+        kernel.set_arg(0, probs.buffer());
+        kernel.set_arg(1, dp.buffer());
+        kernel.set_arg(2, ds.buffer());
+        kernel.set_arg(3, batch_i);
+        kernel.set_arg(4, tokens_i);
+        kernel.set_arg(5, n_head);
+        kernel.set_arg(6, causal_i);
+        kernel.set_arg(7, scale);
+        kernel.launch2d(kFlashAttentionWorkgroup, rows, kFlashAttentionWorkgroup, 1);
+    }
+
+    const auto total = static_cast<std::size_t>(q.numel());
+    {
+        auto kernel = q.backend().kernels.get("attention_backward_apply_q_f32");
+        kernel.set_arg(0, ds.buffer());
+        kernel.set_arg(1, k.buffer());
+        kernel.set_arg(2, dq.buffer());
+        kernel.set_arg(3, batch_i);
+        kernel.set_arg(4, tokens_i);
+        kernel.set_arg(5, channels_i);
+        kernel.set_arg(6, n_head);
+        kernel.set_arg(7, head_dim_i);
+        kernel.set_arg(8, causal_i);
+        kernel.launch1d(round_up(total, 256), 256);
+    }
+
+    {
+        auto kernel = q.backend().kernels.get("attention_backward_apply_k_f32");
+        kernel.set_arg(0, ds.buffer());
+        kernel.set_arg(1, q.buffer());
+        kernel.set_arg(2, dk.buffer());
+        kernel.set_arg(3, batch_i);
+        kernel.set_arg(4, tokens_i);
+        kernel.set_arg(5, channels_i);
+        kernel.set_arg(6, n_head);
+        kernel.set_arg(7, head_dim_i);
+        kernel.set_arg(8, causal_i);
+        kernel.launch1d(round_up(total, 256), 256);
+    }
+
+    {
+        auto kernel = q.backend().kernels.get("attention_backward_apply_v_f32");
+        kernel.set_arg(0, probs.buffer());
+        kernel.set_arg(1, grad_out.buffer());
+        kernel.set_arg(2, dv.buffer());
+        kernel.set_arg(3, batch_i);
+        kernel.set_arg(4, tokens_i);
+        kernel.set_arg(5, channels_i);
+        kernel.set_arg(6, n_head);
+        kernel.set_arg(7, head_dim_i);
+        kernel.set_arg(8, causal_i);
+        kernel.launch1d(round_up(total, 256), 256);
+    }
+
+    autograd::record_replay_op("multihead_attention_backward_staged_f32",
+                               {q.id(), k.id(), v.id(), grad_out.id()},
+                               {dq.id(), dk.id(), dv.id()},
+                               {probs.id(), dp.id(), ds.id()},
+                               []() {});
+    return {dq, dk, dv};
+}
+
 MultiHeadAttentionGradients multihead_attention_backward_fused(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& grad_out,
                                                                int n_head, bool causal, int64_t batch_size, int64_t seq_len) {
     auto s = validate_multihead_attention(q, k, v, n_head, batch_size, seq_len, "multihead_attention_backward_fused");
     MCL_CHECK(grad_out.dtype() == DType::F32 && grad_out.shape() == q.shape(), "multihead_attention_backward_fused grad_out shape/dtype mismatch");
-    auto dq = Tensor::zeros(q.backend(), q.shape(), DType::F32);
-    auto dk = Tensor::zeros(k.backend(), k.shape(), DType::F32);
-    auto dv = Tensor::zeros(v.backend(), v.shape(), DType::F32);
+    if (supports_staged_attention_backward_kernel(q.backend(), s)) {
+        return multihead_attention_backward_staged(q, k, v, grad_out, n_head, causal, s);
+    }
+    auto dq = Tensor::empty(q.backend(), q.shape(), DType::F32);
+    auto dk = Tensor::empty(k.backend(), k.shape(), DType::F32);
+    auto dv = Tensor::empty(v.backend(), v.shape(), DType::F32);
     const bool use_flash = supports_flash_attention_kernel(q.backend(), s);
     const std::string kernel_name = use_flash ? "multihead_attention_backward_flash_f32" : "multihead_attention_backward_fused_f32";
     auto kernel = q.backend().kernels.get(kernel_name);

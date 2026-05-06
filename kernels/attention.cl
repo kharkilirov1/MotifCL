@@ -37,6 +37,7 @@ __kernel void rope_batch_f32(__global float* x, int rows, int cols) {
 #define FA_WG 128
 #define FA_TILE 16
 #define FA_MAX_HEAD_DIM 128
+#define FA_STAGED_MAX_TOKENS 128
 
 inline float fa_tile_max(__local float* scores, int valid) {
     float m = -3.402823466e+38F;
@@ -824,4 +825,223 @@ __kernel void multihead_attention_backward_flash_f32(__global const float* q,
         barrier(CLK_LOCAL_MEM_FENCE);
     }
     if (d_out < head_dim) grad_v[(b * tokens + key_token) * channels + head_offset + d_out] = acc;
+}
+
+__kernel void attention_backward_probs_f32(__global const float* q,
+                                           __global const float* k,
+                                           __global float* probs,
+                                           int batch,
+                                           int tokens,
+                                           int channels,
+                                           int n_head,
+                                           int head_dim,
+                                           int causal,
+                                           float scale) {
+    int lid = get_local_id(0);
+    int row = get_group_id(1);
+    int rows = batch * n_head * tokens;
+    if (row >= rows || tokens > FA_STAGED_MAX_TOKENS || head_dim > FA_MAX_HEAD_DIM) return;
+
+    int query_token = row % tokens;
+    int bh = row / tokens;
+    int head = bh % n_head;
+    int b = bh / n_head;
+    int head_offset = head * head_dim;
+    int base_q = (b * tokens + query_token) * channels + head_offset;
+    int row_base = row * tokens;
+
+    __local float scores[FA_STAGED_MAX_TOKENS];
+
+    if (lid < tokens) {
+        int key_token = lid;
+        if (causal && key_token > query_token) {
+            scores[lid] = -3.402823466e+38F;
+        } else {
+            int base_k = (b * tokens + key_token) * channels + head_offset;
+            float score = 0.0f;
+            for (int d = 0; d < head_dim; ++d) {
+                score += q[base_q + d] * k[base_k + d];
+            }
+            scores[lid] = score * scale;
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (lid == 0) {
+        float max_score = -3.402823466e+38F;
+        for (int kt = 0; kt < tokens; ++kt) max_score = fmax(max_score, scores[kt]);
+        float denom = 0.0f;
+        for (int kt = 0; kt < tokens; ++kt) {
+            float value = (scores[kt] == -3.402823466e+38F) ? 0.0f : exp(scores[kt] - max_score);
+            probs[row_base + kt] = value;
+            denom += value;
+        }
+        float inv = 1.0f / denom;
+        for (int kt = 0; kt < tokens; ++kt) probs[row_base + kt] *= inv;
+    }
+}
+
+__kernel void attention_backward_dp_f32(__global const float* grad_out,
+                                        __global const float* v,
+                                        __global float* dp,
+                                        int batch,
+                                        int tokens,
+                                        int channels,
+                                        int n_head,
+                                        int head_dim,
+                                        int causal) {
+    int gid = get_global_id(0);
+    int pairs = batch * n_head * tokens * tokens;
+    if (gid >= pairs) return;
+
+    int key_token = gid % tokens;
+    int row = gid / tokens;
+    int query_token = row % tokens;
+    int bh = row / tokens;
+    int head = bh % n_head;
+    int b = bh / n_head;
+    if (causal && key_token > query_token) {
+        dp[gid] = 0.0f;
+        return;
+    }
+
+    int head_offset = head * head_dim;
+    int base_go = (b * tokens + query_token) * channels + head_offset;
+    int base_v = (b * tokens + key_token) * channels + head_offset;
+    float acc = 0.0f;
+    for (int d = 0; d < head_dim; ++d) {
+        acc += grad_out[base_go + d] * v[base_v + d];
+    }
+    dp[gid] = acc;
+}
+
+__kernel void attention_backward_ds_f32(__global const float* probs,
+                                        __global const float* dp,
+                                        __global float* ds,
+                                        int batch,
+                                        int tokens,
+                                        int n_head,
+                                        int causal,
+                                        float scale) {
+    int lid = get_local_id(0);
+    int row = get_group_id(1);
+    int rows = batch * n_head * tokens;
+    if (row >= rows || tokens > FA_STAGED_MAX_TOKENS) return;
+
+    int query_token = row % tokens;
+    int row_base = row * tokens;
+    __local float shared[1];
+
+    if (lid == 0) {
+        float sum_p_dp = 0.0f;
+        for (int kt = 0; kt < tokens; ++kt) {
+            sum_p_dp += probs[row_base + kt] * dp[row_base + kt];
+        }
+        shared[0] = sum_p_dp;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (lid < tokens) {
+        int key_token = lid;
+        if (causal && key_token > query_token) {
+            ds[row_base + key_token] = 0.0f;
+        } else {
+            float p = probs[row_base + key_token];
+            ds[row_base + key_token] = p * (dp[row_base + key_token] - shared[0]) * scale;
+        }
+    }
+}
+
+__kernel void attention_backward_apply_q_f32(__global const float* ds,
+                                             __global const float* k,
+                                             __global float* grad_q,
+                                             int batch,
+                                             int tokens,
+                                             int channels,
+                                             int n_head,
+                                             int head_dim,
+                                             int causal) {
+    int gid = get_global_id(0);
+    int total = batch * tokens * channels;
+    if (gid >= total) return;
+
+    int d = gid % head_dim;
+    int c = gid % channels;
+    int query_token = (gid / channels) % tokens;
+    int b = gid / (tokens * channels);
+    int head = c / head_dim;
+    if (head >= n_head) return;
+
+    int row = ((b * n_head + head) * tokens + query_token);
+    int row_base = row * tokens;
+    int head_offset = head * head_dim;
+    float acc = 0.0f;
+    for (int kt = 0; kt < tokens; ++kt) {
+        if (causal && kt > query_token) break;
+        int base_k = (b * tokens + kt) * channels + head_offset;
+        acc += ds[row_base + kt] * k[base_k + d];
+    }
+    grad_q[gid] = acc;
+}
+
+__kernel void attention_backward_apply_k_f32(__global const float* ds,
+                                             __global const float* q,
+                                             __global float* grad_k,
+                                             int batch,
+                                             int tokens,
+                                             int channels,
+                                             int n_head,
+                                             int head_dim,
+                                             int causal) {
+    int gid = get_global_id(0);
+    int total = batch * tokens * channels;
+    if (gid >= total) return;
+
+    int d = gid % head_dim;
+    int c = gid % channels;
+    int key_token = (gid / channels) % tokens;
+    int b = gid / (tokens * channels);
+    int head = c / head_dim;
+    if (head >= n_head) return;
+
+    int head_offset = head * head_dim;
+    float acc = 0.0f;
+    for (int query_token = 0; query_token < tokens; ++query_token) {
+        if (causal && key_token > query_token) continue;
+        int row = ((b * n_head + head) * tokens + query_token);
+        int base_q = (b * tokens + query_token) * channels + head_offset;
+        acc += ds[row * tokens + key_token] * q[base_q + d];
+    }
+    grad_k[gid] = acc;
+}
+
+__kernel void attention_backward_apply_v_f32(__global const float* probs,
+                                             __global const float* grad_out,
+                                             __global float* grad_v,
+                                             int batch,
+                                             int tokens,
+                                             int channels,
+                                             int n_head,
+                                             int head_dim,
+                                             int causal) {
+    int gid = get_global_id(0);
+    int total = batch * tokens * channels;
+    if (gid >= total) return;
+
+    int d = gid % head_dim;
+    int c = gid % channels;
+    int key_token = (gid / channels) % tokens;
+    int b = gid / (tokens * channels);
+    int head = c / head_dim;
+    if (head >= n_head) return;
+
+    int head_offset = head * head_dim;
+    float acc = 0.0f;
+    for (int query_token = 0; query_token < tokens; ++query_token) {
+        if (causal && key_token > query_token) continue;
+        int row = ((b * n_head + head) * tokens + query_token);
+        int base_go = (b * tokens + query_token) * channels + head_offset;
+        acc += probs[row * tokens + key_token] * grad_out[base_go + d];
+    }
+    grad_v[gid] = acc;
 }

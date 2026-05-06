@@ -12,12 +12,13 @@ namespace motifcl {
 
 class Buffer;
 class OpenCLContext;
+class Profiler;
 struct OpenCLContextState;
 
 class Kernel {
 public:
     Kernel() = default;
-    Kernel(OpenCLContext& ctx, cl_kernel kernel, std::string name);
+    Kernel(OpenCLContext& ctx, cl_kernel kernel, std::string name, Profiler* profiler = nullptr);
     ~Kernel();
 
     Kernel(const Kernel&) = delete;
@@ -43,6 +44,7 @@ private:
     std::shared_ptr<OpenCLContextState> state_;
     cl_kernel kernel_ = nullptr;
     std::string name_;
+    Profiler* profiler_ = nullptr;
 
     void set_arg_raw(int index, std::size_t size, const void* ptr);
     void release();

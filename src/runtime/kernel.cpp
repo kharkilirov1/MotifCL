@@ -4,13 +4,27 @@
 #include <motifcl/autograd/graph.hpp>
 #include <motifcl/runtime/buffer.hpp>
 #include <motifcl/runtime/opencl_context.hpp>
+#include <motifcl/runtime/profiler.hpp>
 
 #include <type_traits>
 
 namespace motifcl {
 
-Kernel::Kernel(OpenCLContext& ctx, cl_kernel kernel, std::string name)
-    : ctx_(&ctx), state_(ctx.shared_state()), kernel_(kernel), name_(std::move(name)) {}
+namespace {
+
+double event_elapsed_ms(cl_event event) {
+    MCL_CHECK(event != nullptr, "cannot query profiling on null event");
+    MCL_CHECK_CL(clWaitForEvents(1, &event));
+    cl_ulong start = 0, end = 0;
+    MCL_CHECK_CL(clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr));
+    MCL_CHECK_CL(clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(end), &end, nullptr));
+    return static_cast<double>(end - start) * 1e-6;
+}
+
+}
+
+Kernel::Kernel(OpenCLContext& ctx, cl_kernel kernel, std::string name, Profiler* profiler)
+    : ctx_(&ctx), state_(ctx.shared_state()), kernel_(kernel), name_(std::move(name)), profiler_(profiler) {}
 
 Kernel::~Kernel() { release(); }
 
@@ -23,8 +37,10 @@ Kernel& Kernel::operator=(Kernel&& other) noexcept {
         state_ = std::move(other.state_);
         kernel_ = other.kernel_;
         name_ = std::move(other.name_);
+        profiler_ = other.profiler_;
         other.ctx_ = nullptr;
         other.kernel_ = nullptr;
+        other.profiler_ = nullptr;
     }
     return *this;
 }
@@ -36,6 +52,7 @@ void Kernel::release() {
     }
     ctx_ = nullptr;
     state_.reset();
+    profiler_ = nullptr;
 }
 
 void Kernel::set_arg_raw(int index, std::size_t size, const void* ptr) {
@@ -64,6 +81,7 @@ Event Kernel::launch1d(std::size_t global, std::size_t local) {
     size_t l[1] = {local};
     cl_event event = nullptr;
     MCL_CHECK_CL(clEnqueueNDRangeKernel(state_->queue, kernel_, 1, nullptr, g, local ? l : nullptr, 0, nullptr, &event));
+    if (profiler_ && profiler_->enabled()) profiler_->add(name_, event_elapsed_ms(event));
     if (autograd::is_graph_capturing()) {
         MCL_CHECK_CL(clRetainKernel(kernel_));
         using KernelHandle = std::remove_pointer_t<cl_kernel>;
@@ -88,6 +106,7 @@ Event Kernel::launch2d(std::size_t gx, std::size_t gy, std::size_t lx, std::size
     size_t l[2] = {lx, ly};
     cl_event event = nullptr;
     MCL_CHECK_CL(clEnqueueNDRangeKernel(state_->queue, kernel_, 2, nullptr, g, (lx && ly) ? l : nullptr, 0, nullptr, &event));
+    if (profiler_ && profiler_->enabled()) profiler_->add(name_, event_elapsed_ms(event));
     if (autograd::is_graph_capturing()) {
         MCL_CHECK_CL(clRetainKernel(kernel_));
         using KernelHandle = std::remove_pointer_t<cl_kernel>;

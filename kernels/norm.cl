@@ -159,6 +159,41 @@ __kernel void rmsnorm_backward_weight_f32(__global const float* x,
     grad_weight[col] = acc;
 }
 
+__kernel void rmsnorm_row_inv_wg_f32(__global const float* x,
+                                     __global float* row_inv,
+                                     int rows,
+                                     int cols,
+                                     float eps) {
+    int row = get_group_id(1);
+    int lid = get_local_id(0);
+    if (row >= rows) return;
+    __local float scratch[256];
+    float ss = 0.0f;
+    for (int c = lid; c < cols; c += 256) {
+        float xv = x[row * cols + c];
+        ss += xv * xv;
+    }
+    ss = wg_reduce_sum_256(ss, scratch);
+    if (lid == 0) row_inv[row] = rsqrt(ss / (float)cols + eps);
+}
+
+__kernel void rmsnorm_backward_weight_cached_f32(__global const float* x,
+                                                 __global const float* grad_out,
+                                                 __global const float* row_inv,
+                                                 __global float* grad_weight,
+                                                 int rows,
+                                                 int cols) {
+    int col = get_global_id(0);
+    if (col >= cols) return;
+
+    float acc = 0.0f;
+    for (int row = 0; row < rows; ++row) {
+        int idx = row * cols + col;
+        acc += grad_out[idx] * x[idx] * row_inv[row];
+    }
+    grad_weight[col] = acc;
+}
+
 __kernel void layernorm_rowwise_f32(__global const float* x,
                                     __global const float* weight,
                                     __global const float* bias,

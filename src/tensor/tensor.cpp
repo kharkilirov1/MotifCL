@@ -10,11 +10,91 @@
 #include <cstdint>
 #include <atomic>
 #include <random>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace motifcl {
 
 namespace {
 std::atomic<int> g_next_tensor_id{1};
+struct BackwardEngine;
+thread_local BackwardEngine* g_active_backward_engine = nullptr;
+
+std::mt19937& host_rng() {
+    static thread_local std::mt19937 rng(1337);
+    return rng;
+}
+
+struct PendingGrad {
+    Tensor tensor;
+    Tensor grad;
+};
+
+struct BackwardEngine {
+    std::unordered_map<int, PendingGrad> pending;
+    std::unordered_set<int> visited;
+    std::vector<Tensor> topo;
+
+    void collect(const Tensor& tensor) {
+        if (!tensor.valid()) return;
+        auto fn = tensor._grad_fn();
+        if (!fn) return;
+        const int tid = tensor.id();
+        if (!visited.insert(tid).second) return;
+        for (const auto& parent : fn->inputs()) {
+            if (!parent.valid()) continue;
+            if (parent._grad_fn()) collect(parent);
+        }
+        topo.push_back(tensor);
+    }
+
+    void add_gradient(const Tensor& tensor, const Tensor& grad) {
+        MCL_CHECK(tensor.valid(), "backward on invalid tensor");
+        MCL_CHECK(grad.shape() == tensor.shape(), "backward gradient shape mismatch: got " + grad.shape().str() +
+                                          " expected " + tensor.shape().str());
+        const int tid = tensor.id();
+        auto it = pending.find(tid);
+        if (it == pending.end()) {
+            pending.emplace(tid, PendingGrad{tensor, grad});
+            return;
+        }
+        autograd::NoGradGuard guard;
+        it->second.grad = add(it->second.grad, grad);
+    }
+
+    void run(const Tensor& root, const Tensor& root_grad) {
+        collect(root);
+        BackwardEngine* previous = g_active_backward_engine;
+        g_active_backward_engine = this;
+        try {
+            add_gradient(root, root_grad);
+            {
+                autograd::NoGradGuard guard;
+                for (auto it = topo.rbegin(); it != topo.rend(); ++it) {
+                    const int tid = it->id();
+                    auto grad_it = pending.find(tid);
+                    if (grad_it == pending.end()) continue;
+                    auto fn = it->_grad_fn();
+                    if (fn) fn->backward(grad_it->second.grad);
+                }
+            }
+            {
+                autograd::NoGradGuard guard;
+                for (auto& item : pending) {
+                    item.second.tensor._accumulate_grad(item.second.grad);
+                }
+            }
+            g_active_backward_engine = previous;
+        } catch (...) {
+            g_active_backward_engine = previous;
+            throw;
+        }
+    }
+};
+}
+
+void manual_seed(std::uint32_t seed) {
+    host_rng().seed(seed);
 }
 
 Tensor::Tensor(Backend& backend, Shape shape, DType dtype, std::shared_ptr<Storage> storage, std::size_t offset) {
@@ -124,12 +204,12 @@ void Tensor::backward() {
 void Tensor::backward(const Tensor& grad_output) {
     MCL_CHECK(valid(), "invalid tensor");
     MCL_CHECK(grad_output.shape() == shape(), "backward gradient shape mismatch: got " + grad_output.shape().str() + " expected " + shape().str());
-    _accumulate_grad(grad_output);
-    auto fn = impl_->grad_fn;
-    if (fn) {
-        autograd::NoGradGuard guard;
-        fn->backward(grad_output);
+    if (g_active_backward_engine) {
+        g_active_backward_engine->add_gradient(*this, grad_output);
+        return;
     }
+    BackwardEngine engine;
+    engine.run(*this, grad_output);
 }
 
 Tensor Tensor::view(const Shape& new_shape) const {
@@ -246,18 +326,18 @@ Tensor Tensor::full(Backend& backend, const Shape& shape, float value, DType dty
 
 Tensor Tensor::randn(Backend& backend, const Shape& shape, float std, DType dtype) {
     MCL_CHECK(dtype == DType::F32, "randn currently supports f32 only");
-    static thread_local std::mt19937 rng(1337);
     std::normal_distribution<float> dist(0.0f, std);
     std::vector<float> values(static_cast<std::size_t>(shape.numel()));
+    auto& rng = host_rng();
     for (auto& v : values) v = dist(rng);
     return from_cpu(backend, shape, dtype, values.data());
 }
 
 Tensor Tensor::uniform(Backend& backend, const Shape& shape, float low, float high, DType dtype) {
     MCL_CHECK(dtype == DType::F32, "uniform currently supports f32 only");
-    static thread_local std::mt19937 rng(7331);
     std::uniform_real_distribution<float> dist(low, high);
     std::vector<float> values(static_cast<std::size_t>(shape.numel()));
+    auto& rng = host_rng();
     for (auto& v : values) v = dist(rng);
     return from_cpu(backend, shape, dtype, values.data());
 }

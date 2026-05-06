@@ -204,6 +204,48 @@ GraphBufferPlan CapturedGraph::optimize(const GraphOptimizeOptions& options) con
     return plan_buffers(options);
 }
 
+GraphRuntimePlan CapturedGraph::compile_runtime_plan(const std::vector<TensorSpec>& runtime_specs,
+                                                     const GraphOptimizeOptions& options) const {
+    GraphRuntimePlan result;
+    result.runtime_specs = runtime_specs;
+    result.compatible = compatible_with(runtime_specs, true);
+    MCL_CHECK(result.compatible, "runtime tensor specs are incompatible with captured graph");
+
+    CapturedGraph runtime_graph = *this;
+    for (const auto& spec : runtime_specs) {
+        auto it = runtime_graph.tensor_specs_.find(spec.id);
+        if (it != runtime_graph.tensor_specs_.end()) {
+            it->second.shape = spec.shape;
+            it->second.dtype = spec.dtype;
+            it->second.nbytes = spec.nbytes;
+        }
+    }
+    result.buffer_plan = runtime_graph.plan_buffers(options);
+
+    std::unordered_map<int, std::size_t> tensor_to_allocation;
+    for (const auto& allocation : result.buffer_plan.allocations) {
+        for (int tensor_id : allocation.tensor_ids) tensor_to_allocation[tensor_id] = allocation.allocation_id;
+    }
+    for (const auto& item : runtime_graph.tensor_specs_) {
+        const auto alloc_it = tensor_to_allocation.find(item.first);
+        if (alloc_it == tensor_to_allocation.end()) continue;
+        GraphRuntimeBinding binding;
+        binding.tensor_id = item.first;
+        binding.allocation_id = alloc_it->second;
+        binding.offset = 0;
+        binding.nbytes = item.second.nbytes;
+        binding.shape = item.second.shape;
+        binding.dtype = item.second.dtype;
+        result.bindings.push_back(std::move(binding));
+    }
+    std::sort(result.bindings.begin(), result.bindings.end(), [](const GraphRuntimeBinding& a, const GraphRuntimeBinding& b) {
+        return a.tensor_id < b.tensor_id;
+    });
+    result.kernel_rebinding = false;
+    result.note = "runtime plan materializes tensor-to-allocation bindings; arbitrary captured kernel argument rebinding is still explicit/runtime-op dependent";
+    return result;
+}
+
 CapturedGraph CapturedGraph::shape_polymorphic() const {
     CapturedGraph result = *this;
     for (auto& item : result.tensor_specs_) {
@@ -364,6 +406,20 @@ CapturedGraph GraphCaptureGuard::finish() {
     MCL_CHECK(active_, "graph capture guard already finished");
     active_ = false;
     return end_graph_capture();
+}
+
+GraphExecutor::GraphExecutor(CapturedGraph graph, const GraphOptimizeOptions& options)
+    : graph_(std::move(graph)), options_(options) {
+    runtime_plan_ = graph_.compile_runtime_plan(graph_.tensor_specs_list(), options_);
+}
+
+void GraphExecutor::execute() {
+    graph_.execute();
+    ++executions_;
+}
+
+GraphExecutor compile_graph_executor(const CapturedGraph& graph, const GraphOptimizeOptions& options) {
+    return GraphExecutor(graph, options);
 }
 
 } // namespace motifcl::autograd

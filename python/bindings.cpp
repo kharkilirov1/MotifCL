@@ -31,13 +31,29 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readonly("compute_units", &motifcl::DeviceInfo::compute_units)
         .def_readonly("max_work_group_size", &motifcl::DeviceInfo::max_work_group_size);
 
+    py::class_<motifcl::ProfileRecord>(m, "ProfileRecord")
+        .def_readonly("name", &motifcl::ProfileRecord::name)
+        .def_readonly("ms", &motifcl::ProfileRecord::ms);
+
+    py::class_<motifcl::ProfileSummary>(m, "ProfileSummary")
+        .def_readonly("name", &motifcl::ProfileSummary::name)
+        .def_readonly("count", &motifcl::ProfileSummary::count)
+        .def_readonly("total_ms", &motifcl::ProfileSummary::total_ms)
+        .def_readonly("avg_ms", &motifcl::ProfileSummary::avg_ms)
+        .def_readonly("max_ms", &motifcl::ProfileSummary::max_ms);
+
     py::class_<motifcl::Backend>(m, "Backend")
         .def_static("opencl", [](const std::string& kernel_dir) { return motifcl::Backend::create_opencl(kernel_dir); }, py::arg("kernel_dir") = "")
         .def_static("create", []() { return motifcl::Backend::create_opencl(); })
         .def("finish", &motifcl::Backend::finish)
         .def("device_info", &motifcl::Backend::device_info)
         .def("supports_integer_dot", &motifcl::Backend::supports_integer_dot)
-        .def("int_dot_mode", &motifcl::Backend::int_dot_mode);
+        .def("int_dot_mode", &motifcl::Backend::int_dot_mode)
+        .def("profile_set_enabled", [](motifcl::Backend& b, bool enabled) { b.profiler.set_enabled(enabled); })
+        .def("profile_enabled", [](const motifcl::Backend& b) { return b.profiler.enabled(); })
+        .def("profile_clear", [](motifcl::Backend& b) { b.profiler.clear(); })
+        .def("profile_records", [](const motifcl::Backend& b) { return b.profiler.records(); })
+        .def("profile_summary", [](const motifcl::Backend& b) { return b.profiler.summary(); });
 
     py::class_<motifcl::Tensor>(m, "Tensor")
         .def("id", &motifcl::Tensor::id)
@@ -86,6 +102,22 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readonly("reused_bytes", &motifcl::autograd::GraphBufferPlan::reused_bytes)
         .def_readonly("shape_polymorphic", &motifcl::autograd::GraphBufferPlan::shape_polymorphic);
 
+    py::class_<motifcl::autograd::GraphRuntimeBinding>(m, "GraphRuntimeBinding")
+        .def_readonly("tensor_id", &motifcl::autograd::GraphRuntimeBinding::tensor_id)
+        .def_readonly("allocation_id", &motifcl::autograd::GraphRuntimeBinding::allocation_id)
+        .def_readonly("offset", &motifcl::autograd::GraphRuntimeBinding::offset)
+        .def_readonly("nbytes", &motifcl::autograd::GraphRuntimeBinding::nbytes)
+        .def_property_readonly("shape", [](const motifcl::autograd::GraphRuntimeBinding& b) { return b.shape.dims; })
+        .def_readonly("dtype", &motifcl::autograd::GraphRuntimeBinding::dtype);
+
+    py::class_<motifcl::autograd::GraphRuntimePlan>(m, "GraphRuntimePlan")
+        .def_readonly("buffer_plan", &motifcl::autograd::GraphRuntimePlan::buffer_plan)
+        .def_readonly("runtime_specs", &motifcl::autograd::GraphRuntimePlan::runtime_specs)
+        .def_readonly("bindings", &motifcl::autograd::GraphRuntimePlan::bindings)
+        .def_readonly("compatible", &motifcl::autograd::GraphRuntimePlan::compatible)
+        .def_readonly("kernel_rebinding", &motifcl::autograd::GraphRuntimePlan::kernel_rebinding)
+        .def_readonly("note", &motifcl::autograd::GraphRuntimePlan::note);
+
     py::class_<motifcl::autograd::GraphOptimizeOptions>(m, "GraphOptimizeOptions")
         .def(py::init<>())
         .def_readwrite("enable_buffer_reuse", &motifcl::autograd::GraphOptimizeOptions::enable_buffer_reuse)
@@ -103,6 +135,11 @@ PYBIND11_MODULE(_motifcl, m) {
         .def("optimize", [](const motifcl::autograd::CapturedGraph& g, const motifcl::autograd::GraphOptimizeOptions& options) {
             return g.optimize(options);
         }, py::arg("options") = motifcl::autograd::GraphOptimizeOptions{})
+        .def("compile_runtime_plan", [](const motifcl::autograd::CapturedGraph& g,
+                                        const std::vector<motifcl::autograd::TensorSpec>& specs,
+                                        const motifcl::autograd::GraphOptimizeOptions& options) {
+            return g.compile_runtime_plan(specs, options);
+        }, py::arg("runtime_specs"), py::arg("options") = motifcl::autograd::GraphOptimizeOptions{})
         .def("shape_polymorphic", &motifcl::autograd::CapturedGraph::shape_polymorphic)
         .def("compatible_with", &motifcl::autograd::CapturedGraph::compatible_with, py::arg("runtime_specs"), py::arg("allow_dynamic_dims") = true)
         .def("replay", &motifcl::autograd::CapturedGraph::replay)
@@ -115,17 +152,33 @@ PYBIND11_MODULE(_motifcl, m) {
             return g.tensor_specs_list();
         });
 
+    py::class_<motifcl::autograd::GraphExecutor>(m, "GraphExecutor")
+        .def("execute", &motifcl::autograd::GraphExecutor::execute)
+        .def("replayable", &motifcl::autograd::GraphExecutor::replayable)
+        .def("executions", &motifcl::autograd::GraphExecutor::executions)
+        .def_property_readonly("runtime_plan", [](const motifcl::autograd::GraphExecutor& executor) -> const motifcl::autograd::GraphRuntimePlan& {
+            return executor.runtime_plan();
+        }, py::return_value_policy::reference_internal);
+
     py::class_<motifcl::autograd::GraphCaptureGuard>(m, "GraphCaptureGuard")
         .def(py::init<>())
         .def("finish", &motifcl::autograd::GraphCaptureGuard::finish);
 
     m.def("begin_graph_capture", &motifcl::autograd::begin_graph_capture);
     m.def("end_graph_capture", &motifcl::autograd::end_graph_capture);
+    m.def("compile_graph_executor", [](const motifcl::autograd::CapturedGraph& graph,
+                                       const motifcl::autograd::GraphOptimizeOptions& options) {
+        return motifcl::autograd::compile_graph_executor(graph, options);
+    }, py::arg("graph"), py::arg("options") = motifcl::autograd::GraphOptimizeOptions{});
     m.def("is_graph_capturing", &motifcl::autograd::is_graph_capturing);
     m.def("current_graph_capture", []() {
         return motifcl::autograd::current_graph_capture();
     });
     m.def("clear_graph_capture", &motifcl::autograd::clear_graph_capture);
+    m.def("manual_seed", &motifcl::manual_seed);
+    m.def("clear_memory_pool", &motifcl::clear_memory_pool);
+    m.def("memory_pool_cached_blocks", &motifcl::memory_pool_cached_blocks);
+    m.def("memory_pool_cached_bytes", &motifcl::memory_pool_cached_bytes);
 
     m.def("randn", [](motifcl::Backend& b, std::vector<int64_t> shape, float std) {
         return motifcl::Tensor::randn(b, motifcl::Shape(std::move(shape)), std);
@@ -134,6 +187,14 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("zeros", [](motifcl::Backend& b, std::vector<int64_t> shape, motifcl::DType dtype) {
         return motifcl::Tensor::zeros(b, motifcl::Shape(std::move(shape)), dtype);
     }, py::arg("backend"), py::arg("shape"), py::arg("dtype") = motifcl::DType::F32);
+
+    m.def("ones", [](motifcl::Backend& b, std::vector<int64_t> shape, motifcl::DType dtype) {
+        return motifcl::Tensor::ones(b, motifcl::Shape(std::move(shape)), dtype);
+    }, py::arg("backend"), py::arg("shape"), py::arg("dtype") = motifcl::DType::F32);
+
+    m.def("uniform", [](motifcl::Backend& b, std::vector<int64_t> shape, float low, float high) {
+        return motifcl::Tensor::uniform(b, motifcl::Shape(std::move(shape)), low, high);
+    }, py::arg("backend"), py::arg("shape"), py::arg("low") = -1.0f, py::arg("high") = 1.0f);
 
     m.def("tensor_f32", [](motifcl::Backend& b, std::vector<int64_t> shape, const std::vector<float>& values) {
         return motifcl::Tensor::from_cpu(b, motifcl::Shape(std::move(shape)), motifcl::DType::F32, values.data());
@@ -145,6 +206,10 @@ PYBIND11_MODULE(_motifcl, m) {
 
     m.def("matmul", &motifcl::matmul);
     m.def("matmul_tiled_variant", &motifcl::matmul_tiled_variant, py::arg("a"), py::arg("b"), py::arg("tile"));
+    m.def("backend_supports_fp16", &motifcl::backend_supports_fp16, py::arg("backend"));
+    m.def("cast_f32_to_f16", &motifcl::cast_f32_to_f16);
+    m.def("cast_f16_to_f32", &motifcl::cast_f16_to_f32);
+    m.def("matmul_f16_accum_f32", &motifcl::matmul_f16_accum_f32);
     m.def("quantize_q8_symmetric", &motifcl::quantize_q8_symmetric, py::arg("x"), py::arg("scale") = 0.0f);
     m.def("dequantize_q8", &motifcl::dequantize_q8);
     m.def("quantize_q4_symmetric", &motifcl::quantize_q4_symmetric, py::arg("x"), py::arg("scale") = 0.0f);
@@ -158,14 +223,22 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("quantize_q4_symmetric_cols", &motifcl::quantize_q4_symmetric_cols);
     m.def("quantize_q4_symmetric_blocks", &motifcl::quantize_q4_symmetric_blocks, py::arg("x"), py::arg("block_size"));
     m.def("add", &motifcl::add);
+    m.def("add_broadcast", &motifcl::add_broadcast);
+    m.def("add_bias_gelu_rows", &motifcl::add_bias_gelu_rows);
     m.def("sub", &motifcl::sub);
     m.def("mul", &motifcl::mul);
+    m.def("mul_broadcast", &motifcl::mul_broadcast);
     m.def("scale", &motifcl::scale);
     m.def("scale_inplace", &motifcl::scale_inplace);
     m.def("relu", &motifcl::relu);
     m.def("gelu", &motifcl::gelu);
     m.def("softmax_rows", &motifcl::softmax_rows);
     m.def("sum_rows", &motifcl::sum_rows);
+    m.def("sum_all", &motifcl::sum_all);
+    m.def("mean_all", &motifcl::mean_all);
+    m.def("slice_rows", &motifcl::slice_rows);
+    m.def("dropout", &motifcl::dropout, py::arg("x"), py::arg("p") = 0.5f, py::arg("training") = true);
+    m.def("masked_fill", &motifcl::masked_fill, py::arg("x"), py::arg("mask"), py::arg("value"));
     m.def("rowwise_sum", &motifcl::rowwise_sum);
     m.def("rowwise_max", &motifcl::rowwise_max);
     m.def("multihead_attention", &motifcl::multihead_attention,
@@ -175,6 +248,10 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("layernorm", &motifcl::layernorm, py::arg("x"), py::arg("weight"), py::arg("bias"), py::arg("eps") = 1e-6f);
     m.def("mse_loss", &motifcl::mse_loss);
     m.def("softmax_cross_entropy", &motifcl::softmax_cross_entropy);
+    m.def("save_tensor", &motifcl::save_tensor);
+    m.def("load_tensor", &motifcl::load_tensor);
+    m.def("save_parameters", &motifcl::save_parameters);
+    m.def("load_parameters", &motifcl::load_parameters);
 
     py::class_<motifcl::nn::Parameter>(m, "Parameter")
         .def_property_readonly("data", [](motifcl::nn::Parameter& p) { return p.data; })
@@ -207,5 +284,14 @@ PYBIND11_MODULE(_motifcl, m) {
     py::class_<motifcl::optim::Adam>(m, "Adam")
         .def(py::init<std::vector<motifcl::nn::Parameter*>, float, float, float, float>(), py::arg("params"), py::arg("lr") = 1e-3f, py::arg("beta1") = 0.9f, py::arg("beta2") = 0.999f, py::arg("eps") = 1e-8f)
         .def("step", &motifcl::optim::Adam::step)
-        .def("zero_grad", &motifcl::optim::Adam::zero_grad);
+        .def("zero_grad", &motifcl::optim::Adam::zero_grad)
+        .def("set_lr", &motifcl::optim::Adam::set_lr)
+        .def("lr", &motifcl::optim::Adam::lr);
+
+    py::class_<motifcl::optim::SGD>(m, "SGD")
+        .def(py::init<std::vector<motifcl::nn::Parameter*>, float>(), py::arg("params"), py::arg("lr") = 1e-2f)
+        .def("step", &motifcl::optim::SGD::step)
+        .def("zero_grad", &motifcl::optim::SGD::zero_grad)
+        .def("set_lr", &motifcl::optim::SGD::set_lr)
+        .def("lr", &motifcl::optim::SGD::lr);
 }

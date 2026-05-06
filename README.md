@@ -115,6 +115,15 @@ int main() {
 ```
 
 `motifcl_kernel_tuner` writes `motifcl_tuning.json` with local F32, generated F32 tile variants, Q8_0, Q4_0, mixed Q8/Q4, per-axis Q8, blockwise Q4 matmul timings, and the selected integer-dot mode for the active OpenCL device.
+Set `MOTIFCL_MATMUL_F32_TILE=4|8|16` to force a generated F32 tiled matmul variant for regression testing.
+
+## Additional docs
+
+- `docs/ARCHITECTURE.md` — runtime/tensor/ops/autograd/graph/training layering and dynamic graph status.
+- `docs/TRAINING.md` — dataloaders, schedulers, gradient clipping, history, checkpoints.
+- `docs/PYTHON_API.md` — Python wrapper/stub usage.
+- `docs/PERFORMANCE.md` — tuning and regression workflow.
+- `docs/OPENCL_TROUBLESHOOTING.md` — ICD/kernel discovery/runtime guidance.
 
 ## Benchmarks
 

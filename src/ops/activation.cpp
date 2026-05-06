@@ -15,7 +15,7 @@ std::size_t round_up(std::size_t x, std::size_t multiple) { return ((x + multipl
 
 Tensor unary(const Tensor& x, const std::string& kernel_name) {
     MCL_CHECK(x.dtype() == DType::F32, kernel_name + " supports f32 only");
-    auto out = Tensor::zeros(x.backend(), x.shape(), DType::F32);
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     auto k = x.backend().kernels.get(kernel_name);
     int n = static_cast<int>(x.numel());
     k.set_arg(0, x.buffer());
@@ -29,7 +29,7 @@ Tensor unary(const Tensor& x, const std::string& kernel_name) {
 Tensor unary_backward_kernel(const Tensor& x, const Tensor& grad_out, const std::string& kernel_name) {
     MCL_CHECK(x.dtype() == DType::F32 && grad_out.dtype() == DType::F32, kernel_name + " supports f32 only");
     MCL_CHECK(x.shape() == grad_out.shape(), kernel_name + " shape mismatch");
-    auto out = Tensor::zeros(x.backend(), x.shape(), DType::F32);
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     auto k = x.backend().kernels.get(kernel_name);
     int n = static_cast<int>(x.numel());
     k.set_arg(0, x.buffer());
@@ -44,6 +44,7 @@ Tensor unary_backward_kernel(const Tensor& x, const Tensor& grad_out, const std:
 struct ReluBackwardNode : autograd::Node {
     Tensor x;
     explicit ReluBackwardNode(Tensor x) : x(std::move(x)) {}
+    std::vector<Tensor> inputs() const override { return {x}; }
     void backward(const Tensor& grad_output) override {
         if (x.requires_grad()) x.backward(relu_backward_op(x, grad_output));
     }
@@ -52,6 +53,7 @@ struct ReluBackwardNode : autograd::Node {
 struct GeluBackwardNode : autograd::Node {
     Tensor x;
     explicit GeluBackwardNode(Tensor x) : x(std::move(x)) {}
+    std::vector<Tensor> inputs() const override { return {x}; }
     void backward(const Tensor& grad_output) override {
         if (x.requires_grad()) x.backward(gelu_backward_op(x, grad_output));
     }

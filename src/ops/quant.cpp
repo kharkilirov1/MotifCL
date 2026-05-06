@@ -143,7 +143,7 @@ Tensor quantize_q8_symmetric(const Tensor& x, float scale) {
 
 Tensor dequantize_q8(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::Q8_0, "dequantize_q8 expects q8_0 input");
-    auto out = Tensor::zeros(x.backend(), x.shape(), DType::F32);
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     int n = static_cast<int>(x.numel());
     if (x.has_quant_scales()) {
         auto scales = x.quant_scales();
@@ -197,7 +197,7 @@ Tensor quantize_q4_symmetric(const Tensor& x, float scale) {
 
 Tensor dequantize_q4(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::Q4_0, "dequantize_q4 expects q4_0 input");
-    auto out = Tensor::zeros(x.backend(), x.shape(), DType::F32);
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     int n = static_cast<int>(x.numel());
     if (x.has_quant_scales()) {
         auto scales = x.quant_scales();

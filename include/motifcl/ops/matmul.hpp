@@ -9,5 +9,6 @@ Tensor matmul_transpose_a(const Tensor& a, const Tensor& b);
 Tensor matmul_transpose_b(const Tensor& a, const Tensor& b);
 void matmul_out(const Tensor& a, const Tensor& b, Tensor& out);
 Tensor matmul_tiled_variant(const Tensor& a, const Tensor& b, int tile);
+Tensor matmul_f16_accum_f32(const Tensor& a, const Tensor& b);
 
 } // namespace motifcl

@@ -1,5 +1,6 @@
 set(MOTIFCL_BENCHMARKS
     bench_matmul
+    bench_matmul_gpt_shapes
     bench_softmax
     bench_attention
     bench_lora

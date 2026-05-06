@@ -38,6 +38,23 @@
       }
     },
     {
+      "name": "asan",
+      "displayName": "ASan/UBSan build",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "MOTIFCL_BUILD_TESTS": "ON",
+        "MOTIFCL_BUILD_EXAMPLES": "OFF",
+        "MOTIFCL_BUILD_TOOLS": "OFF",
+        "MOTIFCL_BUILD_BENCHMARKS": "OFF",
+        "MOTIFCL_BUILD_PYTHON": "OFF",
+        "MOTIFCL_WARNINGS_AS_ERRORS": "ON",
+        "MOTIFCL_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
       "name": "python",
       "displayName": "Python extension build",
       "generator": "Ninja",
@@ -62,6 +79,10 @@
       "configurePreset": "release"
     },
     {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
       "name": "python",
       "configurePreset": "python"
     }
@@ -70,6 +91,13 @@
     {
       "name": "dev",
       "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
       "output": {
         "outputOnFailure": true
       }

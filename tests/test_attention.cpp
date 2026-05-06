@@ -142,6 +142,38 @@ int main() {
             if (std::fabs(GV[i] - ref_gv[i]) > 3e-2f) return 1;
         }
 
+        {
+            constexpr int NB = 1;
+            constexpr int NT = 4;
+            constexpr int NC = 4;
+            constexpr int NH = 2;
+            std::vector<float> q2(NB * NT * NC);
+            std::vector<float> k2(q2.size());
+            std::vector<float> v2(q2.size());
+            std::vector<float> go2(q2.size());
+            for (std::size_t i = 0; i < q2.size(); ++i) {
+                q2[i] = 0.03f * static_cast<float>(static_cast<int>(i % 7) - 3);
+                k2[i] = 0.02f * static_cast<float>(static_cast<int>(i % 5) - 2);
+                v2[i] = 0.04f * static_cast<float>(static_cast<int>(i % 11) - 5);
+                go2[i] = 0.01f * static_cast<float>(static_cast<int>(i % 13) - 6);
+            }
+            auto Q2 = motifcl::Tensor::from_cpu(backend, {NB * NT, NC}, motifcl::DType::F32, q2.data());
+            auto K2 = motifcl::Tensor::from_cpu(backend, {NB * NT, NC}, motifcl::DType::F32, k2.data());
+            auto V2 = motifcl::Tensor::from_cpu(backend, {NB * NT, NC}, motifcl::DType::F32, v2.data());
+            auto GO2 = motifcl::Tensor::from_cpu(backend, {NB * NT, NC}, motifcl::DType::F32, go2.data());
+            auto GQ2 = motifcl::multihead_attention_backward_q(Q2, K2, V2, GO2, NH, false, NB, NT).to_vector<float>();
+            auto GK2 = motifcl::multihead_attention_backward_k(Q2, K2, V2, GO2, NH, false, NB, NT).to_vector<float>();
+            auto GV2 = motifcl::multihead_attention_backward_v(Q2, K2, V2, GO2, NH, false, NB, NT).to_vector<float>();
+            auto ref_gq2 = finite_difference_grad(q2, k2, v2, go2, NB, NT, NC, NH, false, 'q');
+            auto ref_gk2 = finite_difference_grad(q2, k2, v2, go2, NB, NT, NC, NH, false, 'k');
+            auto ref_gv2 = finite_difference_grad(q2, k2, v2, go2, NB, NT, NC, NH, false, 'v');
+            for (std::size_t i = 0; i < GQ2.size(); ++i) {
+                if (std::fabs(GQ2[i] - ref_gq2[i]) > 3e-2f) return 1;
+                if (std::fabs(GK2[i] - ref_gk2[i]) > 3e-2f) return 1;
+                if (std::fabs(GV2[i] - ref_gv2[i]) > 3e-2f) return 1;
+            }
+        }
+
         Q.set_requires_grad(true);
         K.set_requires_grad(true);
         V.set_requires_grad(true);

@@ -2,12 +2,14 @@
 
 #include <motifcl/core/error.hpp>
 #include <motifcl/runtime/opencl_context.hpp>
+#include <motifcl/runtime/profiler.hpp>
 
 #include <vector>
 
 namespace motifcl {
 
-Program::Program(OpenCLContext& ctx, const std::string& source, const std::string& options) : ctx_(&ctx), state_(ctx.shared_state()) {
+Program::Program(OpenCLContext& ctx, const std::string& source, const std::string& options, Profiler* profiler)
+    : ctx_(&ctx), state_(ctx.shared_state()), profiler_(profiler) {
     MCL_CHECK(ctx.valid(), "OpenCL context is not initialized");
     MCL_CHECK(state_ && state_->valid(), "OpenCL context state is not initialized");
     const char* src = source.c_str();
@@ -35,8 +37,10 @@ Program& Program::operator=(Program&& other) noexcept {
         ctx_ = other.ctx_;
         state_ = std::move(other.state_);
         program_ = other.program_;
+        profiler_ = other.profiler_;
         other.ctx_ = nullptr;
         other.program_ = nullptr;
+        other.profiler_ = nullptr;
     }
     return *this;
 }
@@ -48,6 +52,7 @@ void Program::release() {
     }
     ctx_ = nullptr;
     state_.reset();
+    profiler_ = nullptr;
 }
 
 Kernel Program::get_kernel(const std::string& name) {
@@ -56,7 +61,7 @@ Kernel Program::get_kernel(const std::string& name) {
     cl_int err = CL_SUCCESS;
     cl_kernel kernel = clCreateKernel(program_, name.c_str(), &err);
     MCL_CHECK_CL(err);
-    return Kernel(*ctx_, kernel, name);
+    return Kernel(*ctx_, kernel, name, profiler_);
 }
 
 } // namespace motifcl

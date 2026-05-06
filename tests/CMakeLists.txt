@@ -16,6 +16,7 @@ set(MOTIFCL_TESTS
     test_embedding
     test_cross_entropy
     test_gpt
+    test_production_stack
 )
 
 foreach(test_name ${MOTIFCL_TESTS})

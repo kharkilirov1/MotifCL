@@ -111,13 +111,14 @@ std::string generated_q8_khr_dot_source(const std::string& kernel_name) {
 
 } // namespace
 
-KernelCache::KernelCache(OpenCLContext& ctx, std::string kernel_dir)
-    : ctx_(&ctx), kernel_dir_(std::move(kernel_dir)) {}
+KernelCache::KernelCache(OpenCLContext& ctx, std::string kernel_dir, Profiler* profiler)
+    : ctx_(&ctx), profiler_(profiler), kernel_dir_(std::move(kernel_dir)) {}
 
 std::string KernelCache::source_file_for_kernel(const std::string& kernel_name) const {
+    if (contains(kernel_name, "f16")) return "fp16.cl";
     if (contains(kernel_name, "matmul")) return "matmul.cl";
     if (contains(kernel_name, "quantize") || contains(kernel_name, "dequantize")) return "quant.cl";
-    if (contains(kernel_name, "mse") || contains(kernel_name, "cross_entropy")) return "loss.cl";
+    if (contains(kernel_name, "mse") || contains(kernel_name, "cross_entropy") || contains(kernel_name, "mean_reduce")) return "loss.cl";
     if (contains(kernel_name, "softmax") || contains(kernel_name, "causal") || contains(kernel_name, "attention")) return "attention.cl";
     if (contains(kernel_name, "rms") || contains(kernel_name, "norm")) return "norm.cl";
     if (contains(kernel_name, "relu") || contains(kernel_name, "gelu") || contains(kernel_name, "silu") || contains(kernel_name, "exp_") || contains(kernel_name, "sqrt") || contains(kernel_name, "rsqrt")) return "activation.cl";
@@ -145,7 +146,7 @@ Kernel KernelCache::get(const std::string& kernel_name) {
     auto it = programs_.find(file);
     if (it == programs_.end()) {
         auto source = load_source(file);
-        auto program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL1.2");
+        auto program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL1.2", profiler_);
         it = programs_.emplace(file, std::move(program)).first;
     }
     return it->second->get_kernel(kernel_name);
@@ -159,7 +160,7 @@ Kernel KernelCache::get_matmul_tiled_variant(int tile) {
     auto it = programs_.find(key);
     if (it == programs_.end()) {
         auto source = generated_matmul_tiled_source(tile, kernel_name);
-        auto program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL1.2");
+        auto program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL1.2", profiler_);
         it = programs_.emplace(key, std::move(program)).first;
     }
     return it->second->get_kernel(kernel_name);
@@ -177,12 +178,12 @@ Kernel KernelCache::get_q8_int_dot_variant(const std::string& mode) {
         auto source = generated_q8_khr_dot_source(kernel_name);
         std::shared_ptr<Program> program;
         try {
-            program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL3.0");
+            program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL3.0", profiler_);
         } catch (const Error&) {
             try {
-                program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL2.0");
+            program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL2.0", profiler_);
             } catch (const Error&) {
-                program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL1.2");
+                program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL1.2", profiler_);
             }
         }
         it = programs_.emplace(key, std::move(program)).first;
@@ -191,14 +192,14 @@ Kernel KernelCache::get_q8_int_dot_variant(const std::string& mode) {
 }
 
 Backend::Backend(OpenCLContext&& context, std::string kernel_dir)
-    : ctx(std::move(context)), kernels(ctx, kernel_dir.empty() ? default_kernel_dir() : std::move(kernel_dir)) {}
+    : ctx(std::move(context)), kernels(ctx, kernel_dir.empty() ? default_kernel_dir() : std::move(kernel_dir), &profiler) {}
 
 Backend::~Backend() {
     if (lifetime_) lifetime_->alive = false;
 }
 
 Backend::Backend(Backend&& other) noexcept
-    : ctx(std::move(other.ctx)), kernels(ctx, other.kernels.kernel_dir()), lifetime_(std::make_shared<BackendLifetime>()) {
+    : ctx(std::move(other.ctx)), kernels(ctx, other.kernels.kernel_dir(), &profiler), lifetime_(std::make_shared<BackendLifetime>()) {
     if (other.lifetime_) other.lifetime_->alive = false;
 }
 
@@ -206,7 +207,7 @@ Backend& Backend::operator=(Backend&& other) noexcept {
     if (this != &other) {
         if (lifetime_) lifetime_->alive = false;
         ctx = std::move(other.ctx);
-        kernels = KernelCache(ctx, other.kernels.kernel_dir());
+        kernels = KernelCache(ctx, other.kernels.kernel_dir(), &profiler);
         if (other.lifetime_) other.lifetime_->alive = false;
         lifetime_ = std::make_shared<BackendLifetime>();
     }

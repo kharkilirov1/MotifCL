@@ -35,6 +35,24 @@ struct GraphBufferPlan {
     bool shape_polymorphic = false;
 };
 
+struct GraphRuntimeBinding {
+    int tensor_id = 0;
+    std::size_t allocation_id = 0;
+    std::size_t offset = 0;
+    std::size_t nbytes = 0;
+    Shape shape;
+    DType dtype = DType::F32;
+};
+
+struct GraphRuntimePlan {
+    GraphBufferPlan buffer_plan;
+    std::vector<TensorSpec> runtime_specs;
+    std::vector<GraphRuntimeBinding> bindings;
+    bool compatible = false;
+    bool kernel_rebinding = false;
+    std::string note;
+};
+
 struct GraphOptimizeOptions {
     bool enable_buffer_reuse = true;
     bool shape_polymorphic = false;
@@ -77,6 +95,8 @@ public:
     std::vector<TensorSpec> tensor_specs_list() const;
     GraphBufferPlan plan_buffers(const GraphOptimizeOptions& options = GraphOptimizeOptions{}) const;
     GraphBufferPlan optimize(const GraphOptimizeOptions& options = GraphOptimizeOptions{}) const;
+    GraphRuntimePlan compile_runtime_plan(const std::vector<TensorSpec>& runtime_specs,
+                                          const GraphOptimizeOptions& options = GraphOptimizeOptions{}) const;
     CapturedGraph shape_polymorphic() const;
     bool compatible_with(const std::vector<TensorSpec>& runtime_specs, bool allow_dynamic_dims = true) const;
     void replay() const;
@@ -130,5 +150,26 @@ public:
 private:
     bool active_ = false;
 };
+
+class GraphExecutor {
+public:
+    explicit GraphExecutor(CapturedGraph graph,
+                           const GraphOptimizeOptions& options = GraphOptimizeOptions{});
+
+    const CapturedGraph& graph() const { return graph_; }
+    const GraphRuntimePlan& runtime_plan() const { return runtime_plan_; }
+    bool replayable() const { return graph_.replayable(); }
+    std::size_t executions() const { return executions_; }
+    void execute();
+
+private:
+    CapturedGraph graph_;
+    GraphOptimizeOptions options_;
+    GraphRuntimePlan runtime_plan_;
+    std::size_t executions_ = 0;
+};
+
+GraphExecutor compile_graph_executor(const CapturedGraph& graph,
+                                     const GraphOptimizeOptions& options = GraphOptimizeOptions{});
 
 } // namespace motifcl::autograd

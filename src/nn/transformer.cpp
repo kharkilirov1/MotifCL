@@ -10,7 +10,9 @@
 namespace motifcl::nn {
 
 Tensor MLP::forward(const Tensor& x) {
-    return fc2.forward(motifcl::gelu(fc1.forward(x)));
+    auto h = motifcl::matmul(x, fc1.weight.data);
+    h = fc1.has_bias() ? motifcl::add_bias_gelu_rows(h, fc1.bias.data) : motifcl::gelu(h);
+    return fc2.forward(h);
 }
 
 std::vector<Parameter*> MLP::parameters() {

@@ -12,6 +12,7 @@ option(MOTIFCL_BUILD_TOOLS "Build command-line tools" ON)
 option(MOTIFCL_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(MOTIFCL_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(MOTIFCL_INSTALL "Enable install/export rules" ON)
+option(MOTIFCL_ENABLE_SANITIZERS "Enable ASan/UBSan on supported compilers" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerOptions)
@@ -67,6 +68,8 @@ set(MOTIFCL_SOURCES
     src/ops/basic_ops.cpp
     src/ops/matmul.cpp
     src/ops/reduce.cpp
+    src/ops/indexing.cpp
+    src/ops/fp16.cpp
     src/ops/norm.cpp
     src/ops/activation.cpp
     src/ops/attention.cpp
@@ -90,6 +93,8 @@ set(MOTIFCL_SOURCES
     src/train/adam.cpp
     src/train/sgd.cpp
     src/train/trainer.cpp
+    src/train/training_utils.cpp
+    src/serialization.cpp
 )
 
 add_library(motifcl ${MOTIFCL_SOURCES})

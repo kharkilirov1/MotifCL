@@ -16,7 +16,7 @@ constexpr std::size_t kReduceWorkgroup = 256;
 Tensor sum_rows(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::F32, "sum_rows supports f32 only");
     MCL_CHECK(x.ndim() == 2, "sum_rows expects rank-2 tensor");
-    auto out = Tensor::zeros(x.backend(), {x.shape()[1]}, DType::F32);
+    auto out = Tensor::empty(x.backend(), {x.shape()[1]}, DType::F32);
     auto k = x.backend().kernels.get("sum_rows_f32");
     int rows = static_cast<int>(x.shape()[0]);
     int cols = static_cast<int>(x.shape()[1]);
@@ -32,7 +32,7 @@ Tensor sum_rows(const Tensor& x) {
 Tensor rowwise_sum(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::F32, "rowwise_sum supports f32 only");
     MCL_CHECK(x.ndim() == 2, "rowwise_sum expects rank-2 tensor");
-    auto out = Tensor::zeros(x.backend(), {x.shape()[0]}, DType::F32);
+    auto out = Tensor::empty(x.backend(), {x.shape()[0]}, DType::F32);
     const bool use_wg = x.backend().device_info().max_work_group_size >= kReduceWorkgroup;
     const std::string kernel_name = use_wg ? "rowwise_sum_wg_f32" : "rowwise_sum_f32";
     auto k = x.backend().kernels.get(kernel_name);
@@ -54,7 +54,7 @@ Tensor rowwise_sum(const Tensor& x) {
 Tensor rowwise_max(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::F32, "rowwise_max supports f32 only");
     MCL_CHECK(x.ndim() == 2, "rowwise_max expects rank-2 tensor");
-    auto out = Tensor::zeros(x.backend(), {x.shape()[0]}, DType::F32);
+    auto out = Tensor::empty(x.backend(), {x.shape()[0]}, DType::F32);
     const bool use_wg = x.backend().device_info().max_work_group_size >= kReduceWorkgroup;
     const std::string kernel_name = use_wg ? "rowwise_max_wg_f32" : "rowwise_max_f32";
     auto k = x.backend().kernels.get(kernel_name);
@@ -76,7 +76,7 @@ Tensor rowwise_max(const Tensor& x) {
 Tensor rms_per_row(const Tensor& x, float eps) {
     MCL_CHECK(x.dtype() == DType::F32, "rms_per_row supports f32 only");
     MCL_CHECK(x.ndim() == 2, "rms_per_row expects rank-2 tensor");
-    auto out = Tensor::zeros(x.backend(), {x.shape()[0]}, DType::F32);
+    auto out = Tensor::empty(x.backend(), {x.shape()[0]}, DType::F32);
     const bool use_wg = x.backend().device_info().max_work_group_size >= kReduceWorkgroup;
     const std::string kernel_name = use_wg ? "rms_per_row_wg_f32" : "rms_per_row_f32";
     auto k = x.backend().kernels.get(kernel_name);

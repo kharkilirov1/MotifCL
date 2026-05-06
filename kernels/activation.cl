@@ -20,6 +20,21 @@ __kernel void gelu_f32(__global const float* x, __global float* out, int n) {
     }
 }
 
+__kernel void add_bias_gelu_rows_f32(__global const float* x,
+                                     __global const float* bias,
+                                     __global float* out,
+                                     int rows,
+                                     int cols) {
+    int gid = get_global_id(0);
+    int n = rows * cols;
+    if (gid < n) {
+        int col = gid % cols;
+        float v = x[gid] + bias[col];
+        float t = 0.7978845608028654f * (v + 0.044715f * v * v * v);
+        out[gid] = 0.5f * v * (1.0f + tanh(t));
+    }
+}
+
 __kernel void gelu_backward_f32(__global const float* x,
                                 __global const float* grad_out,
                                 __global float* grad_x,
