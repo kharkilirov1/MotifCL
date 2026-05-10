@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.0 - 2026-05-10
+
 - Added generic HF-style modern decoder compatibility APIs: `HFArchitecture`,
   `HFTransformerConfig`, config normalization, common LLaMA/Gemma/Mistral/Qwen2
   safetensors weight loading wrappers, tokenizer loading, and `generate_hf_text`.

@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "motifcl"
-version = "1.0.0"
+version = "1.1.0"
 description = "C++17/OpenCL neural compute framework for legacy AMD GPUs"
 readme = "README.md"
 requires-python = ">=3.9"
