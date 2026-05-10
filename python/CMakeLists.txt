@@ -1,5 +1,8 @@
 pybind11_add_module(_motifcl bindings.cpp)
 target_link_libraries(_motifcl PRIVATE motifcl)
+if(MINGW)
+    target_compile_options(_motifcl PRIVATE -Wa,-mbig-obj)
+endif()
 set_target_properties(_motifcl PROPERTIES
     OUTPUT_NAME "_motifcl"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/motifcl"

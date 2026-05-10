@@ -29,6 +29,7 @@ jobs:
           -DMOTIFCL_BUILD_TOOLS=ON
           -DMOTIFCL_BUILD_BENCHMARKS=OFF
           -DMOTIFCL_WARNINGS_AS_ERRORS=ON
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: Build
         run: cmake --build build --config Debug --parallel 2
@@ -37,9 +38,28 @@ jobs:
         if: runner.os == 'Linux'
         run: ctest --test-dir build -C Debug --output-on-failure
 
-      - name: Clang-tidy smoke
+      - name: Clang-tidy diagnostics smoke
         if: runner.os == 'Linux'
-        run: clang-tidy --version
+        run: python tools/run_clang_tidy_smoke.py --build-dir build
+
+      - name: Install and CMake consumer smoke
+        if: runner.os == 'Linux'
+        run: |
+          cmake --install build --prefix build/install-smoke
+          cmake -S tests/consumer -B build/consumer-smoke -DCMAKE_PREFIX_PATH="$PWD/build/install-smoke"
+          cmake --build build/consumer-smoke --parallel 2
+          ./build/consumer-smoke/motifcl_consumer_smoke
+
+      - name: Perf regression tooling smoke
+        if: runner.os == 'Linux'
+        run: >
+          python tools/perf_regression.py baselines/ellesmere.json baselines/ellesmere.json
+          --tolerance 0.15
+          --min-metrics 9
+          --require-key matmul_q8_256_ms
+          --require-key matmul_q4_256_ms
+          --require-field metadata.device_family
+          --require-baseline-field metadata.profile
 
       - name: Skip runtime tests on Windows hosted runners
         if: runner.os == 'Windows'
@@ -73,10 +93,17 @@ jobs:
           mcl.manual_seed(123)
           x = mcl.ones(b, [2, 3])
           bias = mcl.tensor_f32(b, [3], [1, 2, 3])
-          assert mcl.add(x, bias).cpu() == [2, 3, 4, 2, 3, 4]
+          assert (x + bias).cpu() == [2, 3, 4, 2, 3, 4]
+          import motifcl.nn as nn
+          layer = nn.Sequential([nn.Linear(b, 3, 2), nn.GELU()])
+          assert layer(x).shape == [2, 2]
+          with mcl.no_grad():
+            assert not mcl.is_grad_enabled()
           print("python smoke passed")
           PY
           pytest tests/python
+          python -m compileall -q python/motifcl
+          python tools/hf_integration_smoke.py
 
   sanitizer:
     runs-on: ubuntu-latest

@@ -1,6 +1,7 @@
 #include <motifcl/runtime/backend.hpp>
 
 #include <motifcl/core/error.hpp>
+#include <motifcl/runtime/command_buffer.hpp>
 
 #include <cstdlib>
 #include <filesystem>
@@ -16,6 +17,36 @@ namespace {
 
 bool contains(const std::string& s, const std::string& needle) {
     return s.find(needle) != std::string::npos;
+}
+
+int env_int(const char* name, int fallback) {
+    if (const char* env = std::getenv(name)) {
+        if (*env) {
+            char* end = nullptr;
+            long value = std::strtol(env, &end, 10);
+            if (end && *end == '\0') return static_cast<int>(value);
+        }
+    }
+    return fallback;
+}
+
+int attention_tile_from_env() {
+    const int value = env_int("MOTIFCL_FA_TILE", 16);
+    return (value == 8 || value == 16 || value == 32) ? value : 16;
+}
+
+int attention_workgroup_from_env() {
+    const int value = env_int("MOTIFCL_FA_WG", 128);
+    return (value == 64 || value == 128 || value == 256) ? value : 128;
+}
+
+std::string build_options_for_source(const std::string& file) {
+    std::string options = "-cl-std=CL1.2";
+    if (file == "attention.cl") {
+        options += " -DFA_TILE=" + std::to_string(attention_tile_from_env());
+        options += " -DFA_WG=" + std::to_string(attention_workgroup_from_env());
+    }
+    return options;
 }
 
 std::string default_kernel_dir() {
@@ -147,11 +178,13 @@ std::string KernelCache::load_source(const std::string& filename) const {
 Kernel KernelCache::get(const std::string& kernel_name) {
     MCL_CHECK(ctx_ != nullptr, "kernel cache has no context");
     auto file = source_file_for_kernel(kernel_name);
-    auto it = programs_.find(file);
+    auto options = build_options_for_source(file);
+    const auto key = file + "|" + options;
+    auto it = programs_.find(key);
     if (it == programs_.end()) {
         auto source = load_source(file);
-        auto program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL1.2", profiler_);
-        it = programs_.emplace(file, std::move(program)).first;
+        auto program = std::make_shared<Program>(*ctx_, source, options, profiler_);
+        it = programs_.emplace(key, std::move(program)).first;
     }
     return it->second->get_kernel(kernel_name);
 }
@@ -240,6 +273,18 @@ std::string Backend::int_dot_mode() const {
     if (contains(info.extensions, "cl_intel_subgroups")) return "cl_intel_subgroups";
     if (supports_integer_dot()) return "vendor_dot4_unrolled";
     return "scalar_fallback";
+}
+
+bool Backend::supports_command_buffer() const {
+    return query_command_buffer_support(ctx.platform, ctx.device).supported;
+}
+
+bool Backend::supports_command_buffer_mutable_dispatch() const {
+    return query_command_buffer_support(ctx.platform, ctx.device).mutable_dispatch_supported;
+}
+
+std::string Backend::command_buffer_mode() const {
+    return query_command_buffer_support(ctx.platform, ctx.device).mode;
 }
 
 } // namespace motifcl

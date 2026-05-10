@@ -31,7 +31,7 @@ void adam_update(Tensor& param, const Tensor& grad, Tensor& m, Tensor& v,
 }
 
 void adam_update_fast(Tensor& param, const Tensor& grad, Tensor& m, Tensor& v,
-                      float lr, float beta1, float beta2, float eps, int step) {
+                      float lr, float beta1, float beta2, float eps, int step, float weight_decay) {
     MCL_CHECK(param.dtype() == DType::F32 && grad.dtype() == DType::F32 && m.dtype() == DType::F32 && v.dtype() == DType::F32, "adam_update supports f32 only");
     MCL_CHECK(param.shape() == grad.shape() && param.shape() == m.shape() && param.shape() == v.shape(), "adam_update shape mismatch");
     MCL_CHECK(step > 0, "adam_update step must be positive");
@@ -49,7 +49,8 @@ void adam_update_fast(Tensor& param, const Tensor& grad, Tensor& m, Tensor& v,
     k.set_arg(7, eps);
     k.set_arg(8, inv_bias1);
     k.set_arg(9, inv_bias2);
-    k.set_arg(10, n);
+    k.set_arg(10, weight_decay);
+    k.set_arg(11, n);
     k.launch1d(round_up(static_cast<std::size_t>(n), 256), 256);
     autograd::record_op("adam_update_f32_fast", {param.id(), grad.id(), m.id(), v.id()}, {param.id(), m.id(), v.id()});
 }

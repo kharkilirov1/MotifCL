@@ -8,6 +8,7 @@
 #include <motifcl/core/types.hpp>
 #include <motifcl/runtime/backend.hpp>
 #include <motifcl/runtime/buffer.hpp>
+#include <motifcl/runtime/command_buffer.hpp>
 #include <motifcl/runtime/kernel.hpp>
 #include <motifcl/runtime/opencl_context.hpp>
 #include <motifcl/runtime/program.hpp>
@@ -18,6 +19,7 @@
 #include <motifcl/ops/reduce.hpp>
 #include <motifcl/ops/indexing.hpp>
 #include <motifcl/ops/activation.hpp>
+#include <motifcl/ops/fused_transformer.hpp>
 #include <motifcl/ops/norm.hpp>
 #include <motifcl/ops/attention.hpp>
 #include <motifcl/ops/loss.hpp>
@@ -32,12 +34,16 @@
 #include <motifcl/nn/attention.hpp>
 #include <motifcl/nn/mlp.hpp>
 #include <motifcl/nn/transformer.hpp>
+#include <motifcl/nn/gemma.hpp>
+#include <motifcl/nn/hf_compat.hpp>
 #include <motifcl/motif/motif_linear.hpp>
 #include <motifcl/motif/motif_lora.hpp>
 #include <motifcl/motif/router.hpp>
 #include <motifcl/motif/motif_block.hpp>
 #include <motifcl/motif/sarc_residual.hpp>
 #include <motifcl/train/adam.hpp>
+#include <motifcl/train/mixed_precision.hpp>
+#include <motifcl/train/static_train_step.hpp>
 #include <motifcl/train/sgd.hpp>
 #include <motifcl/train/dataloader.hpp>
 #include <motifcl/train/scheduler.hpp>

@@ -18,9 +18,11 @@ std::size_t round_up(std::size_t x, std::size_t multiple) { return ((x + multipl
 Tensor mean_reduce_gpu(const Tensor& partial, int denominator) {
     auto out = Tensor::empty(partial.backend(), {}, DType::F32);
     auto k = partial.backend().kernels.get("mean_reduce_f32");
+    const int partial_count = static_cast<int>(partial.numel());
     k.set_arg(0, partial.buffer());
     k.set_arg(1, out.buffer());
-    k.set_arg(2, denominator);
+    k.set_arg(2, partial_count);
+    k.set_arg(3, denominator);
     k.launch1d(256, 256);
     return out;
 }

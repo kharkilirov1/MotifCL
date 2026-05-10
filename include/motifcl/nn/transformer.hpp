@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 
+#include <motifcl/core/dtype.hpp>
 #include <motifcl/nn/attention.hpp>
 #include <motifcl/nn/embedding.hpp>
 #include <motifcl/nn/mlp.hpp>
@@ -90,6 +91,11 @@ public:
     ModernMLP(Backend& backend, int n_embd, int hidden, bool use_swiglu = true, bool use_bias = false, float dropout = 0.0f);
     Tensor forward(const Tensor& x) override;
     std::vector<Parameter*> parameters() override;
+
+    void enable_quantized_inference(DType qdtype = DType::Q4_0);
+    void disable_quantized_inference();
+    bool quantized_inference_enabled() const;
+    DType quantized_weight_dtype() const;
 };
 
 class ModernSelfAttention : public Module {
@@ -100,11 +106,22 @@ public:
     Tensor forward_masked(const Tensor& x, const Tensor& mask, int64_t batch_size, int64_t seq_len, bool causal = true);
     Tensor forward_with_cache(const Tensor& x, KVCache& cache, int64_t batch_size, int64_t seq_len);
     Tensor forward_with_cache_masked(const Tensor& x, const Tensor& mask, KVCache& cache, int64_t batch_size, int64_t seq_len);
+    Tensor forward_with_cache_positions_masked(const Tensor& x, const Tensor& positions, const Tensor& mask,
+                                               KVCache& cache, int64_t batch_size, int64_t seq_len,
+                                               int64_t cache_length_after, bool causal = false);
     std::vector<Parameter*> parameters() override;
 
     int n_head() const { return n_head_; }
     int n_kv_head() const { return n_kv_head_; }
     int head_dim() const { return head_dim_; }
+    Linear& qkv_proj() { return qkv_proj_; }
+    const Linear& qkv_proj() const { return qkv_proj_; }
+    Linear& o_proj() { return o_proj_; }
+    const Linear& o_proj() const { return o_proj_; }
+    void enable_quantized_inference(DType qdtype = DType::Q4_0);
+    void disable_quantized_inference();
+    bool quantized_inference_enabled() const;
+    DType quantized_weight_dtype() const;
 
 private:
     Linear qkv_proj_;
@@ -129,7 +146,22 @@ public:
     Tensor forward_masked(const Tensor& x, const Tensor& mask, int64_t batch_size, int64_t seq_len);
     Tensor forward_with_cache(const Tensor& x, KVCache& cache, int64_t batch_size, int64_t seq_len);
     Tensor forward_with_cache_masked(const Tensor& x, const Tensor& mask, KVCache& cache, int64_t batch_size, int64_t seq_len);
+    Tensor forward_with_cache_positions_masked(const Tensor& x, const Tensor& positions, const Tensor& mask,
+                                               KVCache& cache, int64_t batch_size, int64_t seq_len,
+                                               int64_t cache_length_after, bool causal = false);
     std::vector<Parameter*> parameters() override;
+    void enable_quantized_inference(DType qdtype = DType::Q4_0);
+    void disable_quantized_inference();
+    bool quantized_inference_enabled() const;
+    DType quantized_weight_dtype() const;
+    RMSNorm& norm1() { return norm1_; }
+    const RMSNorm& norm1() const { return norm1_; }
+    ModernSelfAttention& attention() { return attn_; }
+    const ModernSelfAttention& attention() const { return attn_; }
+    RMSNorm& norm2() { return norm2_; }
+    const RMSNorm& norm2() const { return norm2_; }
+    ModernMLP& mlp() { return mlp_; }
+    const ModernMLP& mlp() const { return mlp_; }
 
 private:
     RMSNorm norm1_;
@@ -138,6 +170,12 @@ private:
     ModernMLP mlp_;
     float dropout_p_ = 0.0f;
     bool causal_ = true;
+};
+
+struct QuantizationPolicy {
+    DType default_dtype = DType::Q4_0;
+    DType lm_head_dtype = DType::Q4_0;
+    std::vector<int> q8_layers;
 };
 
 class ModernGPTModel : public Module {
@@ -156,11 +194,27 @@ public:
     Tensor forward_with_cache(const Tensor& token_ids, std::vector<KVCache*>& caches);
     Tensor forward_with_cache_masked(const Tensor& token_ids, const Tensor& mask, std::vector<KVCache>& caches);
     Tensor forward_with_cache_masked(const Tensor& token_ids, const Tensor& mask, std::vector<KVCache*>& caches);
+    Tensor forward_with_cache_positions_masked(const Tensor& token_ids, const Tensor& positions, const Tensor& mask,
+                                               std::vector<KVCache>& caches, int64_t cache_length_after,
+                                               bool causal = false);
+    Tensor forward_with_cache_positions_masked(const Tensor& token_ids, const Tensor& positions, const Tensor& mask,
+                                               std::vector<KVCache*>& caches, int64_t cache_length_after,
+                                               bool causal = false);
     std::vector<Parameter*> parameters() override;
     std::vector<KVCache> create_kv_cache(Backend& backend, int64_t batch_size) const;
+    void enable_quantized_inference(DType qdtype = DType::Q4_0);
+    void enable_quantized_inference(const QuantizationPolicy& policy);
+    void set_quantized_lm_head(const Tensor& weight);
+    void disable_quantized_inference();
+    bool quantized_inference_enabled() const { return quantized_lm_head_.valid(); }
+    DType quantized_weight_dtype() const { return quantized_weight_dtype_; }
+    const Tensor& quantized_lm_head() const { return quantized_lm_head_; }
 
 private:
     bool use_positions_ = false;
+    Tensor quantized_lm_head_;
+    DType quantized_weight_dtype_ = DType::F32;
+    Tensor project_logits(const Tensor& h);
 };
 
 } // namespace motifcl::nn

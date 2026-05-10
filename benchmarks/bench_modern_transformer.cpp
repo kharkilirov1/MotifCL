@@ -134,6 +134,25 @@ int main(int argc, char** argv) {
             opt.zero_grad();
             return loss;
         });
+        motifcl::nn::ModernGPTModel static_train_model(backend, cfg);
+        motifcl::optim::Adam static_opt(static_train_model.parameters(), 3e-4f);
+        auto static_step = motifcl::train::capture_static_train_step([&]() {
+            auto logits = static_train_model.forward(tokens).view({batch * seq, vocab});
+            auto loss = motifcl::softmax_cross_entropy(logits, targets);
+            loss.backward();
+            static_opt.step();
+            static_opt.zero_grad();
+            return loss;
+        });
+        backend.finish();
+        std::cout << "static_train_step mode=" << static_step.execution_mode()
+                  << " nodes=" << static_step.graph().size()
+                  << " arena_bytes=" << static_step.arena_bytes()
+                  << " arena_bindings=" << static_step.arena_binding_count() << "\n";
+        run_case(backend, "modern_gpt_static_train_step", train_iters, [&]() {
+            static_step.execute();
+            return static_step.loss();
+        });
         motifcl::nn::ModernGPTModel masked_train_model(backend, cfg);
         motifcl::optim::Adam masked_opt(masked_train_model.parameters(), 3e-4f);
         run_case(backend, "modern_gpt_masked_train_step", train_iters, [&]() {

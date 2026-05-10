@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #include <motifcl/runtime/event.hpp>
 
@@ -14,6 +15,11 @@ class Buffer;
 class OpenCLContext;
 class Profiler;
 struct OpenCLContextState;
+
+struct KernelBufferArgSnapshot {
+    int index = 0;
+    cl_mem mem = nullptr;
+};
 
 class Kernel {
 public:
@@ -45,8 +51,10 @@ private:
     cl_kernel kernel_ = nullptr;
     std::string name_;
     Profiler* profiler_ = nullptr;
+    std::vector<KernelBufferArgSnapshot> buffer_args_;
 
     void set_arg_raw(int index, std::size_t size, const void* ptr);
+    void remember_buffer_arg(int index, cl_mem mem);
     void release();
 };
 

@@ -19,11 +19,13 @@ typedef cl_bitfield cl_device_type;
 typedef cl_bitfield cl_mem_flags;
 typedef cl_bitfield cl_command_queue_properties;
 typedef intptr_t cl_context_properties;
+typedef intptr_t cl_properties;
 typedef uint32_t cl_platform_info;
 typedef uint32_t cl_device_info;
 typedef uint32_t cl_program_build_info;
 typedef uint32_t cl_event_info;
 typedef uint32_t cl_profiling_info;
+typedef uint32_t cl_buffer_create_type;
 
 typedef struct _cl_platform_id* cl_platform_id;
 typedef struct _cl_device_id* cl_device_id;
@@ -116,6 +118,13 @@ typedef struct _cl_event* cl_event;
 #define CL_PROFILING_COMMAND_START                 0x1282
 #define CL_PROFILING_COMMAND_END                   0x1283
 
+#define CL_BUFFER_CREATE_TYPE_REGION               0x1220
+
+typedef struct _cl_buffer_region {
+    size_t origin;
+    size_t size;
+} cl_buffer_region;
+
 cl_int clGetPlatformIDs(cl_uint num_entries, cl_platform_id* platforms, cl_uint* num_platforms);
 cl_int clGetPlatformInfo(cl_platform_id platform, cl_platform_info param_name, size_t param_value_size, void* param_value, size_t* param_value_size_ret);
 cl_int clGetDeviceIDs(cl_platform_id platform, cl_device_type device_type, cl_uint num_entries, cl_device_id* devices, cl_uint* num_devices);
@@ -125,6 +134,8 @@ cl_int clReleaseContext(cl_context context);
 cl_command_queue clCreateCommandQueue(cl_context context, cl_device_id device, cl_command_queue_properties properties, cl_int* errcode_ret);
 cl_int clReleaseCommandQueue(cl_command_queue command_queue);
 cl_mem clCreateBuffer(cl_context context, cl_mem_flags flags, size_t size, void* host_ptr, cl_int* errcode_ret);
+cl_mem clCreateSubBuffer(cl_mem buffer, cl_mem_flags flags, cl_buffer_create_type buffer_create_type, const void* buffer_create_info, cl_int* errcode_ret);
+cl_int clRetainMemObject(cl_mem memobj);
 cl_int clReleaseMemObject(cl_mem memobj);
 cl_int clEnqueueWriteBuffer(cl_command_queue command_queue, cl_mem buffer, cl_bool blocking_write, size_t offset, size_t cb, const void* ptr, cl_uint num_events_in_wait_list, const cl_event* event_wait_list, cl_event* event);
 cl_int clEnqueueReadBuffer(cl_command_queue command_queue, cl_mem buffer, cl_bool blocking_read, size_t offset, size_t cb, void* ptr, cl_uint num_events_in_wait_list, const cl_event* event_wait_list, cl_event* event);
@@ -141,6 +152,8 @@ cl_int clFinish(cl_command_queue command_queue);
 cl_int clWaitForEvents(cl_uint num_events, const cl_event* event_list);
 cl_int clReleaseEvent(cl_event event);
 cl_int clGetEventProfilingInfo(cl_event event, cl_profiling_info param_name, size_t param_value_size, void* param_value, size_t* param_value_size_ret);
+void* clGetExtensionFunctionAddress(const char* func_name);
+void* clGetExtensionFunctionAddressForPlatform(cl_platform_id platform, const char* func_name);
 
 #ifdef __cplusplus
 }

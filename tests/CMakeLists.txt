@@ -13,11 +13,14 @@ set(MOTIFCL_TESTS
     test_backward
     test_adam
     test_transformer
+    test_fused_transformer
     test_embedding
     test_cross_entropy
     test_gpt
     test_production_stack
     test_modern_transformer
+    test_gemma_compat
+    test_hf_modern_compat
 )
 
 foreach(test_name ${MOTIFCL_TESTS})

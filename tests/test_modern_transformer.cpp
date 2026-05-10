@@ -1,10 +1,34 @@
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 
 #include <motifcl/motifcl.hpp>
 
 #include "test_utils.hpp"
+
+namespace {
+
+void set_test_env(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    if (value && *value) {
+        setenv(name, value, 1);
+    } else {
+        unsetenv(name);
+    }
+#endif
+}
+
+void require_close_vec(const std::vector<float>& a, const std::vector<float>& b, float tol) {
+    if (a.size() != b.size()) std::exit(1);
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (std::fabs(a[i] - b[i]) > tol) std::exit(1);
+    }
+}
+
+} // namespace
 
 int main() {
     try {
@@ -46,6 +70,89 @@ int main() {
             if (y.shape() != motifcl::Shape({3, 16})) return 1;
             y.backward(motifcl::Tensor::ones(backend, y.shape()));
             if (!q.grad() || !k.grad() || !v.grad()) return 1;
+        }
+
+        {
+            constexpr int NB = 1;
+            constexpr int QT = 3;
+            constexpr int KT = 3;
+            constexpr int NH = 4;
+            constexpr int NKH = 2;
+            constexpr int HD = 64;
+            constexpr int QC = NH * HD;
+            constexpr int KVC = NKH * HD;
+            std::vector<float> qh(NB * QT * QC);
+            std::vector<float> kh(NB * KT * KVC);
+            std::vector<float> vh(kh.size());
+            std::vector<float> goh(qh.size());
+            for (std::size_t i = 0; i < qh.size(); ++i) {
+                qh[i] = 0.003f * static_cast<float>(static_cast<int>(i % 17) - 8);
+                goh[i] = 0.002f * static_cast<float>(static_cast<int>(i % 19) - 9);
+            }
+            for (std::size_t i = 0; i < kh.size(); ++i) {
+                kh[i] = 0.004f * static_cast<float>(static_cast<int>(i % 13) - 6);
+                vh[i] = 0.005f * static_cast<float>(static_cast<int>(i % 11) - 5);
+            }
+            set_test_env("MOTIFCL_ENABLE_GQA_NO_TMP_BWD", "");
+            set_test_env("MOTIFCL_DISABLE_GQA_HD64_DQDS_FUSION", "1");
+            auto q0 = motifcl::Tensor::from_cpu(backend, {NB * QT, QC}, motifcl::DType::F32, qh.data());
+            auto k0 = motifcl::Tensor::from_cpu(backend, {NB * KT, KVC}, motifcl::DType::F32, kh.data());
+            auto v0 = motifcl::Tensor::from_cpu(backend, {NB * KT, KVC}, motifcl::DType::F32, vh.data());
+            auto go0 = motifcl::Tensor::from_cpu(backend, {NB * QT, QC}, motifcl::DType::F32, goh.data());
+            q0.set_requires_grad(true);
+            k0.set_requires_grad(true);
+            v0.set_requires_grad(true);
+            auto y0 = motifcl::grouped_query_attention(q0, k0, v0, NH, NKH, true, NB, QT, KT, 0);
+            y0.backward(go0);
+            auto ref_q = q0.grad()->to_vector<float>();
+            auto ref_k = k0.grad()->to_vector<float>();
+            auto ref_v = v0.grad()->to_vector<float>();
+
+            set_test_env("MOTIFCL_DISABLE_GQA_HD64_DQDS_FUSION", "");
+            auto qf = motifcl::Tensor::from_cpu(backend, {NB * QT, QC}, motifcl::DType::F32, qh.data());
+            auto kf = motifcl::Tensor::from_cpu(backend, {NB * KT, KVC}, motifcl::DType::F32, kh.data());
+            auto vf = motifcl::Tensor::from_cpu(backend, {NB * KT, KVC}, motifcl::DType::F32, vh.data());
+            auto gof = motifcl::Tensor::from_cpu(backend, {NB * QT, QC}, motifcl::DType::F32, goh.data());
+            qf.set_requires_grad(true);
+            kf.set_requires_grad(true);
+            vf.set_requires_grad(true);
+            auto yf = motifcl::grouped_query_attention(qf, kf, vf, NH, NKH, true, NB, QT, KT, 0);
+            yf.backward(gof);
+            require_close_vec(qf.grad()->to_vector<float>(), ref_q, 2e-5f);
+            require_close_vec(kf.grad()->to_vector<float>(), ref_k, 2e-5f);
+            require_close_vec(vf.grad()->to_vector<float>(), ref_v, 2e-5f);
+
+            set_test_env("MOTIFCL_ENABLE_GQA_PARTIAL_KV_BWD", "1");
+            auto qp = motifcl::Tensor::from_cpu(backend, {NB * QT, QC}, motifcl::DType::F32, qh.data());
+            auto kp = motifcl::Tensor::from_cpu(backend, {NB * KT, KVC}, motifcl::DType::F32, kh.data());
+            auto vp = motifcl::Tensor::from_cpu(backend, {NB * KT, KVC}, motifcl::DType::F32, vh.data());
+            auto gop = motifcl::Tensor::from_cpu(backend, {NB * QT, QC}, motifcl::DType::F32, goh.data());
+            qp.set_requires_grad(true);
+            kp.set_requires_grad(true);
+            vp.set_requires_grad(true);
+            auto yp = motifcl::grouped_query_attention(qp, kp, vp, NH, NKH, true, NB, QT, KT, 0);
+            yp.backward(gop);
+            require_close_vec(qp.grad()->to_vector<float>(), ref_q, 2e-5f);
+            require_close_vec(kp.grad()->to_vector<float>(), ref_k, 2e-5f);
+            require_close_vec(vp.grad()->to_vector<float>(), ref_v, 2e-5f);
+            set_test_env("MOTIFCL_ENABLE_GQA_PARTIAL_KV_BWD", "");
+
+            set_test_env("MOTIFCL_ENABLE_GQA_NO_TMP_BWD", "1");
+            auto q1 = motifcl::Tensor::from_cpu(backend, {NB * QT, QC}, motifcl::DType::F32, qh.data());
+            auto k1 = motifcl::Tensor::from_cpu(backend, {NB * KT, KVC}, motifcl::DType::F32, kh.data());
+            auto v1 = motifcl::Tensor::from_cpu(backend, {NB * KT, KVC}, motifcl::DType::F32, vh.data());
+            auto go1 = motifcl::Tensor::from_cpu(backend, {NB * QT, QC}, motifcl::DType::F32, goh.data());
+            q1.set_requires_grad(true);
+            k1.set_requires_grad(true);
+            v1.set_requires_grad(true);
+            auto y1 = motifcl::grouped_query_attention(q1, k1, v1, NH, NKH, true, NB, QT, KT, 0);
+            y1.backward(go1);
+            require_close_vec(q1.grad()->to_vector<float>(), ref_q, 2e-5f);
+            require_close_vec(k1.grad()->to_vector<float>(), ref_k, 2e-5f);
+            require_close_vec(v1.grad()->to_vector<float>(), ref_v, 2e-5f);
+            set_test_env("MOTIFCL_ENABLE_GQA_NO_TMP_BWD", "");
+            set_test_env("MOTIFCL_ENABLE_GQA_PARTIAL_KV_BWD", "");
+            set_test_env("MOTIFCL_DISABLE_GQA_HD64_DQDS_FUSION", "");
         }
 
         {

@@ -46,5 +46,6 @@ from . import (
     sum_rows,
     rowwise_sum,
     rowwise_max,
+    rowwise_argmax,
     sub,
 )

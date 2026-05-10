@@ -34,10 +34,18 @@ __kernel void rope_batch_f32(__global float* x, int rows, int cols) {
     if (gid < n) x[gid] = x[gid];
 }
 
+#ifndef FA_WG
 #define FA_WG 128
+#endif
+#ifndef FA_TILE
 #define FA_TILE 16
+#endif
+#ifndef FA_MAX_HEAD_DIM
 #define FA_MAX_HEAD_DIM 128
+#endif
+#ifndef FA_STAGED_MAX_TOKENS
 #define FA_STAGED_MAX_TOKENS 128
+#endif
 
 inline float fa_tile_max(__local float* scores, int valid) {
     float m = -3.402823466e+38F;
@@ -1137,6 +1145,349 @@ __kernel void gqa_backward_dp_f32(__global const float* grad_out,
     dp[gid] = acc;
 }
 
+// Tuned GQA backward kernels for the common GPT head_dim=64 path.
+__kernel void gqa_backward_probs_hd64_f32(__global const float* q,
+                                     __global const float* k,
+                                     __global float* probs,
+                                     int batch,
+                                     int query_tokens,
+                                     int key_tokens,
+                                     int n_head,
+                                     int n_kv_head,
+                                     int head_dim,
+                                     int causal,
+                                     int query_offset,
+                                     float scale) {
+    int lid = get_local_id(0);
+    int row = get_group_id(1);
+    int rows = batch * n_head * query_tokens;
+    if (row >= rows || key_tokens > FA_STAGED_MAX_TOKENS || head_dim != 64) return;
+
+    int query_token = row % query_tokens;
+    int bh = row / query_tokens;
+    int head = bh % n_head;
+    int b = bh / n_head;
+    int group = n_head / n_kv_head;
+    int kv_head = head / group;
+    int q_channels = n_head * 64;
+    int kv_channels = n_kv_head * 64;
+    int base_q = (b * query_tokens + query_token) * q_channels + head * 64;
+    int row_base = row * key_tokens;
+    __local float scores[FA_STAGED_MAX_TOKENS];
+
+    if (lid < key_tokens) {
+        int key_token = lid;
+        if (causal && key_token > query_offset + query_token) {
+            scores[lid] = -3.402823466e+38F;
+        } else {
+            int base_k = (b * key_tokens + key_token) * kv_channels + kv_head * 64;
+            float score = 0.0f;
+            #pragma unroll
+            for (int d = 0; d < 64; ++d) score += q[base_q + d] * k[base_k + d];
+            scores[lid] = score * scale;
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (lid == 0) {
+        float max_score = -3.402823466e+38F;
+        for (int kt = 0; kt < key_tokens; ++kt) max_score = fmax(max_score, scores[kt]);
+        float denom = 0.0f;
+        for (int kt = 0; kt < key_tokens; ++kt) {
+            float value = (scores[kt] == -3.402823466e+38F) ? 0.0f : exp(scores[kt] - max_score);
+            probs[row_base + kt] = value;
+            denom += value;
+        }
+        float inv = denom > 0.0f ? 1.0f / denom : 0.0f;
+        for (int kt = 0; kt < key_tokens; ++kt) probs[row_base + kt] *= inv;
+    }
+}
+
+__kernel void gqa_backward_dp_hd64_f32(__global const float* grad_out,
+                                  __global const float* v,
+                                  __global float* dp,
+                                  int batch,
+                                  int query_tokens,
+                                  int key_tokens,
+                                  int n_head,
+                                  int n_kv_head,
+                                  int head_dim,
+                                  int causal,
+                                  int query_offset) {
+    int gid = get_global_id(0);
+    int pairs = batch * n_head * query_tokens * key_tokens;
+    if (gid >= pairs) return;
+    int key_token = gid % key_tokens;
+    int row = gid / key_tokens;
+    int query_token = row % query_tokens;
+    int bh = row / query_tokens;
+    int head = bh % n_head;
+    int b = bh / n_head;
+    if (causal && key_token > query_offset + query_token) {
+        dp[gid] = 0.0f;
+        return;
+    }
+    int group = n_head / n_kv_head;
+    int kv_head = head / group;
+    int q_channels = n_head * 64;
+    int kv_channels = n_kv_head * 64;
+    int base_go = (b * query_tokens + query_token) * q_channels + head * 64;
+    int base_v = (b * key_tokens + key_token) * kv_channels + kv_head * 64;
+    float acc = 0.0f;
+    #pragma unroll
+    for (int d = 0; d < 64; ++d) acc += grad_out[base_go + d] * v[base_v + d];
+    dp[gid] = acc;
+}
+
+// HD64 row-fused staged backward:
+//   - reads global softmax probs
+//   - computes dp = dO dot V in LDS/private registers
+//   - computes ds in LDS and writes it once for the K/V stage
+//   - computes dQ immediately from LDS ds, avoiding a separate apply_q kernel
+__kernel void gqa_backward_dq_ds_from_probs_hd64_f32(__global const float* probs,
+                                                    __global const float* grad_out,
+                                                    __global const float* k,
+                                                    __global const float* v,
+                                                    __global float* ds,
+                                                    __global float* grad_q,
+                                                    int batch,
+                                                    int query_tokens,
+                                                    int key_tokens,
+                                                    int n_head,
+                                                    int n_kv_head,
+                                                    int head_dim,
+                                                    int causal,
+                                                    int query_offset,
+                                                    float scale) {
+    int lid = get_local_id(0);
+    int row = get_group_id(1);
+    int rows = batch * n_head * query_tokens;
+    if (row >= rows || key_tokens > FA_STAGED_MAX_TOKENS || head_dim != 64) return;
+
+    int query_token = row % query_tokens;
+    int bh = row / query_tokens;
+    int head = bh % n_head;
+    int b = bh / n_head;
+    int group = n_head / n_kv_head;
+    int kv_head = head / group;
+    int q_channels = n_head * 64;
+    int kv_channels = n_kv_head * 64;
+    int q_head_offset = head * 64;
+    int base_go = (b * query_tokens + query_token) * q_channels + q_head_offset;
+    int row_base = row * key_tokens;
+
+    __local float dp_local[FA_STAGED_MAX_TOKENS];
+    __local float ds_local[FA_STAGED_MAX_TOKENS];
+    __local float shared[1];
+
+    if (lid < key_tokens) {
+        int key_token = lid;
+        if (causal && key_token > query_offset + query_token) {
+            dp_local[lid] = 0.0f;
+        } else {
+            int base_v = (b * key_tokens + key_token) * kv_channels + kv_head * 64;
+            float acc = 0.0f;
+            #pragma unroll
+            for (int d = 0; d < 64; ++d) acc += grad_out[base_go + d] * v[base_v + d];
+            dp_local[lid] = acc;
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (lid == 0) {
+        float sum_p_dp = 0.0f;
+        for (int kt = 0; kt < key_tokens; ++kt) sum_p_dp += probs[row_base + kt] * dp_local[kt];
+        shared[0] = sum_p_dp;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (lid < key_tokens) {
+        int key_token = lid;
+        float value = 0.0f;
+        if (!(causal && key_token > query_offset + query_token)) {
+            const float p = probs[row_base + key_token];
+            value = p * (dp_local[lid] - shared[0]) * scale;
+        }
+        ds_local[lid] = value;
+        ds[row_base + key_token] = value;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (lid < 64) {
+        float acc = 0.0f;
+        for (int kt = 0; kt < key_tokens; ++kt) {
+            if (causal && kt > query_offset + query_token) break;
+            int base_k = (b * key_tokens + kt) * kv_channels + kv_head * 64;
+            acc += ds_local[kt] * k[base_k + lid];
+        }
+        grad_q[base_go + lid] = acc;
+    }
+}
+
+// HD64 dQ from materialized probs+dp without materializing global ds.
+// Used by the partial dK/dV path below.
+__kernel void gqa_backward_dq_from_probs_dp_hd64_f32(__global const float* probs,
+                                                    __global const float* dp,
+                                                    __global const float* k,
+                                                    __global float* grad_q,
+                                                    int batch,
+                                                    int query_tokens,
+                                                    int key_tokens,
+                                                    int n_head,
+                                                    int n_kv_head,
+                                                    int head_dim,
+                                                    int causal,
+                                                    int query_offset,
+                                                    float scale) {
+    int lid = get_local_id(0);
+    int row = get_group_id(1);
+    int rows = batch * n_head * query_tokens;
+    if (row >= rows || key_tokens > FA_STAGED_MAX_TOKENS || head_dim != 64) return;
+
+    int query_token = row % query_tokens;
+    int bh = row / query_tokens;
+    int head = bh % n_head;
+    int b = bh / n_head;
+    int group = n_head / n_kv_head;
+    int kv_head = head / group;
+    int q_channels = n_head * 64;
+    int kv_channels = n_kv_head * 64;
+    int base_q = (b * query_tokens + query_token) * q_channels + head * 64;
+    int row_base = row * key_tokens;
+    __local float ds_local[FA_STAGED_MAX_TOKENS];
+    __local float shared[1];
+
+    if (lid == 0) {
+        float sum_p_dp = 0.0f;
+        for (int kt = 0; kt < key_tokens; ++kt) sum_p_dp += probs[row_base + kt] * dp[row_base + kt];
+        shared[0] = sum_p_dp;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (lid < key_tokens) {
+        int key_token = lid;
+        float value = 0.0f;
+        if (!(causal && key_token > query_offset + query_token)) {
+            const float p = probs[row_base + key_token];
+            value = p * (dp[row_base + key_token] - shared[0]) * scale;
+        }
+        ds_local[lid] = value;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (lid < 64) {
+        float acc = 0.0f;
+        for (int kt = 0; kt < key_tokens; ++kt) {
+            if (causal && kt > query_offset + query_token) break;
+            int base_k = (b * key_tokens + kt) * kv_channels + kv_head * 64;
+            acc += ds_local[kt] * k[base_k + lid];
+        }
+        grad_q[base_q + lid] = acc;
+    }
+}
+
+// Emits per-query-tile partial dK/dV reductions:
+// partial layout: [batch, n_kv_head, ceil(query_tokens/tile_q), key_tokens, 64].
+// This replaces global ds with compact partial dK/dV buffers and a final reduce.
+__kernel void gqa_backward_kv_partial_from_probs_dp_hd64_f32(__global const float* probs,
+                                                            __global const float* dp,
+                                                            __global const float* q,
+                                                            __global const float* grad_out,
+                                                            __global float* partial_dk,
+                                                            __global float* partial_dv,
+                                                            int batch,
+                                                            int query_tokens,
+                                                            int key_tokens,
+                                                            int n_head,
+                                                            int n_kv_head,
+                                                            int head_dim,
+                                                            int causal,
+                                                            int query_offset,
+                                                            float scale,
+                                                            int tile_q,
+                                                            int num_tiles) {
+    int lid = get_local_id(0);
+    int gid1 = get_group_id(1);
+    int groups_total = batch * n_kv_head * num_tiles * key_tokens;
+    if (gid1 >= groups_total || lid >= 64 || head_dim != 64 || tile_q <= 0) return;
+
+    int key_token = gid1 % key_tokens;
+    int tmp = gid1 / key_tokens;
+    int tile = tmp % num_tiles;
+    tmp /= num_tiles;
+    int kv_head = tmp % n_kv_head;
+    int b = tmp / n_kv_head;
+    int group = n_head / n_kv_head;
+    int q_channels = n_head * 64;
+    int tile_begin = tile * tile_q;
+    int tile_end = min(query_tokens, tile_begin + tile_q);
+
+    __local float shared[1];
+    float acc_k = 0.0f;
+    float acc_v = 0.0f;
+
+    for (int q_head = kv_head * group; q_head < (kv_head + 1) * group; ++q_head) {
+        int q_head_offset = q_head * 64;
+        for (int query_token = tile_begin; query_token < tile_end; ++query_token) {
+            if (causal && key_token > query_offset + query_token) continue;
+            int row = ((b * n_head + q_head) * query_tokens + query_token);
+            int row_base = row * key_tokens;
+            int base_q = (b * query_tokens + query_token) * q_channels + q_head_offset;
+
+            if (lid == 0) {
+                float sum_p_dp = 0.0f;
+                for (int kt = 0; kt < key_tokens; ++kt) {
+                    sum_p_dp += probs[row_base + kt] * dp[row_base + kt];
+                }
+                shared[0] = sum_p_dp;
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+
+            const float p = probs[row_base + key_token];
+            const float ds = p * (dp[row_base + key_token] - shared[0]) * scale;
+            acc_k += ds * q[base_q + lid];
+            acc_v += p * grad_out[base_q + lid];
+        }
+    }
+
+    int out = gid1 * 64 + lid;
+    partial_dk[out] = acc_k;
+    partial_dv[out] = acc_v;
+}
+
+__kernel void gqa_backward_kv_reduce_partials_hd64_f32(__global const float* partial_dk,
+                                                      __global const float* partial_dv,
+                                                      __global float* grad_k,
+                                                      __global float* grad_v,
+                                                      int batch,
+                                                      int key_tokens,
+                                                      int n_kv_head,
+                                                      int head_dim,
+                                                      int num_tiles) {
+    int lid = get_local_id(0);
+    int gid1 = get_group_id(1);
+    int groups_total = batch * n_kv_head * key_tokens;
+    if (gid1 >= groups_total || lid >= 64 || head_dim != 64) return;
+
+    int key_token = gid1 % key_tokens;
+    int tmp = gid1 / key_tokens;
+    int kv_head = tmp % n_kv_head;
+    int b = tmp / n_kv_head;
+    float acc_k = 0.0f;
+    float acc_v = 0.0f;
+    for (int tile = 0; tile < num_tiles; ++tile) {
+        int partial_group = (((b * n_kv_head + kv_head) * num_tiles + tile) * key_tokens + key_token);
+        int partial_idx = partial_group * 64 + lid;
+        acc_k += partial_dk[partial_idx];
+        acc_v += partial_dv[partial_idx];
+    }
+
+    int kv_channels = n_kv_head * 64;
+    int out = (b * key_tokens + key_token) * kv_channels + kv_head * 64 + lid;
+    grad_k[out] = acc_k;
+    grad_v[out] = acc_v;
+}
+
 __kernel void gqa_backward_ds_f32(__global const float* probs,
                                   __global const float* dp,
                                   __global float* ds,
@@ -1275,6 +1626,244 @@ __kernel void gqa_backward_apply_v_f32(__global const float* probs,
     grad_v[gid] = acc;
 }
 
+__kernel void gqa_backward_apply_kv_hd64_f32(__global const float* ds,
+                                             __global const float* probs,
+                                             __global const float* q,
+                                             __global const float* grad_out,
+                                             __global float* grad_k,
+                                             __global float* grad_v,
+                                             int batch,
+                                             int query_tokens,
+                                             int key_tokens,
+                                             int n_head,
+                                             int n_kv_head,
+                                             int head_dim,
+                                             int causal,
+                                             int query_offset) {
+    int gid = get_global_id(0);
+    int kv_channels = n_kv_head * 64;
+    int q_channels = n_head * 64;
+    int total = batch * key_tokens * kv_channels;
+    if (gid >= total || head_dim != 64) return;
+    int d = gid & 63;
+    int c = gid % kv_channels;
+    int key_token = (gid / kv_channels) % key_tokens;
+    int b = gid / (key_tokens * kv_channels);
+    int kv_head = c / 64;
+    int group = n_head / n_kv_head;
+    float acc_k = 0.0f;
+    float acc_v = 0.0f;
+    for (int q_head = kv_head * group; q_head < (kv_head + 1) * group; ++q_head) {
+        int q_head_offset = q_head * 64;
+        for (int query_token = 0; query_token < query_tokens; ++query_token) {
+            if (causal && key_token > query_offset + query_token) continue;
+            int row = ((b * n_head + q_head) * query_tokens + query_token);
+            int base_q = (b * query_tokens + query_token) * q_channels + q_head_offset;
+            acc_k += ds[row * key_tokens + key_token] * q[base_q + d];
+            acc_v += probs[row * key_tokens + key_token] * grad_out[base_q + d];
+        }
+    }
+    grad_k[gid] = acc_k;
+    grad_v[gid] = acc_v;
+}
+
+// HD64 GQA backward path that does not materialize global probs/dp/ds tensors.
+// It recomputes row softmax inside the apply kernels: more ALU, less VRAM
+// traffic and no temporary attention-backward tensors in captured graphs.
+__kernel void gqa_backward_dq_no_tmp_hd64_f32(__global const float* q,
+                                             __global const float* k,
+                                             __global const float* v,
+                                             __global const float* grad_out,
+                                             __global float* grad_q,
+                                             int batch,
+                                             int query_tokens,
+                                             int key_tokens,
+                                             int n_head,
+                                             int n_kv_head,
+                                             int head_dim,
+                                             int causal,
+                                             int query_offset,
+                                             float scale) {
+    int lid = get_local_id(0);
+    int row = get_group_id(1);
+    int rows = batch * n_head * query_tokens;
+    if (row >= rows || key_tokens > FA_STAGED_MAX_TOKENS || head_dim != 64) return;
+
+    int query_token = row % query_tokens;
+    int bh = row / query_tokens;
+    int head = bh % n_head;
+    int b = bh / n_head;
+    int group = n_head / n_kv_head;
+    int kv_head = head / group;
+    int q_channels = n_head * 64;
+    int kv_channels = n_kv_head * 64;
+    int base_q = (b * query_tokens + query_token) * q_channels + head * 64;
+    int base_go = base_q;
+
+    __local float scores[FA_STAGED_MAX_TOKENS];
+    __local float probs[FA_STAGED_MAX_TOKENS];
+    __local float dp[FA_STAGED_MAX_TOKENS];
+    __local float shared[1];
+
+    if (lid < key_tokens) {
+        int key_token = lid;
+        if (causal && key_token > query_offset + query_token) {
+            scores[lid] = -3.402823466e+38F;
+            dp[lid] = 0.0f;
+        } else {
+            int base_k = (b * key_tokens + key_token) * kv_channels + kv_head * 64;
+            int base_v = base_k;
+            float score = 0.0f;
+            float dp_acc = 0.0f;
+            #pragma unroll
+            for (int d = 0; d < 64; ++d) {
+                score += q[base_q + d] * k[base_k + d];
+                dp_acc += grad_out[base_go + d] * v[base_v + d];
+            }
+            scores[lid] = score * scale;
+            dp[lid] = dp_acc;
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (lid == 0) {
+        float max_score = -3.402823466e+38F;
+        for (int kt = 0; kt < key_tokens; ++kt) max_score = fmax(max_score, scores[kt]);
+        float denom = 0.0f;
+        for (int kt = 0; kt < key_tokens; ++kt) {
+            float value = (scores[kt] == -3.402823466e+38F) ? 0.0f : exp(scores[kt] - max_score);
+            probs[kt] = value;
+            denom += value;
+        }
+        float inv = denom > 0.0f ? 1.0f / denom : 0.0f;
+        float sum_p_dp = 0.0f;
+        for (int kt = 0; kt < key_tokens; ++kt) {
+            probs[kt] *= inv;
+            sum_p_dp += probs[kt] * dp[kt];
+        }
+        shared[0] = sum_p_dp;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (lid < 64) {
+        float acc = 0.0f;
+        for (int kt = 0; kt < key_tokens; ++kt) {
+            if (causal && kt > query_offset + query_token) break;
+            int base_k = (b * key_tokens + kt) * kv_channels + kv_head * 64;
+            float ds = probs[kt] * (dp[kt] - shared[0]) * scale;
+            acc += ds * k[base_k + lid];
+        }
+        grad_q[base_q + lid] = acc;
+    }
+}
+
+__kernel void gqa_backward_kv_no_tmp_hd64_f32(__global const float* q,
+                                             __global const float* k,
+                                             __global const float* v,
+                                             __global const float* grad_out,
+                                             __global float* grad_k,
+                                             __global float* grad_v,
+                                             int batch,
+                                             int query_tokens,
+                                             int key_tokens,
+                                             int n_head,
+                                             int n_kv_head,
+                                             int head_dim,
+                                             int causal,
+                                             int query_offset,
+                                             float scale) {
+    int lid = get_local_id(0);
+    int group_id = get_group_id(1);
+    int groups_total = batch * n_kv_head * key_tokens;
+    if (group_id >= groups_total || key_tokens > FA_STAGED_MAX_TOKENS || head_dim != 64 || lid >= 64) return;
+
+    int key_token = group_id % key_tokens;
+    int bkv = group_id / key_tokens;
+    int kv_head = bkv % n_kv_head;
+    int b = bkv / n_kv_head;
+    int q_channels = n_head * 64;
+    int kv_channels = n_kv_head * 64;
+    int base_out = (b * key_tokens + key_token) * kv_channels + kv_head * 64;
+    int group = n_head / n_kv_head;
+
+    __local float scores[FA_STAGED_MAX_TOKENS];
+    __local float dpvals[FA_STAGED_MAX_TOKENS];
+    __local float reduce[64];
+    __local float shared[2];
+
+    float acc_k = 0.0f;
+    float acc_v = 0.0f;
+    for (int q_head = kv_head * group; q_head < (kv_head + 1) * group; ++q_head) {
+        int q_head_offset = q_head * 64;
+        for (int query_token = 0; query_token < query_tokens; ++query_token) {
+            if (causal && key_token > query_offset + query_token) continue;
+            int base_q = (b * query_tokens + query_token) * q_channels + q_head_offset;
+            int base_go = base_q;
+
+            for (int kt = 0; kt < key_tokens; ++kt) {
+                if (causal && kt > query_offset + query_token) {
+                    if (lid == 0) {
+                        scores[kt] = -3.402823466e+38F;
+                        dpvals[kt] = 0.0f;
+                    }
+                    barrier(CLK_LOCAL_MEM_FENCE);
+                    continue;
+                }
+
+                int base_k = (b * key_tokens + kt) * kv_channels + kv_head * 64;
+                int base_v = base_k;
+                reduce[lid] = q[base_q + lid] * k[base_k + lid];
+                barrier(CLK_LOCAL_MEM_FENCE);
+                for (int stride = 32; stride > 0; stride >>= 1) {
+                    if (lid < stride) reduce[lid] += reduce[lid + stride];
+                    barrier(CLK_LOCAL_MEM_FENCE);
+                }
+                if (lid == 0) scores[kt] = reduce[0] * scale;
+                barrier(CLK_LOCAL_MEM_FENCE);
+
+                reduce[lid] = grad_out[base_go + lid] * v[base_v + lid];
+                barrier(CLK_LOCAL_MEM_FENCE);
+                for (int stride = 32; stride > 0; stride >>= 1) {
+                    if (lid < stride) reduce[lid] += reduce[lid + stride];
+                    barrier(CLK_LOCAL_MEM_FENCE);
+                }
+                if (lid == 0) dpvals[kt] = reduce[0];
+                barrier(CLK_LOCAL_MEM_FENCE);
+            }
+
+            if (lid == 0) {
+                float max_score = -3.402823466e+38F;
+                for (int kt = 0; kt < key_tokens; ++kt) max_score = fmax(max_score, scores[kt]);
+                float denom = 0.0f;
+                float numer_target = 0.0f;
+                float dp_target = 0.0f;
+                float sum_numer_dp = 0.0f;
+                for (int kt = 0; kt < key_tokens; ++kt) {
+                    float numer = (scores[kt] == -3.402823466e+38F) ? 0.0f : exp(scores[kt] - max_score);
+                    denom += numer;
+                    sum_numer_dp += numer * dpvals[kt];
+                    if (kt == key_token) {
+                        numer_target = numer;
+                        dp_target = dpvals[kt];
+                    }
+                }
+                float inv = denom > 0.0f ? 1.0f / denom : 0.0f;
+                float p_target = numer_target * inv;
+                float sum_p_dp = sum_numer_dp * inv;
+                shared[0] = p_target;
+                shared[1] = p_target * (dp_target - sum_p_dp) * scale;
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+
+            acc_k += shared[1] * q[base_q + lid];
+            acc_v += shared[0] * grad_out[base_go + lid];
+        }
+    }
+
+    grad_k[base_out + lid] = acc_k;
+    grad_v[base_out + lid] = acc_v;
+}
+
 __kernel void rope_f32(__global const float* x,
                        __global float* out,
                        int batch,
@@ -1307,6 +1896,45 @@ __kernel void rope_f32(__global const float* x,
     float exponent = (float)pair_d / (float)head_dim;
     float angle = (float)(token_offset + token) / pow(theta, exponent);
     if (inverse) angle = -angle;
+    float cs = cos(angle);
+    float sn = sin(angle);
+    int base = (b * tokens + token) * channels + head * head_dim;
+    float even = x[base + pair_d];
+    float odd = x[base + pair_d + 1];
+    out[gid] = (d == pair_d) ? (even * cs - odd * sn) : (even * sn + odd * cs);
+}
+
+__kernel void rope_positions_f32(__global const float* x,
+                                 __global const int* positions,
+                                 __global float* out,
+                                 int batch,
+                                 int tokens,
+                                 int channels,
+                                 int n_head,
+                                 int head_dim,
+                                 int rotary_dim,
+                                 float theta) {
+    int gid = get_global_id(0);
+    int total = batch * tokens * channels;
+    if (gid >= total) return;
+    int d = gid % head_dim;
+    int c = gid % channels;
+    int token = (gid / channels) % tokens;
+    int b = gid / (tokens * channels);
+    int head = c / head_dim;
+    if (head >= n_head) return;
+    int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
+    rd = min(rd, head_dim);
+    rd = rd - (rd & 1);
+    if (d >= rd) {
+        out[gid] = x[gid];
+        return;
+    }
+    int pos = positions[b * tokens + token];
+    if (pos < 0) pos = 0;
+    int pair_d = d & ~1;
+    float exponent = (float)pair_d / (float)head_dim;
+    float angle = (float)pos / pow(theta, exponent);
     float cs = cos(angle);
     float sn = sin(angle);
     int base = (b * tokens + token) * channels + head * head_dim;
@@ -1371,6 +1999,28 @@ __kernel void kv_cache_append_f32(__global const float* new_k,
     int t = (gid / kv_channels) % new_tokens;
     int b = gid / (new_tokens * kv_channels);
     int dst = (b * max_tokens + start_pos + t) * kv_channels + c;
+    cache_k[dst] = new_k[gid];
+    cache_v[dst] = new_v[gid];
+}
+
+__kernel void kv_cache_append_positions_f32(__global const float* new_k,
+                                            __global const float* new_v,
+                                            __global const int* positions,
+                                            __global float* cache_k,
+                                            __global float* cache_v,
+                                            int batch,
+                                            int new_tokens,
+                                            int max_tokens,
+                                            int kv_channels,
+                                            int n) {
+    int gid = get_global_id(0);
+    if (gid >= n) return;
+    int c = gid % kv_channels;
+    int t = (gid / kv_channels) % new_tokens;
+    int b = gid / (new_tokens * kv_channels);
+    int pos = positions[b * new_tokens + t];
+    if (pos < 0 || pos >= max_tokens) return;
+    int dst = (b * max_tokens + pos) * kv_channels + c;
     cache_k[dst] = new_k[gid];
     cache_v[dst] = new_v[gid];
 }

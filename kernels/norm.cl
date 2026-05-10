@@ -83,6 +83,21 @@ __kernel void rmsnorm_rowwise_wg_f32(__global const float* x,
     }
 }
 
+__kernel void rmsnorm_row_inv_f32(__global const float* x,
+                                  __global float* row_inv,
+                                  int rows,
+                                  int cols,
+                                  float eps) {
+    int row = get_global_id(0);
+    if (row >= rows) return;
+    float ss = 0.0f;
+    for (int c = 0; c < cols; ++c) {
+        float xv = x[row * cols + c];
+        ss += xv * xv;
+    }
+    row_inv[row] = rsqrt(ss / (float)cols + eps);
+}
+
 __kernel void rmsnorm_backward_x_f32(__global const float* x,
                                      __global const float* weight,
                                      __global const float* grad_out,
@@ -134,6 +149,117 @@ __kernel void rmsnorm_backward_x_wg_f32(__global const float* x,
         int idx = row * cols + c;
         float xval = x[idx];
         grad_x[idx] = grad_out[idx] * weight[c] * inv - xval * inv * inv * inv * dot / (float)cols;
+    }
+}
+
+__kernel void rmsnorm_backward_x_residual_f32(__global const float* x,
+                                              __global const float* weight,
+                                              __global const float* grad_out,
+                                              __global const float* residual_grad,
+                                              __global float* grad_x,
+                                              int rows,
+                                              int cols,
+                                              float eps) {
+    int gid = get_global_id(0);
+    int n = rows * cols;
+    if (gid >= n) return;
+    int row = gid / cols;
+    int col = gid - row * cols;
+
+    float ss = 0.0f;
+    float dot = 0.0f;
+    for (int c = 0; c < cols; ++c) {
+        float xv = x[row * cols + c];
+        ss += xv * xv;
+        dot += grad_out[row * cols + c] * weight[c] * xv;
+    }
+    float inv = rsqrt(ss / (float)cols + eps);
+    float xval = x[gid];
+    float norm_grad = grad_out[gid] * weight[col] * inv - xval * inv * inv * inv * dot / (float)cols;
+    grad_x[gid] = residual_grad[gid] + norm_grad;
+}
+
+__kernel void rmsnorm_backward_x_residual_wg_f32(__global const float* x,
+                                                 __global const float* weight,
+                                                 __global const float* grad_out,
+                                                 __global const float* residual_grad,
+                                                 __global float* grad_x,
+                                                 int rows,
+                                                 int cols,
+                                                 float eps) {
+    int row = get_group_id(1);
+    int lid = get_local_id(0);
+    if (row >= rows) return;
+    __local float scratch_ss[256];
+    __local float scratch_dot[256];
+    float ss = 0.0f;
+    float dot = 0.0f;
+    for (int c = lid; c < cols; c += 256) {
+        float xv = x[row * cols + c];
+        ss += xv * xv;
+        dot += grad_out[row * cols + c] * weight[c] * xv;
+    }
+    ss = wg_reduce_sum_256(ss, scratch_ss);
+    dot = wg_reduce_sum_256(dot, scratch_dot);
+    float inv = rsqrt(ss / (float)cols + eps);
+    for (int c = lid; c < cols; c += 256) {
+        int idx = row * cols + c;
+        float xval = x[idx];
+        float norm_grad = grad_out[idx] * weight[c] * inv - xval * inv * inv * inv * dot / (float)cols;
+        grad_x[idx] = residual_grad[idx] + norm_grad;
+    }
+}
+
+__kernel void rmsnorm_backward_x_residual_cached_f32(__global const float* x,
+                                                     __global const float* weight,
+                                                     __global const float* row_inv,
+                                                     __global const float* grad_out,
+                                                     __global const float* residual_grad,
+                                                     __global float* grad_x,
+                                                     int rows,
+                                                     int cols) {
+    int gid = get_global_id(0);
+    int n = rows * cols;
+    if (gid >= n) return;
+    int row = gid / cols;
+    int col = gid - row * cols;
+
+    float dot = 0.0f;
+    for (int c = 0; c < cols; ++c) {
+        float xv = x[row * cols + c];
+        dot += grad_out[row * cols + c] * weight[c] * xv;
+    }
+    float inv = row_inv[row];
+    float xval = x[gid];
+    float norm_grad = grad_out[gid] * weight[col] * inv - xval * inv * inv * inv * dot / (float)cols;
+    grad_x[gid] = residual_grad[gid] + norm_grad;
+}
+
+__kernel void rmsnorm_backward_x_residual_cached_wg_f32(__global const float* x,
+                                                        __global const float* weight,
+                                                        __global const float* row_inv,
+                                                        __global const float* grad_out,
+                                                        __global const float* residual_grad,
+                                                        __global float* grad_x,
+                                                        int rows,
+                                                        int cols) {
+    int row = get_group_id(1);
+    int lid = get_local_id(0);
+    if (row >= rows) return;
+    __local float scratch_dot[256];
+    float dot = 0.0f;
+    for (int c = lid; c < cols; c += 256) {
+        float xv = x[row * cols + c];
+        dot += grad_out[row * cols + c] * weight[c] * xv;
+    }
+    dot = wg_reduce_sum_256(dot, scratch_dot);
+    float inv = row_inv[row];
+    float inv3 = inv * inv * inv;
+    for (int c = lid; c < cols; c += 256) {
+        int idx = row * cols + c;
+        float xval = x[idx];
+        float norm_grad = grad_out[idx] * weight[c] * inv - xval * inv3 * dot / (float)cols;
+        grad_x[idx] = residual_grad[idx] + norm_grad;
     }
 }
 

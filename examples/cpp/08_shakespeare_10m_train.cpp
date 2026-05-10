@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <string>
 #include <vector>
@@ -87,6 +88,7 @@ int main(int argc, char** argv) {
         auto backend = motifcl::Backend::create_opencl();
         const auto info = backend.device_info();
         const bool profile = env_enabled("MOTIFCL_PROFILE");
+        const bool static_train_step = env_enabled("MOTIFCL_STATIC_TRAIN_STEP");
         const int profile_top = env_int("MOTIFCL_PROFILE_TOP", 25);
         backend.profiler.set_enabled(profile);
 
@@ -98,6 +100,7 @@ int main(int argc, char** argv) {
         std::cout << "dataset=" << dataset_path << " bytes=" << bytes.size() << "\n";
         std::cout << "device=" << info.device_name << " driver=" << info.driver_version << "\n";
         if (profile) std::cout << "operator profiler enabled; set MOTIFCL_PROFILE_TOP=N to change output size\n";
+        if (static_train_step) std::cout << "static train-step enabled via MOTIFCL_STATIC_TRAIN_STEP=1\n";
         std::cout << "model: vocab=" << vocab_size
                   << " seq_len=" << seq_len
                   << " batch=" << batch_size
@@ -116,6 +119,9 @@ int main(int argc, char** argv) {
         int measured_steps = 0;
         float first_loss = 0.0f;
         float last_loss = 0.0f;
+        std::unique_ptr<motifcl::train::StaticTrainStepExecutor> static_executor;
+        int static_x_id = 0;
+        int static_y_id = 0;
 
         for (int step = 1; step <= steps; ++step) {
             if (profile) backend.profiler.clear();
@@ -130,13 +136,45 @@ int main(int argc, char** argv) {
             const auto t0 = std::chrono::steady_clock::now();
             auto x = motifcl::Tensor::from_cpu(backend, {batch_size, seq_len}, motifcl::DType::I32, x_host.data());
             auto y = motifcl::Tensor::from_cpu(backend, {batch_size * seq_len}, motifcl::DType::I32, y_host.data());
-            auto logits3 = model.forward(x);
-            auto logits = logits3.view({batch_size * seq_len, vocab_size});
-            auto loss = motifcl::softmax_cross_entropy(logits, y);
-            loss.backward();
-            opt.step();
-            opt.zero_grad();
-            backend.finish();
+            float loss_value = 0.0f;
+            if (static_train_step) {
+                if (!static_executor) {
+                    static_x_id = x.id();
+                    static_y_id = y.id();
+                    auto captured = motifcl::train::capture_static_train_step([&]() {
+                        auto logits3 = model.forward(x);
+                        auto logits = logits3.view({batch_size * seq_len, vocab_size});
+                        auto loss = motifcl::softmax_cross_entropy(logits, y);
+                        loss.backward();
+                        opt.step();
+                        opt.zero_grad();
+                        return loss;
+                    });
+                    static_executor = std::make_unique<motifcl::train::StaticTrainStepExecutor>(std::move(captured));
+                    backend.finish();
+                    loss_value = static_executor->loss_value();
+                    std::cout << "static train-step captured: mode=" << static_executor->execution_mode()
+                              << " nodes=" << static_executor->graph().size()
+                              << " arena_bytes=" << static_executor->arena_bytes()
+                              << " arena_bindings=" << static_executor->arena_binding_count()
+                              << "\n";
+                } else {
+                    loss_value = static_executor->execute_with_loss({
+                        {static_x_id, x},
+                        {static_y_id, y},
+                    });
+                    backend.finish();
+                }
+            } else {
+                auto logits3 = model.forward(x);
+                auto logits = logits3.view({batch_size * seq_len, vocab_size});
+                auto loss = motifcl::softmax_cross_entropy(logits, y);
+                loss.backward();
+                opt.step();
+                opt.zero_grad();
+                backend.finish();
+                loss_value = loss.item();
+            }
             const auto t1 = std::chrono::steady_clock::now();
 
             const double step_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -145,7 +183,6 @@ int main(int argc, char** argv) {
                 measured_ms += step_ms;
                 ++measured_steps;
             }
-            const float loss_value = loss.item();
             if (step == 1) first_loss = loss_value;
             last_loss = loss_value;
             if (profile && (step == 1 || step == steps || step % 10 == 0)) {

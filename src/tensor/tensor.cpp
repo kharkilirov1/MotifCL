@@ -110,7 +110,8 @@ Tensor::Tensor(Backend& backend, Shape shape, DType dtype, std::shared_ptr<Stora
     impl_->strides = contiguous_strides(impl_->shape);
     impl_->dtype = dtype;
     impl_->offset = offset;
-    autograd::register_tensor(impl_->id, impl_->shape, impl_->dtype, nbytes());
+    const cl_mem mem = impl_->storage && impl_->storage->buffer.valid() ? impl_->storage->buffer.raw() : nullptr;
+    autograd::register_tensor(impl_->id, impl_->shape, impl_->dtype, nbytes(), mem);
 }
 
 Backend& Tensor::backend() const {
@@ -353,6 +354,14 @@ void Tensor::_set_grad_fn(std::shared_ptr<autograd::Node> node) {
 std::shared_ptr<autograd::Node> Tensor::_grad_fn() const {
     MCL_CHECK(valid(), "invalid tensor");
     return impl_->grad_fn;
+}
+
+void Tensor::_set_grad(const Tensor& grad_value) {
+    MCL_CHECK(valid(), "invalid tensor");
+    MCL_CHECK(grad_value.valid(), "cannot set invalid gradient tensor");
+    MCL_CHECK(grad_value.shape() == shape(), "gradient shape mismatch");
+    MCL_CHECK(grad_value.backend_ptr() == backend_ptr(), "gradient backend mismatch");
+    impl_->grad = std::make_shared<Tensor>(grad_value);
 }
 
 void Tensor::_accumulate_grad(const Tensor& grad_value) {

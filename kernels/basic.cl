@@ -66,6 +66,24 @@ __kernel void add_bias_rows_f32(__global const float* x,
     }
 }
 
+__kernel void gather_last_token_logits_f32(__global const float* logits,
+                                           __global const int* positions,
+                                           __global float* out,
+                                           int batch,
+                                           int seq_len,
+                                           int vocab,
+                                           int n) {
+    int gid = get_global_id(0);
+    if (gid >= n) return;
+    int b = gid / vocab;
+    int v = gid - b * vocab;
+    if (b >= batch) return;
+    int t = positions[b];
+    if (t < 0) t = 0;
+    if (t >= seq_len) t = seq_len - 1;
+    out[gid] = logits[(b * seq_len + t) * vocab + v];
+}
+
 inline uint mcl_hash_u32(uint x) {
     x ^= x >> 16;
     x *= 0x7feb352du;

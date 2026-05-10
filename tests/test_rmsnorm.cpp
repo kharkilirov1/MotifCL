@@ -24,6 +24,9 @@ int main() {
         auto G = motifcl::Tensor::from_cpu(backend, {1, 4}, motifcl::DType::F32, grad.data());
         auto GX = motifcl::rmsnorm_backward_x(X, W, G).to_vector<float>();
         auto GW = motifcl::rmsnorm_backward_weight(X, W, G).to_vector<float>();
+        std::vector<float> residual_grad = {1.0f, -2.0f, 0.5f, 3.0f};
+        auto RG = motifcl::Tensor::from_cpu(backend, {1, 4}, motifcl::DType::F32, residual_grad.data());
+        auto GXFused = motifcl::rmsnorm_backward_x_residual(X, W, G, RG).to_vector<float>();
         float dot = 0.0f;
         for (int i = 0; i < 4; ++i) dot += grad[i] * x[i];
         float inv = 1.0f / rms;
@@ -31,6 +34,7 @@ int main() {
             float expected_x = grad[i] * inv - x[i] * inv * inv * inv * dot / 4.0f;
             float expected_w = grad[i] * x[i] * inv;
             if (std::fabs(GX[i] - expected_x) > 1e-4f) return 1;
+            if (std::fabs(GXFused[i] - (expected_x + residual_grad[i])) > 1e-4f) return 1;
             if (std::fabs(GW[i] - expected_w) > 1e-4f) return 1;
         }
 

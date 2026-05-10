@@ -60,6 +60,7 @@ set(MOTIFCL_SOURCES
     src/runtime/buffer.cpp
     src/runtime/program.cpp
     src/runtime/kernel.cpp
+    src/runtime/command_buffer.cpp
     src/runtime/backend.cpp
     src/runtime/profiler.cpp
     src/tensor/storage.cpp
@@ -72,6 +73,7 @@ set(MOTIFCL_SOURCES
     src/ops/fp16.cpp
     src/ops/norm.cpp
     src/ops/activation.cpp
+    src/ops/fused_transformer.cpp
     src/ops/attention.cpp
     src/ops/loss.cpp
     src/ops/optim.cpp
@@ -85,12 +87,16 @@ set(MOTIFCL_SOURCES
     src/nn/rmsnorm.cpp
     src/nn/attention.cpp
     src/nn/transformer.cpp
+    src/nn/gemma.cpp
+    src/nn/hf_compat.cpp
     src/motif/motif_linear.cpp
     src/motif/motif_lora.cpp
     src/motif/sarc_residual.cpp
     src/motif/router.cpp
     src/motif/motif_block.cpp
     src/train/adam.cpp
+    src/train/mixed_precision.cpp
+    src/train/static_train_step.cpp
     src/train/sgd.cpp
     src/train/trainer.cpp
     src/train/training_utils.cpp

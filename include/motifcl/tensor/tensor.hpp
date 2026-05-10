@@ -92,6 +92,7 @@ public:
 
     void _set_grad_fn(std::shared_ptr<autograd::Node> node);
     std::shared_ptr<autograd::Node> _grad_fn() const;
+    void _set_grad(const Tensor& grad);
     void _accumulate_grad(const Tensor& grad);
     void _set_quant_scale(float scale);
     void _set_quant_scales(const Tensor& scales, int axis, int64_t block_size = 0);

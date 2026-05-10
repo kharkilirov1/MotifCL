@@ -96,6 +96,39 @@ Tensor rmsnorm_backward_x(const Tensor& x, const Tensor& weight, const Tensor& g
     return out;
 }
 
+Tensor rmsnorm_backward_x_residual(const Tensor& x, const Tensor& weight, const Tensor& grad_out,
+                                   const Tensor& residual_grad, float eps) {
+    require_rmsnorm_inputs(x, weight, "rmsnorm_backward_x_residual");
+    MCL_CHECK(grad_out.dtype() == DType::F32 && grad_out.shape() == x.shape(),
+              "rmsnorm_backward_x_residual grad_out shape/dtype mismatch");
+    MCL_CHECK(residual_grad.dtype() == DType::F32 && residual_grad.shape() == x.shape(),
+              "rmsnorm_backward_x_residual residual_grad shape/dtype mismatch");
+    MCL_CHECK(grad_out.backend_ptr() == x.backend_ptr() && residual_grad.backend_ptr() == x.backend_ptr(),
+              "rmsnorm_backward_x_residual requires tensors on same backend");
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    const bool use_wg = supports_norm_workgroup(x.backend());
+    const std::string kernel_name = use_wg ? "rmsnorm_backward_x_residual_wg_f32" : "rmsnorm_backward_x_residual_f32";
+    auto k = x.backend().kernels.get(kernel_name);
+    int rows = static_cast<int>(x.shape()[0]);
+    int cols = static_cast<int>(x.shape()[1]);
+    k.set_arg(0, x.buffer());
+    k.set_arg(1, weight.buffer());
+    k.set_arg(2, grad_out.buffer());
+    k.set_arg(3, residual_grad.buffer());
+    k.set_arg(4, out.buffer());
+    k.set_arg(5, rows);
+    k.set_arg(6, cols);
+    k.set_arg(7, eps);
+    if (use_wg) {
+        k.launch2d(kNormWorkgroup, static_cast<std::size_t>(rows), kNormWorkgroup, 1);
+    } else {
+        int n = rows * cols;
+        k.launch1d(round_up(static_cast<std::size_t>(n), 256), 256);
+    }
+    autograd::record_op(kernel_name, {x.id(), weight.id(), grad_out.id(), residual_grad.id()}, {out.id()});
+    return out;
+}
+
 Tensor rmsnorm_backward_weight(const Tensor& x, const Tensor& weight, const Tensor& grad_out, float eps) {
     require_rmsnorm_inputs(x, weight, "rmsnorm_backward_weight");
     MCL_CHECK(grad_out.dtype() == DType::F32 && grad_out.shape() == x.shape(), "rmsnorm_backward_weight grad_out shape/dtype mismatch");

@@ -1,13 +1,18 @@
 #include <motifcl/nn/transformer.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
+#include <motifcl/autograd/node.hpp>
 #include <motifcl/core/error.hpp>
 #include <motifcl/ops/activation.hpp>
 #include <motifcl/ops/attention.hpp>
 #include <motifcl/ops/basic_ops.hpp>
+#include <motifcl/ops/fused_transformer.hpp>
 #include <motifcl/ops/indexing.hpp>
 #include <motifcl/ops/matmul.hpp>
+#include <motifcl/ops/quant.hpp>
 
 namespace motifcl::nn {
 
@@ -105,6 +110,32 @@ TransformerConfig normalize_config(TransformerConfig cfg) {
     MCL_CHECK(cfg.dropout >= 0.0f && cfg.dropout < 1.0f, "TransformerConfig dropout must be in [0, 1)");
     return cfg;
 }
+
+bool env_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) return false;
+    return std::string(value) != "0" && std::string(value) != "false" && std::string(value) != "FALSE";
+}
+
+bool can_use_fused_swiglu_mlp_residual(const ModernMLP& mlp) {
+    return env_enabled("MOTIFCL_ENABLE_FUSED_MLP_BACKWARD") &&
+           mlp.use_swiglu &&
+           mlp.dropout_p == 0.0f &&
+           !mlp.gate_up_proj.has_bias() &&
+           !mlp.down_proj.has_bias();
+}
+
+Tensor fused_or_eager_mlp_residual(const Tensor& h, RMSNorm& norm, ModernMLP& mlp) {
+    if (can_use_fused_swiglu_mlp_residual(mlp)) {
+        return motifcl::fused_swiglu_mlp_rmsnorm_residual(
+            h,
+            norm.weight.data,
+            mlp.gate_up_proj.weight.data,
+            mlp.down_proj.weight.data,
+            norm.eps);
+    }
+    return motifcl::add(h, mlp.forward(norm.forward(h)));
+}
 }
 
 KVCache::KVCache(Backend& backend, int64_t batch, int64_t max_seq, int n_kv, int head_dim_value)
@@ -135,6 +166,24 @@ std::vector<Parameter*> ModernMLP::parameters() {
     auto p2 = down_proj.parameters();
     p1.insert(p1.end(), p2.begin(), p2.end());
     return p1;
+}
+
+void ModernMLP::enable_quantized_inference(DType qdtype) {
+    gate_up_proj.enable_quantized_inference(qdtype);
+    down_proj.enable_quantized_inference(qdtype);
+}
+
+void ModernMLP::disable_quantized_inference() {
+    gate_up_proj.disable_quantized_inference();
+    down_proj.disable_quantized_inference();
+}
+
+bool ModernMLP::quantized_inference_enabled() const {
+    return gate_up_proj.quantized_inference_enabled() && down_proj.quantized_inference_enabled();
+}
+
+DType ModernMLP::quantized_weight_dtype() const {
+    return quantized_inference_enabled() ? gate_up_proj.quantized_weight_dtype() : DType::F32;
 }
 
 ModernSelfAttention::ModernSelfAttention(Backend& backend, const TransformerConfig& raw_config)
@@ -215,11 +264,46 @@ Tensor ModernSelfAttention::forward_with_cache_masked(const Tensor& x, const Ten
     return o_proj_.forward(context);
 }
 
+Tensor ModernSelfAttention::forward_with_cache_positions_masked(const Tensor& x, const Tensor& positions, const Tensor& mask,
+                                                                KVCache& cache, int64_t batch_size, int64_t seq_len,
+                                                                int64_t cache_length_after, bool causal) {
+    MCL_CHECK(cache.k.valid() && cache.v.valid(), "ModernSelfAttention cache is not initialized");
+    MCL_CHECK(batch_size == cache.batch_size && n_kv_head_ == cache.n_kv_head && head_dim_ == cache.head_dim, "ModernSelfAttention cache shape mismatch");
+    MCL_CHECK(cache_length_after >= cache.length && cache_length_after <= cache.max_seq_len, "ModernSelfAttention positioned KV cache length out of range");
+    auto packed = qkv_proj_.forward(x);
+    auto split = motifcl::qkv_split(packed, q_dim_, kv_dim_);
+    auto q = use_rope_ ? motifcl::rope_positions(split.q, positions, n_head_, batch_size, seq_len, rope_theta_, rotary_dim_) : split.q;
+    auto k_new = use_rope_ ? motifcl::rope_positions(split.k, positions, n_kv_head_, batch_size, seq_len, rope_theta_, rotary_dim_) : split.k;
+    motifcl::kv_cache_append_positions(k_new, split.v, positions, cache.k, cache.v, batch_size, seq_len, cache.max_seq_len);
+    cache.length = cache_length_after;
+    auto context = motifcl::grouped_query_attention_masked(q, cache.k, cache.v, mask, n_head_, n_kv_head_, causal,
+                                                           batch_size, seq_len, cache.max_seq_len, 0, false);
+    return o_proj_.forward(context);
+}
+
 std::vector<Parameter*> ModernSelfAttention::parameters() {
     auto p1 = qkv_proj_.parameters();
     auto p2 = o_proj_.parameters();
     p1.insert(p1.end(), p2.begin(), p2.end());
     return p1;
+}
+
+void ModernSelfAttention::enable_quantized_inference(DType qdtype) {
+    qkv_proj_.enable_quantized_inference(qdtype);
+    o_proj_.enable_quantized_inference(qdtype);
+}
+
+void ModernSelfAttention::disable_quantized_inference() {
+    qkv_proj_.disable_quantized_inference();
+    o_proj_.disable_quantized_inference();
+}
+
+bool ModernSelfAttention::quantized_inference_enabled() const {
+    return qkv_proj_.quantized_inference_enabled() && o_proj_.quantized_inference_enabled();
+}
+
+DType ModernSelfAttention::quantized_weight_dtype() const {
+    return quantized_inference_enabled() ? qkv_proj_.quantized_weight_dtype() : DType::F32;
 }
 
 ModernTransformerBlock::ModernTransformerBlock(Backend& backend, const TransformerConfig& raw_config)
@@ -240,26 +324,34 @@ Tensor ModernTransformerBlock::forward(const Tensor& x) {
 Tensor ModernTransformerBlock::forward(const Tensor& x, int64_t batch_size, int64_t seq_len) {
     auto attn_out = attn_.forward(norm1_.forward(x), batch_size, seq_len, causal_);
     auto h = add(x, attn_out);
-    auto mlp_out = mlp_.forward(norm2_.forward(h));
-    return add(h, mlp_out);
+    return fused_or_eager_mlp_residual(h, norm2_, mlp_);
 }
 
 Tensor ModernTransformerBlock::forward_masked(const Tensor& x, const Tensor& mask, int64_t batch_size, int64_t seq_len) {
     auto attn_out = attn_.forward_masked(norm1_.forward(x), mask, batch_size, seq_len, causal_);
     auto h = add(x, attn_out);
-    return add(h, mlp_.forward(norm2_.forward(h)));
+    return fused_or_eager_mlp_residual(h, norm2_, mlp_);
 }
 
 Tensor ModernTransformerBlock::forward_with_cache(const Tensor& x, KVCache& cache, int64_t batch_size, int64_t seq_len) {
     auto attn_out = attn_.forward_with_cache(norm1_.forward(x), cache, batch_size, seq_len);
     auto h = add(x, attn_out);
-    return add(h, mlp_.forward(norm2_.forward(h)));
+    return fused_or_eager_mlp_residual(h, norm2_, mlp_);
 }
 
 Tensor ModernTransformerBlock::forward_with_cache_masked(const Tensor& x, const Tensor& mask, KVCache& cache, int64_t batch_size, int64_t seq_len) {
     auto attn_out = attn_.forward_with_cache_masked(norm1_.forward(x), mask, cache, batch_size, seq_len);
     auto h = add(x, attn_out);
-    return add(h, mlp_.forward(norm2_.forward(h)));
+    return fused_or_eager_mlp_residual(h, norm2_, mlp_);
+}
+
+Tensor ModernTransformerBlock::forward_with_cache_positions_masked(const Tensor& x, const Tensor& positions, const Tensor& mask,
+                                                                   KVCache& cache, int64_t batch_size, int64_t seq_len,
+                                                                   int64_t cache_length_after, bool causal) {
+    auto attn_out = attn_.forward_with_cache_positions_masked(norm1_.forward(x), positions, mask, cache,
+                                                              batch_size, seq_len, cache_length_after, causal);
+    auto h = add(x, attn_out);
+    return fused_or_eager_mlp_residual(h, norm2_, mlp_);
 }
 
 std::vector<Parameter*> ModernTransformerBlock::parameters() {
@@ -269,6 +361,24 @@ std::vector<Parameter*> ModernTransformerBlock::parameters() {
         result.insert(result.end(), p.begin(), p.end());
     }
     return result;
+}
+
+void ModernTransformerBlock::enable_quantized_inference(DType qdtype) {
+    attn_.enable_quantized_inference(qdtype);
+    mlp_.enable_quantized_inference(qdtype);
+}
+
+void ModernTransformerBlock::disable_quantized_inference() {
+    attn_.disable_quantized_inference();
+    mlp_.disable_quantized_inference();
+}
+
+bool ModernTransformerBlock::quantized_inference_enabled() const {
+    return attn_.quantized_inference_enabled() && mlp_.quantized_inference_enabled();
+}
+
+DType ModernTransformerBlock::quantized_weight_dtype() const {
+    return quantized_inference_enabled() ? attn_.quantized_weight_dtype() : DType::F32;
 }
 
 ModernGPTModel::ModernGPTModel(Backend& backend, const TransformerConfig& raw_config)
@@ -296,7 +406,7 @@ Tensor ModernGPTModel::forward(const Tensor& token_ids) {
         : token_embedding.forward(token_ids).view({B * T, config.n_embd});
     for (auto& block : blocks) h = block->forward(h, B, T);
     h = final_norm.forward(h);
-    Tensor logits = matmul(h, lm_head.data);
+    Tensor logits = project_logits(h);
     if (token_ids.ndim() == 2) return logits.view({B, T, config.vocab_size});
     return logits;
 }
@@ -312,7 +422,7 @@ Tensor ModernGPTModel::forward_masked(const Tensor& token_ids, const Tensor& mas
         : token_embedding.forward(token_ids).view({B * T, config.n_embd});
     for (auto& block : blocks) h = block->forward_masked(h, mask, B, T);
     h = final_norm.forward(h);
-    Tensor logits = matmul(h, lm_head.data);
+    Tensor logits = project_logits(h);
     if (token_ids.ndim() == 2) return logits.view({B, T, config.vocab_size});
     return logits;
 }
@@ -346,7 +456,7 @@ Tensor ModernGPTModel::forward_with_cache(const Tensor& token_ids, std::vector<K
         h = blocks[i]->forward_with_cache(h, *caches[i], B, T);
     }
     h = final_norm.forward(h);
-    Tensor logits = matmul(h, lm_head.data);
+    Tensor logits = project_logits(h);
     if (token_ids.ndim() == 2) return logits.view({B, T, config.vocab_size});
     return logits;
 }
@@ -380,7 +490,47 @@ Tensor ModernGPTModel::forward_with_cache_masked(const Tensor& token_ids, const 
         h = blocks[i]->forward_with_cache_masked(h, mask, *caches[i], B, T);
     }
     h = final_norm.forward(h);
-    Tensor logits = matmul(h, lm_head.data);
+    Tensor logits = project_logits(h);
+    if (token_ids.ndim() == 2) return logits.view({B, T, config.vocab_size});
+    return logits;
+}
+
+Tensor ModernGPTModel::forward_with_cache_positions_masked(const Tensor& token_ids, const Tensor& positions, const Tensor& mask,
+                                                              std::vector<KVCache>& caches, int64_t cache_length_after,
+                                                              bool causal) {
+    std::vector<KVCache*> ptrs;
+    ptrs.reserve(caches.size());
+    for (auto& cache : caches) ptrs.push_back(&cache);
+    return forward_with_cache_positions_masked(token_ids, positions, mask, ptrs, cache_length_after, causal);
+}
+
+Tensor ModernGPTModel::forward_with_cache_positions_masked(const Tensor& token_ids, const Tensor& positions, const Tensor& mask,
+                                                              std::vector<KVCache*>& caches, int64_t cache_length_after,
+                                                              bool causal) {
+    MCL_CHECK(token_ids.dtype() == DType::I32, "ModernGPTModel token ids must be i32");
+    MCL_CHECK(token_ids.ndim() == 1 || token_ids.ndim() == 2, "ModernGPTModel token ids must be [T] or [B,T]");
+    MCL_CHECK(positions.dtype() == DType::I32 && positions.ndim() == 2, "ModernGPTModel positioned cache expects i32 [B,T] positions");
+    MCL_CHECK(caches.size() == blocks.size(), "ModernGPTModel KV cache count must match layer count");
+    MCL_CHECK(!use_positions_, "ModernGPTModel cached inference currently expects RoPE/token-only positions");
+    const int64_t B = token_ids.ndim() == 2 ? token_ids.shape()[0] : 1;
+    const int64_t T = token_ids.ndim() == 2 ? token_ids.shape()[1] : token_ids.shape()[0];
+    MCL_CHECK(T > 0 && T <= config.block_size, "ModernGPTModel invalid cached sequence length");
+    MCL_CHECK(positions.shape()[0] == B && positions.shape()[1] == T, "ModernGPTModel positions shape mismatch");
+    MCL_CHECK(positions.backend_ptr() == token_ids.backend_ptr(), "ModernGPTModel positions must share backend with token ids");
+    if (!caches.empty()) {
+        MCL_CHECK(caches[0] != nullptr, "ModernGPTModel null KV cache");
+        MCL_CHECK(cache_length_after >= caches[0]->length && cache_length_after <= config.block_size, "ModernGPTModel positioned KV cache exceeds block_size");
+        for (auto* cache : caches) {
+            MCL_CHECK(cache != nullptr, "ModernGPTModel null KV cache");
+            MCL_CHECK(cache->length == caches[0]->length, "ModernGPTModel KV caches must have equal current length");
+        }
+    }
+    Tensor h = token_embedding.forward(token_ids).view({B * T, config.n_embd});
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        h = blocks[i]->forward_with_cache_positions_masked(h, positions, mask, *caches[i], B, T, cache_length_after, causal);
+    }
+    h = final_norm.forward(h);
+    Tensor logits = project_logits(h);
     if (token_ids.ndim() == 2) return logits.view({B, T, config.vocab_size});
     return logits;
 }
@@ -406,6 +556,54 @@ std::vector<KVCache> ModernGPTModel::create_kv_cache(Backend& backend, int64_t b
         caches.emplace_back(backend, batch_size, config.block_size, config.n_kv_head, head_dim);
     }
     return caches;
+}
+
+void ModernGPTModel::enable_quantized_inference(DType qdtype) {
+    MCL_CHECK(qdtype == DType::Q8_0 || qdtype == DType::Q4_0,
+              "ModernGPTModel quantized inference expects qdtype Q8_0 or Q4_0");
+    for (auto& block : blocks) block->enable_quantized_inference(qdtype);
+    quantized_weight_dtype_ = qdtype;
+    quantized_lm_head_ = qdtype == DType::Q4_0
+        ? quantize_q4_symmetric_cols(lm_head.data)
+        : quantize_q8_symmetric_cols(lm_head.data);
+}
+
+void ModernGPTModel::enable_quantized_inference(const QuantizationPolicy& policy) {
+    MCL_CHECK(policy.default_dtype == DType::Q8_0 || policy.default_dtype == DType::Q4_0,
+              "ModernGPTModel quantization policy default dtype must be Q8_0 or Q4_0");
+    MCL_CHECK(policy.lm_head_dtype == DType::Q8_0 || policy.lm_head_dtype == DType::Q4_0,
+              "ModernGPTModel quantization policy lm_head dtype must be Q8_0 or Q4_0");
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        const bool use_q8 = std::find(policy.q8_layers.begin(), policy.q8_layers.end(), static_cast<int>(i)) != policy.q8_layers.end();
+        blocks[i]->enable_quantized_inference(use_q8 ? DType::Q8_0 : policy.default_dtype);
+    }
+    quantized_weight_dtype_ = policy.default_dtype;
+    quantized_lm_head_ = policy.lm_head_dtype == DType::Q4_0
+        ? quantize_q4_symmetric_cols(lm_head.data)
+        : quantize_q8_symmetric_cols(lm_head.data);
+}
+
+void ModernGPTModel::set_quantized_lm_head(const Tensor& weight) {
+    MCL_CHECK(weight.valid() && (weight.dtype() == DType::Q8_0 || weight.dtype() == DType::Q4_0),
+              "ModernGPTModel quantized lm_head must be Q8_0 or Q4_0");
+    MCL_CHECK(weight.ndim() == 2 && weight.shape()[0] == config.n_embd && weight.shape()[1] == config.vocab_size,
+              "ModernGPTModel quantized lm_head shape mismatch");
+    quantized_lm_head_ = weight;
+    quantized_weight_dtype_ = weight.dtype();
+}
+
+void ModernGPTModel::disable_quantized_inference() {
+    for (auto& block : blocks) block->disable_quantized_inference();
+    quantized_lm_head_ = Tensor{};
+    quantized_weight_dtype_ = DType::F32;
+}
+
+Tensor ModernGPTModel::project_logits(const Tensor& h) {
+    if (quantized_lm_head_.valid() && !autograd::is_enabled()) {
+        auto hq = quantize_q8_symmetric_rows(h);
+        return matmul(hq, quantized_lm_head_);
+    }
+    return matmul(h, lm_head.data);
 }
 
 } // namespace motifcl::nn

@@ -1,4 +1,5 @@
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <vector>
 #include <motifcl/motifcl.hpp>
@@ -14,6 +15,10 @@ int main() {
             int_dot_mode != "vendor_dot4_unrolled" &&
             int_dot_mode != "scalar_fallback") return 1;
         if (int_dot_mode != "scalar_fallback" && !backend.supports_integer_dot()) return 1;
+        const auto command_mode = backend.command_buffer_mode();
+        if (command_mode != "cl_khr_command_buffer_available" &&
+            command_mode != "host_replay_fallback") return 1;
+        if (backend.supports_command_buffer() != (command_mode == "cl_khr_command_buffer_available")) return 1;
 
         std::vector<float> values = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f};
         auto X = motifcl::Tensor::from_cpu(backend, {5}, motifcl::DType::F32, values.data());
@@ -65,6 +70,22 @@ int main() {
             if (std::fabs(C4[i] - ref[i]) > 0.15f) return 1;
         }
 
+        std::vector<float> q4_dot_a = {1.0f, -2.0f, 3.0f, -4.0f,
+                                       5.0f, -6.0f, 7.0f, -7.0f};
+        std::vector<float> q4_dot_b = {1.0f, 2.0f,
+                                       -3.0f, -4.0f,
+                                       5.0f, 6.0f,
+                                       -7.0f, -7.0f};
+        auto Q4DA = motifcl::Tensor::from_cpu(backend, {2, 4}, motifcl::DType::F32, q4_dot_a.data());
+        auto Q4DB = motifcl::Tensor::from_cpu(backend, {4, 2}, motifcl::DType::F32, q4_dot_b.data());
+        auto Q4DotA = motifcl::quantize_q4_symmetric(Q4DA, 1.0f);
+        auto Q4DotB = motifcl::quantize_q4_symmetric(Q4DB, 1.0f);
+        auto Q4DotC = motifcl::matmul(Q4DotA, Q4DotB).to_vector<float>();
+        std::vector<float> q4_dot_ref = {50.0f, 56.0f, 107.0f, 125.0f};
+        for (std::size_t i = 0; i < q4_dot_ref.size(); ++i) {
+            if (std::fabs(Q4DotC[i] - q4_dot_ref[i]) > 1e-4f) return 1;
+        }
+
         auto C84 = motifcl::matmul(AQ, BQ4).to_vector<float>();
         auto C48 = motifcl::matmul(AQ4, BQ).to_vector<float>();
         for (std::size_t i = 0; i < ref.size(); ++i) {
@@ -109,6 +130,26 @@ int main() {
         std::vector<float> ref_block = {42.0f, -36.0f, 92.0f, -68.0f};
         for (std::size_t i = 0; i < ref_block.size(); ++i) {
             if (std::fabs(CBlock[i] - ref_block[i]) > 0.15f) return 1;
+        }
+
+        auto argmax = motifcl::rowwise_argmax(A2).to_vector<std::int32_t>();
+        if (argmax != std::vector<std::int32_t>({1, 1})) return 1;
+        auto sample_greedy = motifcl::rowwise_sample(A2, 0.0f, 0, 123).to_vector<std::int32_t>();
+        if (sample_greedy != std::vector<std::int32_t>({1, 1})) return 1;
+        auto sample_top1 = motifcl::rowwise_sample(A2, 1.0f, 1, 123).to_vector<std::int32_t>();
+        if (sample_top1 != std::vector<std::int32_t>({1, 1})) return 1;
+        auto sample_top_p_tiny = motifcl::rowwise_sample_top_p(A2, 1.0f, 0, 0.01f, 123).to_vector<std::int32_t>();
+        if (sample_top_p_tiny != std::vector<std::int32_t>({1, 1})) return 1;
+
+        const auto q_path = std::filesystem::current_path() / "quant_tensor_roundtrip.mclt";
+        motifcl::save_tensor(A2Q4Rows, q_path.string());
+        auto loaded_q4 = motifcl::load_tensor(backend, q_path.string());
+        std::filesystem::remove(q_path);
+        if (loaded_q4.dtype() != motifcl::DType::Q4_0 || !loaded_q4.has_quant_scales() ||
+            loaded_q4.quant_scale_axis() != 0) return 1;
+        auto loaded_d4 = motifcl::dequantize_q4(loaded_q4).to_vector<float>();
+        for (std::size_t i = 0; i < a_exact.size(); ++i) {
+            if (std::fabs(loaded_d4[i] - a_exact[i]) > 1e-4f) return 1;
         }
     } catch (const std::exception& e) {
         return motifcl_test::handle_exception(e);

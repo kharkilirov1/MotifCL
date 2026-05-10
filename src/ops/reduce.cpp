@@ -73,6 +73,50 @@ Tensor rowwise_max(const Tensor& x) {
     return out;
 }
 
+Tensor rowwise_argmax(const Tensor& x) {
+    MCL_CHECK(x.dtype() == DType::F32, "rowwise_argmax supports f32 only");
+    MCL_CHECK(x.ndim() == 2, "rowwise_argmax expects rank-2 tensor");
+    MCL_CHECK(x.shape()[0] > 0 && x.shape()[1] > 0, "rowwise_argmax expects non-empty rows/cols");
+    auto out = Tensor::empty(x.backend(), {x.shape()[0]}, DType::I32);
+    auto k = x.backend().kernels.get("rowwise_argmax_f32_i32");
+    int rows = static_cast<int>(x.shape()[0]);
+    int cols = static_cast<int>(x.shape()[1]);
+    k.set_arg(0, x.buffer());
+    k.set_arg(1, out.buffer());
+    k.set_arg(2, rows);
+    k.set_arg(3, cols);
+    k.launch1d(round_up(static_cast<std::size_t>(rows), 256), 256);
+    autograd::record_op("rowwise_argmax_f32_i32", {x.id()}, {out.id()});
+    return out;
+}
+
+Tensor rowwise_sample(const Tensor& x, float temperature, int top_k, std::uint32_t seed) {
+    return rowwise_sample_top_p(x, temperature, top_k, 1.0f, seed);
+}
+
+Tensor rowwise_sample_top_p(const Tensor& x, float temperature, int top_k, float top_p, std::uint32_t seed) {
+    MCL_CHECK(x.dtype() == DType::F32, "rowwise_sample supports f32 only");
+    MCL_CHECK(x.ndim() == 2, "rowwise_sample expects rank-2 tensor");
+    MCL_CHECK(x.shape()[0] > 0 && x.shape()[1] > 0, "rowwise_sample expects non-empty rows/cols");
+    MCL_CHECK(temperature >= 0.0f, "rowwise_sample temperature must be non-negative");
+    MCL_CHECK(top_p > 0.0f, "rowwise_sample top_p must be positive");
+    auto out = Tensor::empty(x.backend(), {x.shape()[0]}, DType::I32);
+    auto k = x.backend().kernels.get("rowwise_sample_reduce_f32_i32");
+    const int rows = static_cast<int>(x.shape()[0]);
+    const int cols = static_cast<int>(x.shape()[1]);
+    k.set_arg(0, x.buffer());
+    k.set_arg(1, out.buffer());
+    k.set_arg(2, rows);
+    k.set_arg(3, cols);
+    k.set_arg(4, temperature);
+    k.set_arg(5, top_k);
+    k.set_arg(6, top_p);
+    k.set_arg(7, seed);
+    k.launch1d(round_up(static_cast<std::size_t>(rows), 256), 256);
+    autograd::record_op("rowwise_sample_reduce_f32_i32", {x.id()}, {out.id()});
+    return out;
+}
+
 Tensor rms_per_row(const Tensor& x, float eps) {
     MCL_CHECK(x.dtype() == DType::F32, "rms_per_row supports f32 only");
     MCL_CHECK(x.ndim() == 2, "rms_per_row expects rank-2 tensor");

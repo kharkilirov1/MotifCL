@@ -1,0 +1,17 @@
+{
+  "metadata": {
+    "backend": "OpenCL",
+    "device_family": "Ellesmere/Polaris",
+    "profile": "seed-baseline",
+    "note": "Local seed baseline for perf-gate tooling smoke; replace with device-specific tuner output before hardware-backed gating."
+  },
+  "matmul_f32_256_ms": 0.81392,
+  "matmul_f32_generated_tile4_256_ms": 0.90516,
+  "matmul_f32_generated_tile8_256_ms": 0.76319,
+  "matmul_f32_generated_tile16_256_ms": 0.66094,
+  "matmul_q8_256_ms": 0.79906,
+  "matmul_q4_256_ms": 1.08648,
+  "matmul_q8_q4_256_ms": 0.90415,
+  "matmul_q8_axis_256_ms": 0.76705,
+  "matmul_q4_block64_256_ms": 1.11535
+}

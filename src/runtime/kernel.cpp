@@ -7,6 +7,7 @@
 #include <motifcl/runtime/profiler.hpp>
 
 #include <type_traits>
+#include <utility>
 
 namespace motifcl {
 
@@ -19,6 +20,15 @@ double event_elapsed_ms(cl_event event) {
     MCL_CHECK_CL(clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr));
     MCL_CHECK_CL(clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(end), &end, nullptr));
     return static_cast<double>(end - start) * 1e-6;
+}
+
+std::vector<std::pair<int, cl_mem>> buffer_arg_pairs(const std::vector<KernelBufferArgSnapshot>& args) {
+    std::vector<std::pair<int, cl_mem>> out;
+    out.reserve(args.size());
+    for (const auto& arg : args) {
+        out.emplace_back(arg.index, arg.mem);
+    }
+    return out;
 }
 
 }
@@ -38,6 +48,7 @@ Kernel& Kernel::operator=(Kernel&& other) noexcept {
         kernel_ = other.kernel_;
         name_ = std::move(other.name_);
         profiler_ = other.profiler_;
+        buffer_args_ = std::move(other.buffer_args_);
         other.ctx_ = nullptr;
         other.kernel_ = nullptr;
         other.profiler_ = nullptr;
@@ -60,13 +71,25 @@ void Kernel::set_arg_raw(int index, std::size_t size, const void* ptr) {
     MCL_CHECK_CL(clSetKernelArg(kernel_, static_cast<cl_uint>(index), size, ptr));
 }
 
+void Kernel::remember_buffer_arg(int index, cl_mem mem) {
+    for (auto& arg : buffer_args_) {
+        if (arg.index == index) {
+            arg.mem = mem;
+            return;
+        }
+    }
+    buffer_args_.push_back({index, mem});
+}
+
 void Kernel::set_arg(int index, const Buffer& buffer) {
     cl_mem mem = buffer.raw();
     set_arg_raw(index, sizeof(cl_mem), &mem);
+    remember_buffer_arg(index, mem);
 }
 
 void Kernel::set_arg_mem(int index, cl_mem mem) {
     set_arg_raw(index, sizeof(cl_mem), &mem);
+    remember_buffer_arg(index, mem);
 }
 
 void Kernel::set_arg_local(int index, std::size_t bytes) {
@@ -89,8 +112,36 @@ Event Kernel::launch1d(std::size_t global, std::size_t local) {
             if (k) clReleaseKernel(k);
         });
         auto state = state_;
-        autograd::record_kernel_launch(name_, [state, retained, global, local]() {
+        auto buffer_args = buffer_arg_pairs(buffer_args_);
+        autograd::GraphKernelLaunchInfo launch;
+        launch.kernel_name = name_;
+        launch.platform = state->platform;
+        launch.device = state->device;
+        launch.context = state->context;
+        launch.queue = state->queue;
+        launch.kernel = retained.get();
+        launch.work_dim = 1;
+        launch.global_work_size = {global};
+        if (local) launch.local_work_size = {local};
+        launch.has_local_work_size = local != 0;
+        launch.buffer_args = buffer_args;
+        launch.retained_state = state;
+        launch.retained_kernel = retained;
+        autograd::record_kernel_launch(std::move(launch), [state, retained, global, local, buffer_args](const std::unordered_map<int, cl_mem>& bindings,
+                                                                                                        const std::vector<std::pair<int, int>>& tensor_arg_bindings) {
             MCL_CHECK(state && state->valid(), "replay without live OpenCL context");
+            for (const auto& arg : buffer_args) {
+                cl_mem mem = arg.second;
+                for (const auto& binding : tensor_arg_bindings) {
+                    if (binding.first != arg.first) continue;
+                    auto it = bindings.find(binding.second);
+                    if (it != bindings.end()) {
+                        mem = it->second;
+                        break;
+                    }
+                }
+                MCL_CHECK_CL(clSetKernelArg(retained.get(), static_cast<cl_uint>(arg.first), sizeof(cl_mem), &mem));
+            }
             size_t rg[1] = {global};
             size_t rl[1] = {local};
             MCL_CHECK_CL(clEnqueueNDRangeKernel(state->queue, retained.get(), 1, nullptr, rg, local ? rl : nullptr, 0, nullptr, nullptr));
@@ -114,8 +165,36 @@ Event Kernel::launch2d(std::size_t gx, std::size_t gy, std::size_t lx, std::size
             if (k) clReleaseKernel(k);
         });
         auto state = state_;
-        autograd::record_kernel_launch(name_, [state, retained, gx, gy, lx, ly]() {
+        auto buffer_args = buffer_arg_pairs(buffer_args_);
+        autograd::GraphKernelLaunchInfo launch;
+        launch.kernel_name = name_;
+        launch.platform = state->platform;
+        launch.device = state->device;
+        launch.context = state->context;
+        launch.queue = state->queue;
+        launch.kernel = retained.get();
+        launch.work_dim = 2;
+        launch.global_work_size = {gx, gy};
+        if (lx && ly) launch.local_work_size = {lx, ly};
+        launch.has_local_work_size = lx != 0 && ly != 0;
+        launch.buffer_args = buffer_args;
+        launch.retained_state = state;
+        launch.retained_kernel = retained;
+        autograd::record_kernel_launch(std::move(launch), [state, retained, gx, gy, lx, ly, buffer_args](const std::unordered_map<int, cl_mem>& bindings,
+                                                                                                         const std::vector<std::pair<int, int>>& tensor_arg_bindings) {
             MCL_CHECK(state && state->valid(), "replay without live OpenCL context");
+            for (const auto& arg : buffer_args) {
+                cl_mem mem = arg.second;
+                for (const auto& binding : tensor_arg_bindings) {
+                    if (binding.first != arg.first) continue;
+                    auto it = bindings.find(binding.second);
+                    if (it != bindings.end()) {
+                        mem = it->second;
+                        break;
+                    }
+                }
+                MCL_CHECK_CL(clSetKernelArg(retained.get(), static_cast<cl_uint>(arg.first), sizeof(cl_mem), &mem));
+            }
             size_t rg[2] = {gx, gy};
             size_t rl[2] = {lx, ly};
             MCL_CHECK_CL(clEnqueueNDRangeKernel(state->queue, retained.get(), 2, nullptr, rg, (lx && ly) ? rl : nullptr, 0, nullptr, nullptr));

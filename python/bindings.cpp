@@ -1,10 +1,12 @@
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <motifcl/autograd/node.hpp>
 #include <motifcl/motifcl.hpp>
 
 namespace py = pybind11;
@@ -49,6 +51,9 @@ PYBIND11_MODULE(_motifcl, m) {
         .def("device_info", &motifcl::Backend::device_info)
         .def("supports_integer_dot", &motifcl::Backend::supports_integer_dot)
         .def("int_dot_mode", &motifcl::Backend::int_dot_mode)
+        .def("supports_command_buffer", &motifcl::Backend::supports_command_buffer)
+        .def("supports_command_buffer_mutable_dispatch", &motifcl::Backend::supports_command_buffer_mutable_dispatch)
+        .def("command_buffer_mode", &motifcl::Backend::command_buffer_mode)
         .def("profile_set_enabled", [](motifcl::Backend& b, bool enabled) { b.profiler.set_enabled(enabled); })
         .def("profile_enabled", [](const motifcl::Backend& b) { return b.profiler.enabled(); })
         .def("profile_clear", [](motifcl::Backend& b) { b.profiler.clear(); })
@@ -72,6 +77,9 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_property_readonly("dtype", &motifcl::Tensor::dtype)
         .def_property_readonly("requires_grad", &motifcl::Tensor::requires_grad);
 
+    m.def("is_grad_enabled", &motifcl::autograd::is_enabled);
+    m.def("set_grad_enabled", &motifcl::autograd::set_enabled, py::arg("enabled"));
+
     py::class_<motifcl::QKV>(m, "QKV")
         .def_readonly("q", &motifcl::QKV::q)
         .def_readonly("k", &motifcl::QKV::k)
@@ -82,7 +90,8 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readonly("inputs", &motifcl::autograd::GraphNodeInfo::inputs)
         .def_readonly("outputs", &motifcl::autograd::GraphNodeInfo::outputs)
         .def_readonly("temporaries", &motifcl::autograd::GraphNodeInfo::temporaries)
-        .def_readonly("replayable", &motifcl::autograd::GraphNodeInfo::replayable);
+        .def_readonly("replayable", &motifcl::autograd::GraphNodeInfo::replayable)
+        .def_readonly("rebindable", &motifcl::autograd::GraphNodeInfo::rebindable);
 
     py::class_<motifcl::autograd::TensorSpec>(m, "TensorSpec")
         .def_readonly("id", &motifcl::autograd::TensorSpec::id)
@@ -132,6 +141,7 @@ PYBIND11_MODULE(_motifcl, m) {
         .def("size", &motifcl::autograd::CapturedGraph::size)
         .def("empty", &motifcl::autograd::CapturedGraph::empty)
         .def("replayable", &motifcl::autograd::CapturedGraph::replayable)
+        .def("rebindable", &motifcl::autograd::CapturedGraph::rebindable)
         .def("schedule", &motifcl::autograd::CapturedGraph::schedule)
         .def("tensor_specs_list", &motifcl::autograd::CapturedGraph::tensor_specs_list)
         .def("plan_buffers", [](const motifcl::autograd::CapturedGraph& g, const motifcl::autograd::GraphOptimizeOptions& options) {
@@ -147,7 +157,7 @@ PYBIND11_MODULE(_motifcl, m) {
         }, py::arg("runtime_specs"), py::arg("options") = motifcl::autograd::GraphOptimizeOptions{})
         .def("shape_polymorphic", &motifcl::autograd::CapturedGraph::shape_polymorphic)
         .def("compatible_with", &motifcl::autograd::CapturedGraph::compatible_with, py::arg("runtime_specs"), py::arg("allow_dynamic_dims") = true)
-        .def("replay", &motifcl::autograd::CapturedGraph::replay)
+        .def("replay", [](const motifcl::autograd::CapturedGraph& g) { g.replay(); })
         .def("execute", &motifcl::autograd::CapturedGraph::execute)
         .def("clear", &motifcl::autograd::CapturedGraph::clear)
         .def_property_readonly("nodes", [](const motifcl::autograd::CapturedGraph& g) {
@@ -160,7 +170,13 @@ PYBIND11_MODULE(_motifcl, m) {
     py::class_<motifcl::autograd::GraphExecutor>(m, "GraphExecutor")
         .def("execute", &motifcl::autograd::GraphExecutor::execute)
         .def("replayable", &motifcl::autograd::GraphExecutor::replayable)
+        .def("rebindable", &motifcl::autograd::GraphExecutor::rebindable)
+        .def("bind_tensor", &motifcl::autograd::GraphExecutor::bind_tensor,
+             py::arg("captured_tensor_id"), py::arg("tensor"))
+        .def("clear_bindings", &motifcl::autograd::GraphExecutor::clear_bindings)
+        .def("bound_tensor_count", &motifcl::autograd::GraphExecutor::bound_tensor_count)
         .def("executions", &motifcl::autograd::GraphExecutor::executions)
+        .def("execution_mode", &motifcl::autograd::GraphExecutor::execution_mode)
         .def_property_readonly("runtime_plan", [](const motifcl::autograd::GraphExecutor& executor) -> const motifcl::autograd::GraphRuntimePlan& {
             return executor.runtime_plan();
         }, py::return_value_policy::reference_internal);
@@ -247,6 +263,11 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("masked_fill", &motifcl::masked_fill, py::arg("x"), py::arg("mask"), py::arg("value"));
     m.def("rowwise_sum", &motifcl::rowwise_sum);
     m.def("rowwise_max", &motifcl::rowwise_max);
+    m.def("rowwise_argmax", &motifcl::rowwise_argmax);
+    m.def("rowwise_sample", [](const motifcl::Tensor& x, float temperature, int top_k, float top_p, std::uint32_t seed) {
+        return motifcl::rowwise_sample_top_p(x, temperature, top_k, top_p, seed);
+    }, py::arg("x"), py::arg("temperature") = 0.0f, py::arg("top_k") = 0,
+       py::arg("top_p") = 1.0f, py::arg("seed") = 1234);
     m.def("multihead_attention", &motifcl::multihead_attention,
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("n_head"),
           py::arg("causal") = false, py::arg("batch_size") = 1, py::arg("seq_len") = 0);
@@ -255,6 +276,9 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("rope", &motifcl::rope,
           py::arg("x"), py::arg("n_head"), py::arg("batch_size"), py::arg("seq_len"),
           py::arg("theta") = 10000.0f, py::arg("rotary_dim") = 0, py::arg("token_offset") = 0);
+    m.def("rope_positions", &motifcl::rope_positions,
+          py::arg("x"), py::arg("positions"), py::arg("n_head"), py::arg("batch_size"), py::arg("seq_len"),
+          py::arg("theta") = 10000.0f, py::arg("rotary_dim") = 0);
     m.def("grouped_query_attention", &motifcl::grouped_query_attention,
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("n_head"), py::arg("n_kv_head"),
           py::arg("causal") = true, py::arg("batch_size") = 1, py::arg("query_len") = 0,
@@ -268,6 +292,9 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("kv_cache_append", &motifcl::kv_cache_append,
           py::arg("new_k"), py::arg("new_v"), py::arg("cache_k"), py::arg("cache_v"),
           py::arg("batch_size"), py::arg("new_tokens"), py::arg("max_tokens"), py::arg("start_pos"));
+    m.def("kv_cache_append_positions", &motifcl::kv_cache_append_positions,
+          py::arg("new_k"), py::arg("new_v"), py::arg("positions"), py::arg("cache_k"), py::arg("cache_v"),
+          py::arg("batch_size"), py::arg("new_tokens"), py::arg("max_tokens"));
     m.def("rmsnorm", &motifcl::rmsnorm, py::arg("x"), py::arg("weight"), py::arg("eps") = 1e-6f);
     m.def("layernorm", &motifcl::layernorm, py::arg("x"), py::arg("weight"), py::arg("bias"), py::arg("eps") = 1e-6f);
     m.def("mse_loss", &motifcl::mse_loss);
@@ -276,9 +303,48 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("load_tensor", &motifcl::load_tensor);
     m.def("save_parameters", &motifcl::save_parameters);
     m.def("load_parameters", &motifcl::load_parameters);
+    m.def("save_quantized_transformer_checkpoint", [](const motifcl::nn::ModernGPTModel& model, const std::string& dir, motifcl::DType qdtype) {
+        motifcl::save_quantized_transformer_checkpoint(model, dir, qdtype);
+    }, py::arg("model"), py::arg("dir"), py::arg("qdtype") = motifcl::DType::Q4_0);
+    m.def("save_quantized_transformer_checkpoint_policy", [](const motifcl::nn::ModernGPTModel& model, const std::string& dir, const motifcl::nn::QuantizationPolicy& policy) {
+        motifcl::save_quantized_transformer_checkpoint(model, dir, policy);
+    }, py::arg("model"), py::arg("dir"), py::arg("policy"));
+    m.def("load_quantized_transformer_checkpoint", &motifcl::load_quantized_transformer_checkpoint,
+          py::arg("model"), py::arg("backend"), py::arg("dir"));
+
+    py::class_<motifcl::SafeTensorInfo>(m, "SafeTensorInfo")
+        .def_readonly("name", &motifcl::SafeTensorInfo::name)
+        .def_readonly("dtype", &motifcl::SafeTensorInfo::dtype)
+        .def_readonly("shape", &motifcl::SafeTensorInfo::shape)
+        .def_readonly("data_begin", &motifcl::SafeTensorInfo::data_begin)
+        .def_readonly("data_end", &motifcl::SafeTensorInfo::data_end);
+
+    py::class_<motifcl::SafeTensorsFile>(m, "SafeTensorsFile")
+        .def_static("open", &motifcl::SafeTensorsFile::open, py::arg("path"))
+        .def("path", &motifcl::SafeTensorsFile::path)
+        .def("tensor_names", &motifcl::SafeTensorsFile::tensor_names)
+        .def("contains", &motifcl::SafeTensorsFile::contains, py::arg("name"))
+        .def("tensor_info", &motifcl::SafeTensorsFile::tensor_info, py::arg("name"), py::return_value_policy::reference_internal)
+        .def("load_tensor", &motifcl::SafeTensorsFile::load_tensor,
+             py::arg("backend"), py::arg("name"), py::arg("force_f32") = true)
+        .def("load_f32_vector", &motifcl::SafeTensorsFile::load_f32_vector, py::arg("name"));
+
+    m.def("load_safetensors", &motifcl::load_safetensors,
+          py::arg("backend"), py::arg("paths"), py::arg("force_f32") = true);
 
     py::class_<motifcl::nn::Parameter>(m, "Parameter")
-        .def_property_readonly("data", [](motifcl::nn::Parameter& p) { return p.data; })
+        .def(py::init<motifcl::Tensor, bool>(), py::arg("tensor"), py::arg("trainable") = true)
+        .def_property("data",
+                      [](motifcl::nn::Parameter& p) { return p.data; },
+                      [](motifcl::nn::Parameter& p, motifcl::Tensor tensor) {
+                          p.data = std::move(tensor);
+                          p.data.set_requires_grad(p.trainable);
+                      })
+        .def_readwrite("trainable", &motifcl::nn::Parameter::trainable)
+        .def("grad", [](const motifcl::nn::Parameter& p) {
+            auto g = p.grad();
+            return g ? *g : motifcl::Tensor{};
+        })
         .def("zero_grad", &motifcl::nn::Parameter::zero_grad);
 
     py::class_<motifcl::nn::Module, std::shared_ptr<motifcl::nn::Module>>(m, "Module")
@@ -288,7 +354,33 @@ PYBIND11_MODULE(_motifcl, m) {
     py::class_<motifcl::nn::Linear, motifcl::nn::Module, std::shared_ptr<motifcl::nn::Linear>>(m, "Linear")
         .def(py::init<motifcl::Backend&, int, int, bool>(), py::arg("backend"), py::arg("in_features"), py::arg("out_features"), py::arg("bias") = true)
         .def("forward", &motifcl::nn::Linear::forward)
-        .def("parameters", &motifcl::nn::Linear::parameters, py::return_value_policy::reference);
+        .def("parameters", &motifcl::nn::Linear::parameters, py::return_value_policy::reference)
+        .def_readwrite("weight", &motifcl::nn::Linear::weight)
+        .def_readwrite("bias", &motifcl::nn::Linear::bias)
+        .def("has_bias", &motifcl::nn::Linear::has_bias)
+        .def("enable_quantized_inference", &motifcl::nn::Linear::enable_quantized_inference,
+             py::arg("qdtype") = motifcl::DType::Q4_0)
+        .def("set_quantized_weight", &motifcl::nn::Linear::set_quantized_weight, py::arg("weight"))
+        .def("disable_quantized_inference", &motifcl::nn::Linear::disable_quantized_inference)
+        .def("quantized_inference_enabled", &motifcl::nn::Linear::quantized_inference_enabled)
+        .def("quantized_weight_dtype", &motifcl::nn::Linear::quantized_weight_dtype)
+        .def("quantized_weight", &motifcl::nn::Linear::quantized_weight, py::return_value_policy::reference_internal);
+
+    py::class_<motifcl::nn::QuantizedLinear, motifcl::nn::Module, std::shared_ptr<motifcl::nn::QuantizedLinear>>(m, "QuantizedLinear")
+        .def(py::init<const motifcl::Tensor&, motifcl::DType>(),
+             py::arg("weight"), py::arg("qdtype") = motifcl::DType::Q4_0)
+        .def(py::init<const motifcl::Tensor&, const motifcl::Tensor&, motifcl::DType>(),
+             py::arg("weight"), py::arg("bias"), py::arg("qdtype") = motifcl::DType::Q4_0)
+        .def_static("from_linear", &motifcl::nn::QuantizedLinear::from_linear,
+                    py::arg("linear"), py::arg("qdtype") = motifcl::DType::Q4_0)
+        .def("forward", &motifcl::nn::QuantizedLinear::forward)
+        .def("parameters", &motifcl::nn::QuantizedLinear::parameters, py::return_value_policy::reference)
+        .def("quantized_weight", &motifcl::nn::QuantizedLinear::quantized_weight, py::return_value_policy::reference_internal)
+        .def("bias", &motifcl::nn::QuantizedLinear::bias, py::return_value_policy::reference_internal)
+        .def("has_bias", &motifcl::nn::QuantizedLinear::has_bias)
+        .def("weight_dtype", &motifcl::nn::QuantizedLinear::weight_dtype)
+        .def("in_features", &motifcl::nn::QuantizedLinear::in_features)
+        .def("out_features", &motifcl::nn::QuantizedLinear::out_features);
 
     py::class_<motifcl::nn::GELU, motifcl::nn::Module, std::shared_ptr<motifcl::nn::GELU>>(m, "GELU")
         .def(py::init<>())
@@ -343,6 +435,11 @@ PYBIND11_MODULE(_motifcl, m) {
              py::arg("use_swiglu") = true, py::arg("use_bias") = false, py::arg("dropout") = 0.0f)
         .def("forward", &motifcl::nn::ModernMLP::forward)
         .def("parameters", &motifcl::nn::ModernMLP::parameters, py::return_value_policy::reference)
+        .def("enable_quantized_inference", &motifcl::nn::ModernMLP::enable_quantized_inference,
+             py::arg("qdtype") = motifcl::DType::Q4_0)
+        .def("disable_quantized_inference", &motifcl::nn::ModernMLP::disable_quantized_inference)
+        .def("quantized_inference_enabled", &motifcl::nn::ModernMLP::quantized_inference_enabled)
+        .def("quantized_weight_dtype", &motifcl::nn::ModernMLP::quantized_weight_dtype)
         .def_readwrite("use_swiglu", &motifcl::nn::ModernMLP::use_swiglu)
         .def_readwrite("dropout_p", &motifcl::nn::ModernMLP::dropout_p);
 
@@ -361,7 +458,12 @@ PYBIND11_MODULE(_motifcl, m) {
         .def("parameters", &motifcl::nn::ModernSelfAttention::parameters, py::return_value_policy::reference)
         .def("n_head", &motifcl::nn::ModernSelfAttention::n_head)
         .def("n_kv_head", &motifcl::nn::ModernSelfAttention::n_kv_head)
-        .def("head_dim", &motifcl::nn::ModernSelfAttention::head_dim);
+        .def("head_dim", &motifcl::nn::ModernSelfAttention::head_dim)
+        .def("enable_quantized_inference", &motifcl::nn::ModernSelfAttention::enable_quantized_inference,
+             py::arg("qdtype") = motifcl::DType::Q4_0)
+        .def("disable_quantized_inference", &motifcl::nn::ModernSelfAttention::disable_quantized_inference)
+        .def("quantized_inference_enabled", &motifcl::nn::ModernSelfAttention::quantized_inference_enabled)
+        .def("quantized_weight_dtype", &motifcl::nn::ModernSelfAttention::quantized_weight_dtype);
 
     py::class_<motifcl::nn::ModernTransformerBlock, motifcl::nn::Module, std::shared_ptr<motifcl::nn::ModernTransformerBlock>>(m, "ModernTransformerBlock")
         .def(py::init<motifcl::Backend&, const motifcl::nn::TransformerConfig&>(),
@@ -375,7 +477,18 @@ PYBIND11_MODULE(_motifcl, m) {
              py::arg("x"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
         .def("forward_with_cache_masked", &motifcl::nn::ModernTransformerBlock::forward_with_cache_masked,
              py::arg("x"), py::arg("mask"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
-        .def("parameters", &motifcl::nn::ModernTransformerBlock::parameters, py::return_value_policy::reference);
+        .def("parameters", &motifcl::nn::ModernTransformerBlock::parameters, py::return_value_policy::reference)
+        .def("enable_quantized_inference", &motifcl::nn::ModernTransformerBlock::enable_quantized_inference,
+             py::arg("qdtype") = motifcl::DType::Q4_0)
+        .def("disable_quantized_inference", &motifcl::nn::ModernTransformerBlock::disable_quantized_inference)
+        .def("quantized_inference_enabled", &motifcl::nn::ModernTransformerBlock::quantized_inference_enabled)
+        .def("quantized_weight_dtype", &motifcl::nn::ModernTransformerBlock::quantized_weight_dtype);
+
+    py::class_<motifcl::nn::QuantizationPolicy>(m, "QuantizationPolicy")
+        .def(py::init<>())
+        .def_readwrite("default_dtype", &motifcl::nn::QuantizationPolicy::default_dtype)
+        .def_readwrite("lm_head_dtype", &motifcl::nn::QuantizationPolicy::lm_head_dtype)
+        .def_readwrite("q8_layers", &motifcl::nn::QuantizationPolicy::q8_layers);
 
     py::class_<motifcl::nn::ModernGPTModel, motifcl::nn::Module, std::shared_ptr<motifcl::nn::ModernGPTModel>>(m, "ModernGPTModel")
         .def(py::init<motifcl::Backend&, const motifcl::nn::TransformerConfig&>(),
@@ -407,14 +520,192 @@ PYBIND11_MODULE(_motifcl, m) {
         .def("parameters", &motifcl::nn::ModernGPTModel::parameters, py::return_value_policy::reference)
         .def("create_kv_cache", &motifcl::nn::ModernGPTModel::create_kv_cache,
              py::arg("backend"), py::arg("batch_size"))
+        .def("enable_quantized_inference", [](motifcl::nn::ModernGPTModel& model, motifcl::DType qdtype) {
+            model.enable_quantized_inference(qdtype);
+        }, py::arg("qdtype") = motifcl::DType::Q4_0)
+        .def("enable_quantized_inference_policy", [](motifcl::nn::ModernGPTModel& model, const motifcl::nn::QuantizationPolicy& policy) {
+            model.enable_quantized_inference(policy);
+        }, py::arg("policy"))
+        .def("set_quantized_lm_head", &motifcl::nn::ModernGPTModel::set_quantized_lm_head, py::arg("weight"))
+        .def("disable_quantized_inference", &motifcl::nn::ModernGPTModel::disable_quantized_inference)
+        .def("quantized_inference_enabled", &motifcl::nn::ModernGPTModel::quantized_inference_enabled)
+        .def("quantized_weight_dtype", &motifcl::nn::ModernGPTModel::quantized_weight_dtype)
+        .def("quantized_lm_head", &motifcl::nn::ModernGPTModel::quantized_lm_head, py::return_value_policy::reference_internal)
         .def_readwrite("config", &motifcl::nn::ModernGPTModel::config);
 
+    py::class_<motifcl::nn::GemmaConfig>(m, "GemmaConfig")
+        .def(py::init<>())
+        .def_readwrite("vocab_size", &motifcl::nn::GemmaConfig::vocab_size)
+        .def_readwrite("max_position_embeddings", &motifcl::nn::GemmaConfig::max_position_embeddings)
+        .def_readwrite("hidden_size", &motifcl::nn::GemmaConfig::hidden_size)
+        .def_readwrite("intermediate_size", &motifcl::nn::GemmaConfig::intermediate_size)
+        .def_readwrite("num_hidden_layers", &motifcl::nn::GemmaConfig::num_hidden_layers)
+        .def_readwrite("num_attention_heads", &motifcl::nn::GemmaConfig::num_attention_heads)
+        .def_readwrite("num_key_value_heads", &motifcl::nn::GemmaConfig::num_key_value_heads)
+        .def_readwrite("head_dim", &motifcl::nn::GemmaConfig::head_dim)
+        .def_readwrite("rms_norm_eps", &motifcl::nn::GemmaConfig::rms_norm_eps)
+        .def_readwrite("rope_theta", &motifcl::nn::GemmaConfig::rope_theta)
+        .def_readwrite("attention_dropout", &motifcl::nn::GemmaConfig::attention_dropout)
+        .def_readwrite("attention_bias", &motifcl::nn::GemmaConfig::attention_bias)
+        .def_readwrite("tie_word_embeddings", &motifcl::nn::GemmaConfig::tie_word_embeddings)
+        .def_readwrite("bos_token_id", &motifcl::nn::GemmaConfig::bos_token_id)
+        .def_readwrite("eos_token_id", &motifcl::nn::GemmaConfig::eos_token_id)
+        .def_readwrite("pad_token_id", &motifcl::nn::GemmaConfig::pad_token_id)
+        .def_readwrite("sliding_window", &motifcl::nn::GemmaConfig::sliding_window);
+
+    py::class_<motifcl::nn::GemmaWeightName>(m, "GemmaWeightName")
+        .def_readonly("hf_name", &motifcl::nn::GemmaWeightName::hf_name)
+        .def_readonly("internal_name", &motifcl::nn::GemmaWeightName::internal_name)
+        .def_readonly("kind", &motifcl::nn::GemmaWeightName::kind)
+        .def_readonly("layer", &motifcl::nn::GemmaWeightName::layer);
+
+    py::class_<motifcl::nn::GemmaWeightLoadReport>(m, "GemmaWeightLoadReport")
+        .def_readonly("loaded_tensors", &motifcl::nn::GemmaWeightLoadReport::loaded_tensors)
+        .def_readonly("applied", &motifcl::nn::GemmaWeightLoadReport::applied)
+        .def_readonly("missing", &motifcl::nn::GemmaWeightLoadReport::missing)
+        .def_readonly("unexpected", &motifcl::nn::GemmaWeightLoadReport::unexpected);
+
+    py::class_<motifcl::nn::GemmaTokenizer>(m, "GemmaTokenizer")
+        .def(py::init<>())
+        .def_static("byte_fallback", &motifcl::nn::GemmaTokenizer::byte_fallback,
+                    py::arg("vocab_size") = 256, py::arg("bos_token_id") = 1, py::arg("eos_token_id") = 2)
+        .def_static("load_vocab", &motifcl::nn::GemmaTokenizer::load_vocab,
+                    py::arg("path"), py::arg("bos_token_id") = 1, py::arg("eos_token_id") = 2)
+        .def("encode", &motifcl::nn::GemmaTokenizer::encode,
+             py::arg("text"), py::arg("add_bos") = false, py::arg("add_eos") = false)
+        .def("decode", &motifcl::nn::GemmaTokenizer::decode,
+             py::arg("ids"), py::arg("skip_special") = true)
+        .def("vocab_size", &motifcl::nn::GemmaTokenizer::vocab_size)
+        .def("bos_token_id", &motifcl::nn::GemmaTokenizer::bos_token_id)
+        .def("eos_token_id", &motifcl::nn::GemmaTokenizer::eos_token_id)
+        .def("is_byte_fallback", &motifcl::nn::GemmaTokenizer::is_byte_fallback)
+        .def("tokenizer_model_type", &motifcl::nn::GemmaTokenizer::tokenizer_model_type);
+
+    py::class_<motifcl::nn::GenerateOptions>(m, "GenerateOptions")
+        .def(py::init<>())
+        .def_readwrite("max_new_tokens", &motifcl::nn::GenerateOptions::max_new_tokens)
+        .def_readwrite("temperature", &motifcl::nn::GenerateOptions::temperature)
+        .def_readwrite("top_k", &motifcl::nn::GenerateOptions::top_k)
+        .def_readwrite("top_p", &motifcl::nn::GenerateOptions::top_p)
+        .def_readwrite("bos_token_id", &motifcl::nn::GenerateOptions::bos_token_id)
+        .def_readwrite("eos_token_id", &motifcl::nn::GenerateOptions::eos_token_id)
+        .def_readwrite("pad_token_id", &motifcl::nn::GenerateOptions::pad_token_id)
+        .def_readwrite("add_bos", &motifcl::nn::GenerateOptions::add_bos)
+        .def_readwrite("prefill_prompt", &motifcl::nn::GenerateOptions::prefill_prompt)
+        .def_readwrite("gpu_greedy_sampling", &motifcl::nn::GenerateOptions::gpu_greedy_sampling)
+        .def_readwrite("seed", &motifcl::nn::GenerateOptions::seed);
+
+    py::enum_<motifcl::nn::HFArchitecture>(m, "HFArchitecture")
+        .value("Auto", motifcl::nn::HFArchitecture::Auto)
+        .value("GenericDecoder", motifcl::nn::HFArchitecture::GenericDecoder)
+        .value("Gemma", motifcl::nn::HFArchitecture::Gemma)
+        .value("Llama", motifcl::nn::HFArchitecture::Llama)
+        .value("Mistral", motifcl::nn::HFArchitecture::Mistral)
+        .value("Qwen2", motifcl::nn::HFArchitecture::Qwen2);
+
+    py::class_<motifcl::nn::HFTransformerConfig>(m, "HFTransformerConfig")
+        .def(py::init<>())
+        .def_readwrite("architecture", &motifcl::nn::HFTransformerConfig::architecture)
+        .def_readwrite("architecture_name", &motifcl::nn::HFTransformerConfig::architecture_name)
+        .def_readwrite("transformer", &motifcl::nn::HFTransformerConfig::transformer)
+        .def_readwrite("rms_norm_eps", &motifcl::nn::HFTransformerConfig::rms_norm_eps)
+        .def_readwrite("tie_word_embeddings", &motifcl::nn::HFTransformerConfig::tie_word_embeddings)
+        .def_readwrite("attention_bias", &motifcl::nn::HFTransformerConfig::attention_bias)
+        .def_readwrite("bos_token_id", &motifcl::nn::HFTransformerConfig::bos_token_id)
+        .def_readwrite("eos_token_id", &motifcl::nn::HFTransformerConfig::eos_token_id)
+        .def_readwrite("pad_token_id", &motifcl::nn::HFTransformerConfig::pad_token_id)
+        .def_readwrite("sliding_window", &motifcl::nn::HFTransformerConfig::sliding_window);
+
+    m.attr("HFWeightName") = m.attr("GemmaWeightName");
+    m.attr("HFWeightLoadReport") = m.attr("GemmaWeightLoadReport");
+    m.attr("HFTokenizer") = m.attr("GemmaTokenizer");
+
+    m.def("load_gemma_config_json", &motifcl::nn::load_gemma_config_json, py::arg("path"));
+    m.def("to_transformer_config", &motifcl::nn::to_transformer_config, py::arg("config"));
+    m.def("make_gemma_model", &motifcl::nn::make_gemma_model, py::arg("backend"), py::arg("config"));
+    m.def("map_gemma_hf_weight_name", &motifcl::nn::map_gemma_hf_weight_name, py::arg("hf_name"));
+    m.def("expected_gemma_hf_weight_names", &motifcl::nn::expected_gemma_hf_weight_names,
+          py::arg("config"), py::arg("include_lm_head") = true);
+    m.def("load_gemma_hf_weights", &motifcl::nn::load_gemma_hf_weights,
+          py::arg("backend"), py::arg("model"), py::arg("safetensors_paths"), py::arg("config"),
+          py::arg("strict") = false, py::arg("trainable") = false);
+    m.def("generate", &motifcl::nn::generate,
+          py::arg("backend"), py::arg("model"), py::arg("prompt_tokens"),
+          py::arg("options") = motifcl::nn::GenerateOptions{});
+    m.def("generate_text", &motifcl::nn::generate_text,
+          py::arg("backend"), py::arg("model"), py::arg("tokenizer"), py::arg("prompt"),
+          py::arg("options") = motifcl::nn::GenerateOptions{});
+    m.def("generate_batch", &motifcl::nn::generate_batch,
+          py::arg("backend"), py::arg("model"), py::arg("prompt_tokens"),
+          py::arg("options") = motifcl::nn::GenerateOptions{});
+    m.def("generate_batch_text", &motifcl::nn::generate_batch_text,
+          py::arg("backend"), py::arg("model"), py::arg("tokenizer"), py::arg("prompts"),
+          py::arg("options") = motifcl::nn::GenerateOptions{});
+    m.def("hf_architecture_name", &motifcl::nn::hf_architecture_name, py::arg("architecture"));
+    m.def("parse_hf_architecture", &motifcl::nn::parse_hf_architecture, py::arg("value"));
+    m.def("load_hf_transformer_config_json", &motifcl::nn::load_hf_transformer_config_json,
+          py::arg("path"), py::arg("architecture") = motifcl::nn::HFArchitecture::Auto);
+    m.def("to_gemma_compatible_config", &motifcl::nn::to_gemma_compatible_config, py::arg("config"));
+    m.def("make_hf_transformer_model", &motifcl::nn::make_hf_transformer_model,
+          py::arg("backend"), py::arg("config"));
+    m.def("map_hf_transformer_weight_name", &motifcl::nn::map_hf_transformer_weight_name,
+          py::arg("architecture"), py::arg("hf_name"));
+    m.def("expected_hf_transformer_weight_names", &motifcl::nn::expected_hf_transformer_weight_names,
+          py::arg("config"), py::arg("include_lm_head") = true);
+    m.def("load_hf_transformer_weights", &motifcl::nn::load_hf_transformer_weights,
+          py::arg("backend"), py::arg("model"), py::arg("safetensors_paths"), py::arg("config"),
+          py::arg("strict") = false, py::arg("trainable") = false);
+    m.def("enable_hf_transformer_quantized_inference", &motifcl::nn::enable_hf_transformer_quantized_inference,
+          py::arg("model"), py::arg("qdtype") = motifcl::DType::Q4_0);
+    m.def("disable_hf_transformer_quantized_inference", &motifcl::nn::disable_hf_transformer_quantized_inference,
+          py::arg("model"));
+    m.def("load_hf_tokenizer", &motifcl::nn::load_hf_tokenizer,
+          py::arg("model_dir_or_vocab_path"), py::arg("config"));
+    m.def("generate_hf_text", &motifcl::nn::generate_hf_text,
+          py::arg("backend"), py::arg("model"), py::arg("tokenizer"), py::arg("prompt"),
+          py::arg("options") = motifcl::nn::GenerateOptions{});
+    m.def("generate_hf_batch_text", &motifcl::nn::generate_hf_batch_text,
+          py::arg("backend"), py::arg("model"), py::arg("tokenizer"), py::arg("prompts"),
+          py::arg("options") = motifcl::nn::GenerateOptions{});
+
     py::class_<motifcl::optim::Adam>(m, "Adam")
-        .def(py::init<std::vector<motifcl::nn::Parameter*>, float, float, float, float>(), py::arg("params"), py::arg("lr") = 1e-3f, py::arg("beta1") = 0.9f, py::arg("beta2") = 0.999f, py::arg("eps") = 1e-8f)
+        .def(py::init<std::vector<motifcl::nn::Parameter*>, float, float, float, float, float>(), py::arg("params"), py::arg("lr") = 1e-3f, py::arg("beta1") = 0.9f, py::arg("beta2") = 0.999f, py::arg("eps") = 1e-8f, py::arg("weight_decay") = 0.0f)
         .def("step", &motifcl::optim::Adam::step)
         .def("zero_grad", &motifcl::optim::Adam::zero_grad)
         .def("set_lr", &motifcl::optim::Adam::set_lr)
-        .def("lr", &motifcl::optim::Adam::lr);
+        .def("lr", &motifcl::optim::Adam::lr)
+        .def("set_weight_decay", &motifcl::optim::Adam::set_weight_decay)
+        .def("weight_decay", &motifcl::optim::Adam::weight_decay);
+
+    py::class_<motifcl::optim::LossScaleUpdate>(m, "LossScaleUpdate")
+        .def_readonly("found_inf", &motifcl::optim::LossScaleUpdate::found_inf)
+        .def_readonly("scale", &motifcl::optim::LossScaleUpdate::scale);
+
+    py::class_<motifcl::optim::DynamicLossScaler>(m, "DynamicLossScaler")
+        .def(py::init<float, float, float, int>(),
+             py::arg("initial_scale") = 65536.0f, py::arg("growth_factor") = 2.0f,
+             py::arg("backoff_factor") = 0.5f, py::arg("growth_interval") = 2000)
+        .def("scale_loss", &motifcl::optim::DynamicLossScaler::scale_loss)
+        .def("unscale_", &motifcl::optim::DynamicLossScaler::unscale_)
+        .def("has_overflow", &motifcl::optim::DynamicLossScaler::has_overflow)
+        .def("update", &motifcl::optim::DynamicLossScaler::update)
+        .def("scale", &motifcl::optim::DynamicLossScaler::scale)
+        .def("set_scale", &motifcl::optim::DynamicLossScaler::set_scale)
+        .def("growth_tracker", &motifcl::optim::DynamicLossScaler::growth_tracker);
+
+    py::class_<motifcl::optim::MixedPrecisionAdam>(m, "MixedPrecisionAdam")
+        .def(py::init<std::vector<motifcl::nn::Parameter*>, float, float, float, float, float>(),
+             py::arg("params"), py::arg("lr") = 1e-3f, py::arg("beta1") = 0.9f,
+             py::arg("beta2") = 0.999f, py::arg("eps") = 1e-8f, py::arg("weight_decay") = 0.0f)
+        .def("step", &motifcl::optim::MixedPrecisionAdam::step)
+        .def("step_scaled", &motifcl::optim::MixedPrecisionAdam::step_scaled)
+        .def("zero_grad", &motifcl::optim::MixedPrecisionAdam::zero_grad)
+        .def("set_lr", &motifcl::optim::MixedPrecisionAdam::set_lr)
+        .def("lr", &motifcl::optim::MixedPrecisionAdam::lr)
+        .def("set_weight_decay", &motifcl::optim::MixedPrecisionAdam::set_weight_decay)
+        .def("weight_decay", &motifcl::optim::MixedPrecisionAdam::weight_decay)
+        .def("step_count", &motifcl::optim::MixedPrecisionAdam::step_count)
+        .def("refresh_master_from_params", &motifcl::optim::MixedPrecisionAdam::refresh_master_from_params);
 
     py::class_<motifcl::optim::SGD>(m, "SGD")
         .def(py::init<std::vector<motifcl::nn::Parameter*>, float>(), py::arg("params"), py::arg("lr") = 1e-2f)

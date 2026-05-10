@@ -56,6 +56,9 @@ public:
     DeviceInfo device_info() const { return ctx.info(); }
     bool supports_integer_dot() const;
     std::string int_dot_mode() const;
+    bool supports_command_buffer() const;
+    bool supports_command_buffer_mutable_dispatch() const;
+    std::string command_buffer_mode() const;
     std::shared_ptr<BackendLifetime> lifetime_handle() const { return lifetime_; }
 
 private:

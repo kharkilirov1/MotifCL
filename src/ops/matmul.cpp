@@ -34,6 +34,39 @@ int preferred_f32_tile_from_env() {
     return (tile == 4 || tile == 8 || tile == 16) ? tile : 0;
 }
 
+bool shape_specific_matmul_dispatch_enabled() {
+    const char* env = std::getenv("MOTIFCL_DISABLE_SHAPE_MATMUL_DISPATCH");
+    return !(env && *env && std::string(env) != "0" && std::string(env) != "false" && std::string(env) != "FALSE");
+}
+
+bool k512_matmul_enabled() {
+    const char* env = std::getenv("MOTIFCL_DISABLE_K512_MATMUL");
+    return !(env && *env && std::string(env) != "0" && std::string(env) != "false" && std::string(env) != "FALSE");
+}
+
+int shape_specific_f32_tile(int M, int K, int N, bool trans_a, bool trans_b, const Backend& backend) {
+    if (trans_a || trans_b || !shape_specific_matmul_dispatch_enabled()) return 0;
+    if (K == 512 && (N == 512 || N == 256) && M >= 64 && M <= 512 &&
+        backend.device_info().max_work_group_size >= 16 * 16) {
+        return 16;
+    }
+    return 0;
+}
+
+int selected_f32_tile(int M, int K, int N, bool trans_a, bool trans_b, const Backend& backend) {
+    const int forced = (!trans_a && !trans_b) ? preferred_f32_tile_from_env() : 0;
+    if (forced > 0) return forced;
+    return shape_specific_f32_tile(M, K, N, trans_a, trans_b, backend);
+}
+
+void launch_tiled(Kernel& k, int M, int N, int tile) {
+    const auto t = static_cast<std::size_t>(tile);
+    k.launch2d(round_up(static_cast<std::size_t>(N), t),
+               round_up(static_cast<std::size_t>(M), t),
+               t,
+               t);
+}
+
 void require_matmul_f32(const Tensor& a, const Tensor& b) {
     MCL_CHECK(a.dtype() == DType::F32 && b.dtype() == DType::F32, "matmul supports f32 only");
     MCL_CHECK(a.ndim() == 2 && b.ndim() == 2, "matmul expects rank-2 tensors");
@@ -116,10 +149,12 @@ Tensor matmul_q4(const Tensor& a, const Tensor& b) {
     require_matmul_q4(a, b);
     MCL_CHECK(a.shape()[1] == b.shape()[0], "q4 matmul inner dimension mismatch");
     auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32);
-    auto k = a.backend().kernels.get("matmul_q4_0_rb4_f32");
     int M = static_cast<int>(a.shape()[0]);
     int N = static_cast<int>(b.shape()[1]);
     int K = static_cast<int>(a.shape()[1]);
+    const bool use_dot4 = (K % 4 == 0);
+    const std::string kernel_name = use_dot4 ? "matmul_q4_0_dot4_rb4_f32" : "matmul_q4_0_rb4_f32";
+    auto k = a.backend().kernels.get(kernel_name);
     k.set_arg(0, a.buffer());
     k.set_arg(1, b.buffer());
     k.set_arg(2, out.buffer());
@@ -129,7 +164,7 @@ Tensor matmul_q4(const Tensor& a, const Tensor& b) {
     k.set_arg(6, a.quant_scale());
     k.set_arg(7, b.quant_scale());
     launch_register_block4(k, M, N);
-    autograd::record_op("matmul_q4_0_rb4_f32", {a.id(), b.id()}, {out.id()});
+    autograd::record_op(kernel_name, {a.id(), b.id()}, {out.id()});
     return out;
 }
 
@@ -220,9 +255,10 @@ Tensor matmul_flags(const Tensor& a, const Tensor& b, bool trans_a, bool trans_b
     int M = static_cast<int>(a_m);
     int N = static_cast<int>(b_n);
     int K = static_cast<int>(a_k);
-    const int preferred_tile = (!trans_a && !trans_b) ? preferred_f32_tile_from_env() : 0;
-    if (preferred_tile > 0 &&
-        static_cast<std::size_t>(preferred_tile * preferred_tile) <= a.backend().device_info().max_work_group_size) {
+    const int preferred_tile = selected_f32_tile(M, K, N, trans_a, trans_b, a.backend());
+    if (preferred_tile > 0) {
+        MCL_CHECK(static_cast<std::size_t>(preferred_tile * preferred_tile) <= a.backend().device_info().max_work_group_size,
+                  "selected matmul tile exceeds device max work-group size");
         auto k = a.backend().kernels.get_matmul_tiled_variant(preferred_tile);
         k.set_arg(0, a.buffer());
         k.set_arg(1, b.buffer());
@@ -230,13 +266,19 @@ Tensor matmul_flags(const Tensor& a, const Tensor& b, bool trans_a, bool trans_b
         k.set_arg(3, M);
         k.set_arg(4, N);
         k.set_arg(5, K);
-        const auto tile = static_cast<std::size_t>(preferred_tile);
-        k.launch2d(round_up(static_cast<std::size_t>(N), tile), round_up(static_cast<std::size_t>(M), tile), tile, tile);
+        launch_tiled(k, M, N, preferred_tile);
         autograd::record_op("matmul_tuned_f32_t" + std::to_string(preferred_tile), {a.id(), b.id()}, {out.id()});
         return out;
     }
     std::string kernel_name;
-    if (!trans_a && !trans_b) {
+    const bool use_k512 = K == 512 && k512_matmul_enabled();
+    if (use_k512 && !trans_a && !trans_b) {
+        kernel_name = "matmul_register_block4_k512_f32";
+    } else if (use_k512 && trans_a && !trans_b) {
+        kernel_name = "matmul_transa_rb4_k512_f32";
+    } else if (use_k512 && !trans_a && trans_b) {
+        kernel_name = "matmul_transb_rb4_k512_f32";
+    } else if (!trans_a && !trans_b) {
         kernel_name = "matmul_register_block4_f32";
     } else if (trans_a && !trans_b) {
         kernel_name = "matmul_transa_rb4_f32";
@@ -316,10 +358,26 @@ void matmul_out(const Tensor& a, const Tensor& b, Tensor& out) {
     MCL_CHECK(out.dtype() == DType::F32, "matmul_out supports f32 output only");
     MCL_CHECK(a.shape()[1] == b.shape()[0], "matmul_out inner dimension mismatch");
     MCL_CHECK(out.shape() == Shape({a.shape()[0], b.shape()[1]}), "matmul_out output shape mismatch");
-    auto k = a.backend().kernels.get("matmul_register_block4_f32");
     int M = static_cast<int>(a.shape()[0]);
     int N = static_cast<int>(b.shape()[1]);
     int K = static_cast<int>(a.shape()[1]);
+    const int preferred_tile = selected_f32_tile(M, K, N, false, false, a.backend());
+    if (preferred_tile > 0) {
+        auto k = a.backend().kernels.get_matmul_tiled_variant(preferred_tile);
+        k.set_arg(0, a.buffer());
+        k.set_arg(1, b.buffer());
+        k.set_arg(2, out.buffer());
+        k.set_arg(3, M);
+        k.set_arg(4, N);
+        k.set_arg(5, K);
+        launch_tiled(k, M, N, preferred_tile);
+        autograd::record_op("matmul_tuned_f32_t" + std::to_string(preferred_tile), {a.id(), b.id()}, {out.id()});
+        return;
+    }
+    const std::string kernel_name = (K == 512 && k512_matmul_enabled())
+        ? "matmul_register_block4_k512_f32"
+        : "matmul_register_block4_f32";
+    auto k = a.backend().kernels.get(kernel_name);
     k.set_arg(0, a.buffer());
     k.set_arg(1, b.buffer());
     k.set_arg(2, out.buffer());
@@ -327,7 +385,7 @@ void matmul_out(const Tensor& a, const Tensor& b, Tensor& out) {
     k.set_arg(4, N);
     k.set_arg(5, K);
     launch_register_block4(k, M, N);
-    autograd::record_op("matmul_register_block4_f32", {a.id(), b.id()}, {out.id()});
+    autograd::record_op(kernel_name, {a.id(), b.id()}, {out.id()});
 }
 
 Tensor matmul_tiled_variant(const Tensor& a, const Tensor& b, int tile) {
@@ -347,8 +405,7 @@ Tensor matmul_tiled_variant(const Tensor& a, const Tensor& b, int tile) {
     k.set_arg(3, M);
     k.set_arg(4, N);
     k.set_arg(5, K);
-    const auto t = static_cast<std::size_t>(tile);
-    k.launch2d(round_up(static_cast<std::size_t>(N), t), round_up(static_cast<std::size_t>(M), t), t, t);
+    launch_tiled(k, M, N, tile);
     autograd::record_op("matmul_tiled_f32_t" + std::to_string(tile), {a.id(), b.id()}, {out.id()});
     return out;
 }
@@ -360,10 +417,12 @@ Tensor matmul_f16_accum_f32(const Tensor& a, const Tensor& b) {
     MCL_CHECK(a.shape()[1] == b.shape()[0], "matmul_f16_accum_f32 inner dimension mismatch");
     MCL_CHECK(backend_supports_fp16(a.backend()), "backend does not expose cl_khr_fp16");
     auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32);
-    auto k = a.backend().kernels.get("matmul_f16_accum_f32");
     int M = static_cast<int>(a.shape()[0]);
     int N = static_cast<int>(b.shape()[1]);
     int K = static_cast<int>(a.shape()[1]);
+    const bool use_vec4 = (K % 4) == 0;
+    const char* kernel_name = use_vec4 ? "matmul_f16_accum_f32_vec4" : "matmul_f16_accum_f32";
+    auto k = a.backend().kernels.get(kernel_name);
     k.set_arg(0, a.buffer());
     k.set_arg(1, b.buffer());
     k.set_arg(2, out.buffer());
@@ -371,7 +430,7 @@ Tensor matmul_f16_accum_f32(const Tensor& a, const Tensor& b) {
     k.set_arg(4, N);
     k.set_arg(5, K);
     k.launch2d(round_up(static_cast<std::size_t>(N), 16), round_up(static_cast<std::size_t>(M), 16), 16, 16);
-    autograd::record_op("matmul_f16_accum_f32", {a.id(), b.id()}, {out.id()});
+    autograd::record_op(kernel_name, {a.id(), b.id()}, {out.id()});
     return out;
 }
 

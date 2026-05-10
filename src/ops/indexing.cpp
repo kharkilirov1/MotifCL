@@ -152,6 +152,36 @@ Tensor slice_rows(const Tensor& x, int64_t start, int64_t end) {
     return out;
 }
 
+Tensor gather_last_token_logits(const Tensor& logits,
+                                const Tensor& positions,
+                                int64_t batch_size,
+                                int64_t seq_len,
+                                int64_t vocab_size) {
+    MCL_CHECK(logits.dtype() == DType::F32, "gather_last_token_logits supports f32 logits only");
+    MCL_CHECK(positions.dtype() == DType::I32, "gather_last_token_logits positions must be i32");
+    MCL_CHECK(positions.ndim() == 1 && positions.shape()[0] == batch_size,
+              "gather_last_token_logits positions must be [batch]");
+    MCL_CHECK(batch_size > 0 && seq_len > 0 && vocab_size > 0,
+              "gather_last_token_logits invalid batch/seq/vocab dimensions");
+    MCL_CHECK(logits.numel() == batch_size * seq_len * vocab_size,
+              "gather_last_token_logits logits size mismatch");
+    MCL_CHECK(logits.backend_ptr() == positions.backend_ptr(),
+              "gather_last_token_logits tensors must share backend");
+    auto out = Tensor::empty(logits.backend(), {batch_size, vocab_size}, DType::F32);
+    auto k = logits.backend().kernels.get("gather_last_token_logits_f32");
+    const int n = static_cast<int>(batch_size * vocab_size);
+    k.set_arg(0, logits.buffer());
+    k.set_arg(1, positions.buffer());
+    k.set_arg(2, out.buffer());
+    k.set_arg(3, static_cast<int>(batch_size));
+    k.set_arg(4, static_cast<int>(seq_len));
+    k.set_arg(5, static_cast<int>(vocab_size));
+    k.set_arg(6, n);
+    k.launch1d(round_up(static_cast<std::size_t>(n), kLocal1D), kLocal1D);
+    autograd::record_op("gather_last_token_logits_f32", {logits.id(), positions.id()}, {out.id()});
+    return out;
+}
+
 Tensor dropout(const Tensor& x, float p, bool training) {
     MCL_CHECK(x.dtype() == DType::F32, "dropout supports f32 only");
     MCL_CHECK(p >= 0.0f && p < 1.0f, "dropout probability must be in [0, 1)");
