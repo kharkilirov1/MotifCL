@@ -83,6 +83,69 @@ __kernel void rmsnorm_rowwise_wg_f32(__global const float* x,
     }
 }
 
+__kernel void rmsnorm_residual_add_rowwise_wg_f32(__global const float* residual,
+                                                  __global const float* x,
+                                                  __global const float* weight,
+                                                  __global float* out,
+                                                  int rows,
+                                                  int cols,
+                                                  float eps) {
+    int row = get_group_id(1);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    if (row >= rows) return;
+    __local float scratch[256];
+    float ss = 0.0f;
+    for (int c = lid; c < cols; c += local_size) {
+        float v = x[row * cols + c];
+        ss += v * v;
+    }
+    scratch[lid] = ss;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) scratch[lid] += scratch[lid + stride];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float inv = rsqrt(scratch[0] / (float)cols + eps);
+    for (int c = lid; c < cols; c += local_size) {
+        int idx = row * cols + c;
+        out[idx] = residual[idx] + x[idx] * inv * weight[c];
+    }
+}
+
+__kernel void rmsnorm_residual_add_scale_rowwise_wg_f32(__global const float* residual,
+                                                        __global const float* x,
+                                                        __global const float* weight,
+                                                        __global const float* scale,
+                                                        __global float* out,
+                                                        int rows,
+                                                        int cols,
+                                                        int scale_size,
+                                                        float eps) {
+    int row = get_group_id(1);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    if (row >= rows) return;
+    __local float scratch[256];
+    float ss = 0.0f;
+    for (int c = lid; c < cols; c += local_size) {
+        float v = x[row * cols + c];
+        ss += v * v;
+    }
+    scratch[lid] = ss;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) scratch[lid] += scratch[lid + stride];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float inv = rsqrt(scratch[0] / (float)cols + eps);
+    for (int c = lid; c < cols; c += local_size) {
+        int idx = row * cols + c;
+        float s = scale_size == 1 ? scale[0] : scale[c];
+        out[idx] = (residual[idx] + x[idx] * inv * weight[c]) * s;
+    }
+}
+
 __kernel void rmsnorm_row_inv_f32(__global const float* x,
                                   __global float* row_inv,
                                   int rows,

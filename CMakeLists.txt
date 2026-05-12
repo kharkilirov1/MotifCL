@@ -101,6 +101,7 @@ set(MOTIFCL_SOURCES
     src/train/trainer.cpp
     src/train/training_utils.cpp
     src/serialization.cpp
+    src/gguf.cpp
 )
 
 add_library(motifcl ${MOTIFCL_SOURCES})

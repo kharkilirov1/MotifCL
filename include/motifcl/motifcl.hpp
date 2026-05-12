@@ -50,5 +50,6 @@
 #include <motifcl/train/training_utils.hpp>
 #include <motifcl/train/trainer.hpp>
 #include <motifcl/serialization.hpp>
+#include <motifcl/gguf.hpp>
 
 namespace mcl = motifcl;

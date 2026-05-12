@@ -259,6 +259,31 @@ void attach_binary_grad(Tensor& out, const Tensor& a, const Tensor& b, std::shar
     }
 }
 
+bool can_row_broadcast_rhs(const Tensor& matrix, const Tensor& vector) {
+    return matrix.valid() && vector.valid() &&
+           matrix.dtype() == DType::F32 && vector.dtype() == DType::F32 &&
+           matrix.ndim() == 2 && vector.ndim() == 1 &&
+           matrix.shape()[1] == vector.shape()[0] &&
+           matrix.backend_ptr() == vector.backend_ptr();
+}
+
+Tensor elementwise_device_scalar_rhs(const Tensor& x, const Tensor& scalar, const std::string& kernel_name) {
+    MCL_CHECK(x.valid() && scalar.valid(), kernel_name + " expects valid tensors");
+    MCL_CHECK(x.dtype() == DType::F32 && scalar.dtype() == DType::F32, kernel_name + " supports f32 only");
+    MCL_CHECK(scalar.numel() == 1, kernel_name + " expects a one-element scalar tensor");
+    MCL_CHECK(x.backend_ptr() == scalar.backend_ptr(), kernel_name + " requires tensors on same backend");
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    auto k = x.backend().kernels.get(kernel_name);
+    int n = static_cast<int>(x.numel());
+    k.set_arg(0, x.buffer());
+    k.set_arg(1, scalar.buffer());
+    k.set_arg(2, out.buffer());
+    k.set_arg(3, n);
+    k.launch1d(round_up(static_cast<std::size_t>(n), kLocal1D), kLocal1D);
+    autograd::record_op(kernel_name, {x.id(), scalar.id()}, {out.id()});
+    return out;
+}
+
 } // namespace
 
 Tensor fill(Backend& backend, const Shape& shape, float value) {
@@ -285,6 +310,18 @@ Tensor add(const Tensor& a, const Tensor& b) {
 
 Tensor add_broadcast(const Tensor& a, const Tensor& b) {
     if (a.shape() == b.shape()) return add(a, b);
+    if (b.valid() && b.numel() == 1 && a.valid() && a.backend_ptr() == b.backend_ptr()) {
+        auto out = elementwise_device_scalar_rhs(a, b, "add_tensor_scalar_f32");
+        attach_binary_grad(out, a, b, std::make_shared<AddBroadcastBackward>(a, b));
+        return out;
+    }
+    if (a.valid() && a.numel() == 1 && b.valid() && a.backend_ptr() == b.backend_ptr()) {
+        auto out = elementwise_device_scalar_rhs(b, a, "add_tensor_scalar_f32");
+        attach_binary_grad(out, a, b, std::make_shared<AddBroadcastBackward>(a, b));
+        return out;
+    }
+    if (can_row_broadcast_rhs(a, b)) return add_bias_rows(a, b);
+    if (can_row_broadcast_rhs(b, a)) return add_bias_rows(b, a);
     const auto out_shape = broadcast_result_shape(a.shape(), b.shape());
     const auto out_host = broadcast_binary_host(a, b, out_shape, '+');
     auto out = Tensor::from_cpu(a.backend(), out_shape, DType::F32, out_host.data());
@@ -311,6 +348,26 @@ Tensor mul(const Tensor& a, const Tensor& b) {
 
 Tensor mul_broadcast(const Tensor& a, const Tensor& b) {
     if (a.shape() == b.shape()) return mul(a, b);
+    if (b.valid() && b.numel() == 1 && a.valid() && a.backend_ptr() == b.backend_ptr()) {
+        auto out = elementwise_device_scalar_rhs(a, b, "mul_tensor_scalar_f32");
+        attach_binary_grad(out, a, b, std::make_shared<MulBroadcastBackward>(a, b, a.shape()));
+        return out;
+    }
+    if (a.valid() && a.numel() == 1 && b.valid() && a.backend_ptr() == b.backend_ptr()) {
+        auto out = elementwise_device_scalar_rhs(b, a, "mul_tensor_scalar_f32");
+        attach_binary_grad(out, a, b, std::make_shared<MulBroadcastBackward>(a, b, b.shape()));
+        return out;
+    }
+    if (can_row_broadcast_rhs(a, b)) {
+        auto out = mul_rows(a, b);
+        attach_binary_grad(out, a, b, std::make_shared<MulBroadcastBackward>(a, b, a.shape()));
+        return out;
+    }
+    if (can_row_broadcast_rhs(b, a)) {
+        auto out = mul_rows(b, a);
+        attach_binary_grad(out, a, b, std::make_shared<MulBroadcastBackward>(a, b, b.shape()));
+        return out;
+    }
     const auto out_shape = broadcast_result_shape(a.shape(), b.shape());
     const auto out_host = broadcast_binary_host(a, b, out_shape, '*');
     auto out = Tensor::from_cpu(a.backend(), out_shape, DType::F32, out_host.data());
@@ -391,6 +448,26 @@ Tensor add_bias_rows(const Tensor& x, const Tensor& bias) {
         out.set_requires_grad(true);
         out._set_grad_fn(std::make_shared<AddBiasRowsBackward>(x, bias));
     }
+    return out;
+}
+
+Tensor mul_rows(const Tensor& x, const Tensor& scale) {
+    MCL_CHECK(x.dtype() == DType::F32 && scale.dtype() == DType::F32, "mul_rows supports f32 only");
+    MCL_CHECK(x.ndim() == 2 && scale.ndim() == 1, "mul_rows expects x [rows, cols] and scale [cols]");
+    MCL_CHECK(x.shape()[1] == scale.shape()[0], "mul_rows scale dimension mismatch");
+    MCL_CHECK(x.backend_ptr() == scale.backend_ptr(), "mul_rows requires tensors on same backend");
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    auto k = x.backend().kernels.get("mul_rows_f32");
+    int rows = static_cast<int>(x.shape()[0]);
+    int cols = static_cast<int>(x.shape()[1]);
+    int n = rows * cols;
+    k.set_arg(0, x.buffer());
+    k.set_arg(1, scale.buffer());
+    k.set_arg(2, out.buffer());
+    k.set_arg(3, rows);
+    k.set_arg(4, cols);
+    k.launch1d(round_up(static_cast<std::size_t>(n), kLocal1D), kLocal1D);
+    autograd::record_op("mul_rows_f32", {x.id(), scale.id()}, {out.id()});
     return out;
 }
 

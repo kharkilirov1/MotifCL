@@ -78,9 +78,22 @@ Tensor rowwise_argmax(const Tensor& x) {
     MCL_CHECK(x.ndim() == 2, "rowwise_argmax expects rank-2 tensor");
     MCL_CHECK(x.shape()[0] > 0 && x.shape()[1] > 0, "rowwise_argmax expects non-empty rows/cols");
     auto out = Tensor::empty(x.backend(), {x.shape()[0]}, DType::I32);
-    auto k = x.backend().kernels.get("rowwise_argmax_f32_i32");
     int rows = static_cast<int>(x.shape()[0]);
     int cols = static_cast<int>(x.shape()[1]);
+    if (cols >= 1024) {
+        constexpr int local = 256;
+        auto k = x.backend().kernels.get("rowwise_argmax_wg_f32_i32");
+        k.set_arg(0, x.buffer());
+        k.set_arg(1, out.buffer());
+        k.set_arg(2, rows);
+        k.set_arg(3, cols);
+        k.set_arg_local(4, local * sizeof(float));
+        k.set_arg_local(5, local * sizeof(int));
+        k.launch1d(static_cast<std::size_t>(rows) * local, local);
+        autograd::record_op("rowwise_argmax_wg_f32_i32", {x.id()}, {out.id()});
+        return out;
+    }
+    auto k = x.backend().kernels.get("rowwise_argmax_f32_i32");
     k.set_arg(0, x.buffer());
     k.set_arg(1, out.buffer());
     k.set_arg(2, rows);
@@ -100,6 +113,7 @@ Tensor rowwise_sample_top_p(const Tensor& x, float temperature, int top_k, float
     MCL_CHECK(x.shape()[0] > 0 && x.shape()[1] > 0, "rowwise_sample expects non-empty rows/cols");
     MCL_CHECK(temperature >= 0.0f, "rowwise_sample temperature must be non-negative");
     MCL_CHECK(top_p > 0.0f, "rowwise_sample top_p must be positive");
+    if (temperature <= 0.0f) return rowwise_argmax(x);
     auto out = Tensor::empty(x.backend(), {x.shape()[0]}, DType::I32);
     auto k = x.backend().kernels.get("rowwise_sample_reduce_f32_i32");
     const int rows = static_cast<int>(x.shape()[0]);

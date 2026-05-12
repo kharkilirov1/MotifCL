@@ -102,9 +102,11 @@ Event Kernel::launch1d(std::size_t global, std::size_t local) {
     MCL_CHECK(global > 0, "global work size must be positive");
     size_t g[1] = {global};
     size_t l[1] = {local};
+    const bool profile = profiler_ && profiler_->enabled();
     cl_event event = nullptr;
-    MCL_CHECK_CL(clEnqueueNDRangeKernel(state_->queue, kernel_, 1, nullptr, g, local ? l : nullptr, 0, nullptr, &event));
-    if (profiler_ && profiler_->enabled()) profiler_->add(name_, event_elapsed_ms(event));
+    MCL_CHECK_CL(clEnqueueNDRangeKernel(state_->queue, kernel_, 1, nullptr, g, local ? l : nullptr, 0, nullptr,
+                                        profile ? &event : nullptr));
+    if (profile) profiler_->add(name_, event_elapsed_ms(event));
     if (autograd::is_graph_capturing()) {
         MCL_CHECK_CL(clRetainKernel(kernel_));
         using KernelHandle = std::remove_pointer_t<cl_kernel>;
@@ -155,9 +157,11 @@ Event Kernel::launch2d(std::size_t gx, std::size_t gy, std::size_t lx, std::size
     MCL_CHECK(gx > 0 && gy > 0, "global work size must be positive");
     size_t g[2] = {gx, gy};
     size_t l[2] = {lx, ly};
+    const bool profile = profiler_ && profiler_->enabled();
     cl_event event = nullptr;
-    MCL_CHECK_CL(clEnqueueNDRangeKernel(state_->queue, kernel_, 2, nullptr, g, (lx && ly) ? l : nullptr, 0, nullptr, &event));
-    if (profiler_ && profiler_->enabled()) profiler_->add(name_, event_elapsed_ms(event));
+    MCL_CHECK_CL(clEnqueueNDRangeKernel(state_->queue, kernel_, 2, nullptr, g, (lx && ly) ? l : nullptr, 0, nullptr,
+                                        profile ? &event : nullptr));
+    if (profile) profiler_->add(name_, event_elapsed_ms(event));
     if (autograd::is_graph_capturing()) {
         MCL_CHECK_CL(clRetainKernel(kernel_));
         using KernelHandle = std::remove_pointer_t<cl_kernel>;

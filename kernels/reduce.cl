@@ -100,6 +100,47 @@ __kernel void rowwise_argmax_f32_i32(__global const float* x,
     out[row] = best_idx;
 }
 
+__kernel void rowwise_argmax_wg_f32_i32(__global const float* x,
+                                        __global int* out,
+                                        int rows,
+                                        int cols,
+                                        __local float* scratch_values,
+                                        __local int* scratch_indices) {
+    int row = get_group_id(0);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    if (row >= rows) return;
+
+    int base = row * cols;
+    int best_idx = 0;
+    float best = -3.402823466e+38F;
+    for (int c = lid; c < cols; c += local_size) {
+        float value = x[base + c];
+        if (value > best || (value == best && c < best_idx)) {
+            best = value;
+            best_idx = c;
+        }
+    }
+    scratch_values[lid] = best;
+    scratch_indices[lid] = best_idx;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            float other = scratch_values[lid + stride];
+            int other_idx = scratch_indices[lid + stride];
+            if (other > scratch_values[lid] ||
+                (other == scratch_values[lid] && other_idx < scratch_indices[lid])) {
+                scratch_values[lid] = other;
+                scratch_indices[lid] = other_idx;
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid == 0) out[row] = scratch_indices[0];
+}
+
 inline uint mcl_sample_hash_u32(uint x) {
     x ^= x >> 16;
     x *= 0x7feb352du;

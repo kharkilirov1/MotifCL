@@ -91,6 +91,61 @@ std::vector<float> finite_difference_grad(std::vector<float> q,
     return grad;
 }
 
+std::vector<float> reference_grouped_decode(const std::vector<float>& q,
+                                            const std::vector<float>& k,
+                                            const std::vector<float>& v,
+                                            int batch,
+                                            int key_tokens,
+                                            int key_stride,
+                                            int n_head,
+                                            int n_kv_head,
+                                            int head_dim,
+                                            int query_offset,
+                                            int sliding_window) {
+    const int q_channels = n_head * head_dim;
+    const int kv_channels = n_kv_head * head_dim;
+    const int group = n_head / n_kv_head;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    std::vector<float> out(static_cast<std::size_t>(batch * q_channels), 0.0f);
+    for (int b = 0; b < batch; ++b) {
+        for (int h = 0; h < n_head; ++h) {
+            const int kv_head = h / group;
+            const int min_key = std::max(0, sliding_window > 0 ? query_offset - sliding_window + 1 : 0);
+            const int max_key = std::min(query_offset, key_tokens - 1);
+            float max_score = -1.0e30f;
+            for (int kt = min_key; kt <= max_key; ++kt) {
+                float score = 0.0f;
+                for (int d = 0; d < head_dim; ++d) {
+                    score += q[b * q_channels + h * head_dim + d] *
+                             k[(b * key_stride + kt) * kv_channels + kv_head * head_dim + d];
+                }
+                max_score = std::max(max_score, score * scale);
+            }
+            float denom = 0.0f;
+            std::vector<float> probs(static_cast<std::size_t>(std::max(0, max_key - min_key + 1)), 0.0f);
+            for (int kt = min_key; kt <= max_key; ++kt) {
+                float score = 0.0f;
+                for (int d = 0; d < head_dim; ++d) {
+                    score += q[b * q_channels + h * head_dim + d] *
+                             k[(b * key_stride + kt) * kv_channels + kv_head * head_dim + d];
+                }
+                const float p = std::exp(score * scale - max_score);
+                probs[static_cast<std::size_t>(kt - min_key)] = p;
+                denom += p;
+            }
+            for (int d = 0; d < head_dim; ++d) {
+                float acc = 0.0f;
+                for (int kt = min_key; kt <= max_key; ++kt) {
+                    acc += probs[static_cast<std::size_t>(kt - min_key)] *
+                           v[(b * key_stride + kt) * kv_channels + kv_head * head_dim + d];
+                }
+                out[b * q_channels + h * head_dim + d] = acc / denom;
+            }
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 int main() {
@@ -123,6 +178,78 @@ int main() {
         auto ref = reference_attention(q, k, v, B, T, C, H, true);
         for (std::size_t i = 0; i < Y.size(); ++i) {
             if (std::fabs(Y[i] - ref[i]) > 1e-4f) return 1;
+        }
+
+        {
+            constexpr int GB = 1;
+            constexpr int KT = 5;
+            constexpr int GH = 4;
+            constexpr int GKVH = 2;
+            constexpr int HD = 4;
+            constexpr int QC = GH * HD;
+            constexpr int KVC = GKVH * HD;
+            std::vector<float> gq(GB * QC);
+            std::vector<float> gk(GB * KT * KVC);
+            std::vector<float> gv(GB * KT * KVC);
+            for (std::size_t i = 0; i < gq.size(); ++i) {
+                gq[i] = 0.031f * static_cast<float>(static_cast<int>(i % 9) - 4);
+            }
+            for (std::size_t i = 0; i < gk.size(); ++i) {
+                gk[i] = 0.017f * static_cast<float>(static_cast<int>(i % 11) - 5);
+                gv[i] = 0.023f * static_cast<float>(static_cast<int>(i % 13) - 6);
+            }
+            auto GQ = motifcl::Tensor::from_cpu(backend, {GB, QC}, motifcl::DType::F32, gq.data());
+            auto GK = motifcl::Tensor::from_cpu(backend, {GB * KT, KVC}, motifcl::DType::F32, gk.data());
+            auto GV = motifcl::Tensor::from_cpu(backend, {GB * KT, KVC}, motifcl::DType::F32, gv.data());
+            auto full = motifcl::grouped_query_attention(GQ, GK, GV, GH, GKVH, true, GB, 1, KT, KT - 1).to_vector<float>();
+            auto full_ref = reference_grouped_decode(gq, gk, gv, GB, KT, KT, GH, GKVH, HD, KT - 1, 0);
+            auto windowed = motifcl::grouped_query_attention_windowed(GQ, GK, GV, GH, GKVH, 3, true, GB, 1, KT, KT - 1)
+                                .to_vector<float>();
+            auto windowed_ref = reference_grouped_decode(gq, gk, gv, GB, KT, KT, GH, GKVH, HD, KT - 1, 3);
+            for (std::size_t i = 0; i < full.size(); ++i) {
+                if (std::fabs(full[i] - full_ref[i]) > 1e-4f) return 1;
+                if (std::fabs(windowed[i] - windowed_ref[i]) > 1e-4f) return 1;
+            }
+        }
+
+        {
+            constexpr int GB = 2;
+            constexpr int KT = 3;
+            constexpr int KSTRIDE = 5;
+            constexpr int GH = 4;
+            constexpr int GKVH = 2;
+            constexpr int HD = 4;
+            constexpr int QC = GH * HD;
+            constexpr int KVC = GKVH * HD;
+            std::vector<float> gq(GB * QC);
+            std::vector<float> gk(GB * KSTRIDE * KVC, 99.0f);
+            std::vector<float> gv(GB * KSTRIDE * KVC, -99.0f);
+            for (std::size_t i = 0; i < gq.size(); ++i) {
+                gq[i] = 0.019f * static_cast<float>(static_cast<int>(i % 7) - 3);
+            }
+            for (int b = 0; b < GB; ++b) {
+                for (int kt = 0; kt < KT; ++kt) {
+                    for (int c = 0; c < KVC; ++c) {
+                        const int idx = (b * KSTRIDE + kt) * KVC + c;
+                        gk[static_cast<std::size_t>(idx)] =
+                            0.011f * static_cast<float>(((b + 3 * kt + c) % 13) - 6);
+                        gv[static_cast<std::size_t>(idx)] =
+                            0.013f * static_cast<float>(((2 * b + kt + 5 * c) % 17) - 8);
+                    }
+                }
+            }
+            auto GQ = motifcl::Tensor::from_cpu(backend, {GB, QC}, motifcl::DType::F32, gq.data());
+            auto GK = motifcl::Tensor::from_cpu(backend, {GB * KSTRIDE, KVC}, motifcl::DType::F32, gk.data());
+            auto GV = motifcl::Tensor::from_cpu(backend, {GB * KSTRIDE, KVC}, motifcl::DType::F32, gv.data());
+            auto full = motifcl::grouped_query_attention(GQ, GK, GV, GH, GKVH, true, GB, 1, KT, KT - 1).to_vector<float>();
+            auto full_ref = reference_grouped_decode(gq, gk, gv, GB, KT, KSTRIDE, GH, GKVH, HD, KT - 1, 0);
+            auto windowed = motifcl::grouped_query_attention_windowed(GQ, GK, GV, GH, GKVH, 2, true, GB, 1, KT, KT - 1)
+                                .to_vector<float>();
+            auto windowed_ref = reference_grouped_decode(gq, gk, gv, GB, KT, KSTRIDE, GH, GKVH, HD, KT - 1, 2);
+            for (std::size_t i = 0; i < full.size(); ++i) {
+                if (std::fabs(full[i] - full_ref[i]) > 1e-4f) return 1;
+                if (std::fabs(windowed[i] - windowed_ref[i]) > 1e-4f) return 1;
+            }
         }
 
         std::vector<float> grad_out = {

@@ -235,7 +235,26 @@ Tensor quantize_q8_symmetric_axis(const Tensor& x, int axis) {
 }
 
 Tensor quantize_q8_symmetric_rows(const Tensor& x) {
-    return quantize_q8_symmetric_axis(x, 0);
+    MCL_CHECK(x.dtype() == DType::F32, "quantize_q8_symmetric_rows expects f32 input");
+    MCL_CHECK(x.ndim() == 2, "row quantization expects rank-2 tensors");
+    const auto rows = static_cast<int>(x.shape()[0]);
+    const auto cols = static_cast<int>(x.shape()[1]);
+    MCL_CHECK(rows > 0 && cols > 0, "row quantization expects non-empty rows and cols");
+    auto scales = Tensor::empty(x.backend(), {rows}, DType::F32);
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::Q8_0);
+    out._set_quant_scales(scales, 0, 0);
+    auto k = x.backend().kernels.get("quantize_f32_to_q8_0_rowwise_fused");
+    const int n = static_cast<int>(x.numel());
+    k.set_arg(0, x.buffer());
+    k.set_arg(1, out.buffer());
+    k.set_arg(2, scales.buffer());
+    k.set_arg(3, rows);
+    k.set_arg(4, cols);
+    k.set_arg(5, n);
+    k.set_arg_local(6, kLocal * sizeof(float));
+    k.launch1d(static_cast<std::size_t>(rows) * kLocal, kLocal);
+    autograd::record_op("quantize_f32_to_q8_0_rowwise_fused", {x.id()}, {out.id()});
+    return out;
 }
 
 Tensor quantize_q8_symmetric_cols(const Tensor& x) {

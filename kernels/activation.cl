@@ -60,6 +60,196 @@ __kernel void silu_f32(__global const float* x, __global float* out, int n) {
     }
 }
 
+__kernel void gelu_mul_f32(__global const float* x,
+                           __global const float* y,
+                           __global float* out,
+                           int n) {
+    int gid = get_global_id(0);
+    if (gid < n) {
+        float v = x[gid];
+        float t = 0.7978845608028654f * (v + 0.044715f * v * v * v);
+        float g = 0.5f * v * (1.0f + tanh(t));
+        out[gid] = g * y[gid];
+    }
+}
+
+__kernel void gelu_mul_packed_per_layer_f32(__global const float* gate,
+                                            __global const float* packed,
+                                            __global float* out,
+                                            int token_count,
+                                            int layer_count,
+                                            int ple_dim,
+                                            int layer,
+                                            int n) {
+    int gid = get_global_id(0);
+    if (gid >= n) return;
+    int token = gid / ple_dim;
+    int d = gid - token * ple_dim;
+    float v = gate[gid];
+    float t = 0.7978845608028654f * (v + 0.044715f * v * v * v);
+    float g = 0.5f * v * (1.0f + tanh(t));
+    float y = packed[(token * layer_count + layer) * ple_dim + d];
+    out[gid] = g * y;
+}
+
+// Decode-only fused gate projection + GELU + per-layer input multiply.
+// This keeps the same output parallelism as matmul_f32_m1_f32 for the
+// [1, hidden] x [hidden, ple_dim] gate projection but removes a separate
+// gelu_mul_packed_per_layer_f32 launch and temporary gate tensor.
+__kernel void gelu_packed_ple_gate_m1_f32(__global const float* h,
+                                          __global const float* packed,
+                                          __global const float* gate_w,
+                                          __global float* out,
+                                          int hidden,
+                                          int ple_dim,
+                                          int layer_count,
+                                          int layer) {
+    int j = get_global_id(0);
+    if (j >= ple_dim) return;
+    float acc = 0.0f;
+    for (int i = 0; i < hidden; ++i) {
+        acc += h[i] * gate_w[i * ple_dim + j];
+    }
+    float t = 0.7978845608028654f * (acc + 0.044715f * acc * acc * acc);
+    float g = 0.5f * acc * (1.0f + tanh(t));
+    out[j] = g * packed[layer * ple_dim + j];
+}
+
+// RX580/decode variant: one wave64 computes four PLE columns. Compared to
+// gelu_packed_ple_gate_m1_f32, this reuses h[i] across four contiguous weights
+// and parallel-reduces the hidden dimension.
+__kernel void gelu_packed_ple_gate_m1_wg64x4_f32(__global const float* h,
+                                                 __global const float* packed,
+                                                 __global const float* gate_w,
+                                                 __global float* out,
+                                                 int hidden,
+                                                 int ple_dim,
+                                                 int layer_count,
+                                                 int layer,
+                                                 __local float* scratch) {
+    int group = get_group_id(0);
+    int lid = get_local_id(0);
+    int col0 = group * 4;
+    int c0 = col0;
+    int c1 = col0 + 1;
+    int c2 = col0 + 2;
+    int c3 = col0 + 3;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    for (int i = lid; i < hidden; i += 64) {
+        float hv = h[i];
+        int base = i * ple_dim + col0;
+        if (c0 < ple_dim) acc0 += hv * gate_w[base];
+        if (c1 < ple_dim) acc1 += hv * gate_w[base + 1];
+        if (c2 < ple_dim) acc2 += hv * gate_w[base + 2];
+        if (c3 < ple_dim) acc3 += hv * gate_w[base + 3];
+    }
+    scratch[lid] = acc0;
+    scratch[64 + lid] = acc1;
+    scratch[128 + lid] = acc2;
+    scratch[192 + lid] = acc3;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = 32; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            scratch[lid] += scratch[lid + stride];
+            scratch[64 + lid] += scratch[64 + lid + stride];
+            scratch[128 + lid] += scratch[128 + lid + stride];
+            scratch[192 + lid] += scratch[192 + lid + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (lid == 0) {
+        int packed_base = layer * ple_dim;
+        if (c0 < ple_dim) {
+            float v = scratch[0];
+            float t = 0.7978845608028654f * (v + 0.044715f * v * v * v);
+            out[c0] = (0.5f * v * (1.0f + tanh(t))) * packed[packed_base + c0];
+        }
+        if (c1 < ple_dim) {
+            float v = scratch[64];
+            float t = 0.7978845608028654f * (v + 0.044715f * v * v * v);
+            out[c1] = (0.5f * v * (1.0f + tanh(t))) * packed[packed_base + c1];
+        }
+        if (c2 < ple_dim) {
+            float v = scratch[128];
+            float t = 0.7978845608028654f * (v + 0.044715f * v * v * v);
+            out[c2] = (0.5f * v * (1.0f + tanh(t))) * packed[packed_base + c2];
+        }
+        if (c3 < ple_dim) {
+            float v = scratch[192];
+            float t = 0.7978845608028654f * (v + 0.044715f * v * v * v);
+            out[c3] = (0.5f * v * (1.0f + tanh(t))) * packed[packed_base + c3];
+        }
+    }
+}
+
+// Decode-only Gemma4 per-layer-input fusion for one token:
+// out = h + rmsnorm((gelu(h @ inp_gate) * packed[layer]) @ proj, post_norm_weight)
+// One workgroup handles one layer. `scratch` is laid out as:
+//   mixed[ple_dim] | projected[hidden] | reduce[local_size]
+__kernel void fused_packed_ple_m1_f32(__global const float* h,
+                                      __global const float* packed,
+                                      __global const float* gate_w,
+                                      __global const float* proj_w,
+                                      __global const float* norm_w,
+                                      __global float* out,
+                                      int hidden,
+                                      int ple_dim,
+                                      int layer_count,
+                                      int layer,
+                                      float eps,
+                                      __local float* scratch) {
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    __local float* mixed = scratch;
+    __local float* projected = scratch + ple_dim;
+    __local float* red = projected + hidden;
+
+    for (int j = lid; j < ple_dim; j += local_size) {
+        float acc = 0.0f;
+        for (int i = 0; i < hidden; ++i) {
+            acc += h[i] * gate_w[i * ple_dim + j];
+        }
+        float t = 0.7978845608028654f * (acc + 0.044715f * acc * acc * acc);
+        float g = 0.5f * acc * (1.0f + tanh(t));
+        mixed[j] = g * packed[layer * ple_dim + j];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    float ss = 0.0f;
+    for (int d = lid; d < hidden; d += local_size) {
+        float acc = 0.0f;
+        for (int j = 0; j < ple_dim; ++j) {
+            acc += mixed[j] * proj_w[j * hidden + d];
+        }
+        projected[d] = acc;
+        ss += acc * acc;
+    }
+    red[lid] = ss;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) red[lid] += red[lid + stride];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    const float inv = rsqrt(red[0] / (float)hidden + eps);
+    for (int d = lid; d < hidden; d += local_size) {
+        out[d] = h[d] + projected[d] * inv * norm_w[d];
+    }
+}
+
+__kernel void silu_mul_f32(__global const float* x,
+                           __global const float* y,
+                           __global float* out,
+                           int n) {
+    int gid = get_global_id(0);
+    if (gid < n) {
+        float v = x[gid];
+        out[gid] = (v / (1.0f + exp(-v))) * y[gid];
+    }
+}
+
 __kernel void swiglu_f32(__global const float* packed,
                          __global float* out,
                          int rows,

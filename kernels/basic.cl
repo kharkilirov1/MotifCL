@@ -23,6 +23,16 @@ __kernel void mul_f32(__global const float* a, __global const float* b, __global
     if (gid < n) out[gid] = a[gid] * b[gid];
 }
 
+__kernel void add_tensor_scalar_f32(__global const float* x, __global const float* scalar, __global float* out, int n) {
+    int gid = get_global_id(0);
+    if (gid < n) out[gid] = x[gid] + scalar[0];
+}
+
+__kernel void mul_tensor_scalar_f32(__global const float* x, __global const float* scalar, __global float* out, int n) {
+    int gid = get_global_id(0);
+    if (gid < n) out[gid] = x[gid] * scalar[0];
+}
+
 __kernel void div_f32(__global const float* a, __global const float* b, __global float* out, int n) {
     int gid = get_global_id(0);
     if (gid < n) out[gid] = a[gid] / b[gid];
@@ -63,6 +73,19 @@ __kernel void add_bias_rows_f32(__global const float* x,
     if (gid < n) {
         int col = gid % cols;
         out[gid] = x[gid] + bias[col];
+    }
+}
+
+__kernel void mul_rows_f32(__global const float* x,
+                           __global const float* scale,
+                           __global float* out,
+                           int rows,
+                           int cols) {
+    int gid = get_global_id(0);
+    int n = rows * cols;
+    if (gid < n) {
+        int col = gid % cols;
+        out[gid] = x[gid] * scale[col];
     }
 }
 

@@ -8,17 +8,24 @@ from . import (
     GemmaConfig,
     GemmaTokenizer,
     HFArchitecture,
+    HFChatMessage,
+    HFChatTemplateKind,
     HFTransformerConfig,
     HFTokenizer,
     HFWeightLoadReport,
     HFWeightName,
     GPTModel as _NativeGPTModel,
     KVCache,
+    PagedKVCache,
+    DeltaStateCache,
     Linear as _NativeLinear,
     ModernGPTModel as _NativeModernGPTModel,
     ModernMLP as _NativeModernMLP,
     ModernSelfAttention as _NativeModernSelfAttention,
     ModernTransformerBlock as _NativeModernTransformerBlock,
+    MoEFFN as _NativeMoEFFN,
+    GatedDeltaNetLayer as _NativeGatedDeltaNetLayer,
+    GatedAttentionLayer as _NativeGatedAttentionLayer,
     Parameter,
     QuantizationPolicy,
     QuantizedLinear as _NativeQuantizedLinear,
@@ -37,11 +44,15 @@ from . import (
     generate_hf_text,
     generate_text,
     hf_architecture_name,
+    infer_hf_chat_template_kind,
+    apply_hf_chat_template,
     load_gemma_config_json,
     load_gemma_hf_weights,
     load_hf_tokenizer,
     load_hf_transformer_config_json,
+    load_hf_transformer_config_gguf,
     load_hf_transformer_weights,
+    load_hf_transformer_gguf_weights,
     load_parameters,
     make_gemma_model,
     make_hf_transformer_model,
@@ -256,6 +267,9 @@ class GPTModel(Module):
 
 
 ModernMLP = _NativeModernMLP
+MoEFFN = _NativeMoEFFN
+GatedDeltaNetLayer = _NativeGatedDeltaNetLayer
 ModernSelfAttention = _NativeModernSelfAttention
+GatedAttentionLayer = _NativeGatedAttentionLayer
 ModernTransformerBlock = _NativeModernTransformerBlock
 ModernGPTModel = _NativeModernGPTModel

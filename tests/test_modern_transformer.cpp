@@ -4,6 +4,7 @@
 #include <vector>
 
 #include <motifcl/motifcl.hpp>
+#include <motifcl/autograd/node.hpp>
 
 #include "test_utils.hpp"
 
@@ -232,6 +233,54 @@ int main() {
         cfg.learned_position_embeddings = false;
 
         {
+            motifcl::nn::TransformerConfig ple_cfg = cfg;
+            ple_cfg.vocab_size = 24;
+            ple_cfg.block_size = 4;
+            ple_cfg.n_embd = 16;
+            ple_cfg.n_head = 4;
+            ple_cfg.n_kv_head = 2;
+            ple_cfg.n_layer = 1;
+            ple_cfg.mlp_hidden = 32;
+            ple_cfg.use_per_layer_inputs = true;
+            ple_cfg.per_layer_input_dim = 8;
+            ple_cfg.per_layer_input_vocab_size = 24;
+            motifcl::nn::ModernGPTModel ple_model(backend, ple_cfg);
+            std::int32_t token_value = 3;
+            auto token = motifcl::Tensor::from_cpu(backend, {1}, motifcl::DType::I32, &token_value);
+            set_test_env("MOTIFCL_DISABLE_FUSED_PLE_M1", "1");
+            set_test_env("MOTIFCL_DISABLE_FUSED_PLE_GATE_M1", "1");
+            auto ref_cache = ple_model.create_kv_cache(backend, 1);
+            auto ref = ple_model.forward_with_cache(token, ref_cache).to_vector<float>();
+            set_test_env("MOTIFCL_DISABLE_FUSED_PLE_M1", "");
+            set_test_env("MOTIFCL_DISABLE_FUSED_PLE_GATE_M1", "");
+            auto fused_cache = ple_model.create_kv_cache(backend, 1);
+            auto fused = ple_model.forward_with_cache(token, fused_cache).to_vector<float>();
+            require_close_vec(fused, ref, 3e-4f);
+
+            {
+                motifcl::autograd::NoGradGuard no_grad;
+                std::int32_t token_values[2] = {3, 4};
+                auto token_a = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, token_values);
+                auto token_b = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, token_values + 1);
+
+                set_test_env("MOTIFCL_ENABLE_DECODE_BLOCK_GRAPH_REPLAY", "1");
+                set_test_env("MOTIFCL_DISABLE_DECODE_BLOCK_GRAPH_REPLAY", "1");
+                auto eager_cache = ple_model.create_kv_cache(backend, 1);
+                auto eager_a = ple_model.forward_with_cache(token_a, eager_cache).to_vector<float>();
+                auto eager_b = ple_model.forward_with_cache(token_b, eager_cache).to_vector<float>();
+
+                set_test_env("MOTIFCL_DISABLE_DECODE_BLOCK_GRAPH_REPLAY", "");
+                auto replay_cache = ple_model.create_kv_cache(backend, 1);
+                auto replay_a = ple_model.forward_with_cache(token_a, replay_cache).to_vector<float>();
+                auto replay_b = ple_model.forward_with_cache(token_b, replay_cache).to_vector<float>();
+                require_close_vec(replay_a, eager_a, 3e-4f);
+                require_close_vec(replay_b, eager_b, 3e-4f);
+                set_test_env("MOTIFCL_ENABLE_DECODE_BLOCK_GRAPH_REPLAY", "");
+                set_test_env("MOTIFCL_DISABLE_DECODE_BLOCK_GRAPH_REPLAY", "");
+            }
+        }
+
+        {
             motifcl::nn::ModernSelfAttention attn(backend, cfg);
             motifcl::nn::KVCache cache(backend, 1, cfg.block_size, cfg.n_kv_head, cfg.n_embd / cfg.n_head);
             auto x1 = motifcl::Tensor::randn(backend, {1, cfg.n_embd}, 0.02f);
@@ -240,6 +289,123 @@ int main() {
             auto x2 = motifcl::Tensor::randn(backend, {1, cfg.n_embd}, 0.02f);
             auto y2 = attn.forward_with_cache(x2, cache, 1, 1);
             if (cache.length != 2 || y2.shape() != motifcl::Shape({1, cfg.n_embd})) return 1;
+        }
+
+        {
+            motifcl::nn::TransformerConfig qk_cfg = cfg;
+            qk_cfg.use_qk_norm = true;
+            qk_cfg.use_rope = true;
+            motifcl::nn::ModernSelfAttention attn(backend, qk_cfg);
+            auto x1 = motifcl::Tensor::randn(backend, {1, qk_cfg.n_embd}, 0.02f);
+            auto x2 = motifcl::Tensor::randn(backend, {1, qk_cfg.n_embd}, 0.02f);
+            motifcl::autograd::NoGradGuard no_grad;
+
+            set_test_env("MOTIFCL_DISABLE_FUSED_QK_NORM_ROPE_DECODE", "1");
+            motifcl::nn::KVCache ref_cache(backend, 1, qk_cfg.block_size, qk_cfg.n_kv_head, qk_cfg.n_embd / qk_cfg.n_head);
+            auto ref1 = attn.forward_with_cache(x1, ref_cache, 1, 1).to_vector<float>();
+            auto ref2 = attn.forward_with_cache(x2, ref_cache, 1, 1).to_vector<float>();
+
+            set_test_env("MOTIFCL_DISABLE_FUSED_QK_NORM_ROPE_DECODE", "");
+            motifcl::nn::KVCache fused_cache(backend, 1, qk_cfg.block_size, qk_cfg.n_kv_head, qk_cfg.n_embd / qk_cfg.n_head);
+            auto fused1 = attn.forward_with_cache(x1, fused_cache, 1, 1).to_vector<float>();
+            auto fused2 = attn.forward_with_cache(x2, fused_cache, 1, 1).to_vector<float>();
+
+            require_close_vec(fused1, ref1, 3e-4f);
+            require_close_vec(fused2, ref2, 3e-4f);
+        }
+
+        {
+            motifcl::nn::TransformerConfig post_cfg = cfg;
+            post_cfg.use_post_attention_norm = true;
+            post_cfg.use_post_ffw_norm = true;
+            motifcl::nn::ModernTransformerBlock block(backend, post_cfg);
+            auto x = motifcl::Tensor::randn(backend, {1, post_cfg.n_embd}, 0.02f);
+            motifcl::autograd::NoGradGuard no_grad;
+
+            set_test_env("MOTIFCL_DISABLE_FUSED_RMSNORM_RESIDUAL_ADD", "1");
+            motifcl::nn::KVCache ref_cache(backend, 1, post_cfg.block_size, post_cfg.n_kv_head, post_cfg.n_embd / post_cfg.n_head);
+            auto ref = block.forward_with_cache(x, ref_cache, 1, 1).to_vector<float>();
+
+            set_test_env("MOTIFCL_DISABLE_FUSED_RMSNORM_RESIDUAL_ADD", "");
+            motifcl::nn::KVCache fused_cache(backend, 1, post_cfg.block_size, post_cfg.n_kv_head, post_cfg.n_embd / post_cfg.n_head);
+            auto fused = block.forward_with_cache(x, fused_cache, 1, 1).to_vector<float>();
+            require_close_vec(fused, ref, 3e-4f);
+        }
+
+        {
+            motifcl::nn::ModernGPTModel model(backend, cfg);
+            auto paged = model.create_paged_kv_cache(backend, 2, 3);
+            if (paged.size() != 1 || paged[0].page_size != 3 || paged[0].page_count != 3) return 1;
+            if (paged[0].k_pages.shape() != motifcl::Shape({18, 16})) return 1;
+            if (paged[0].v_pages.shape() != motifcl::Shape({18, 16})) return 1;
+            auto table = paged[0].page_table.to_vector<std::int32_t>();
+            if (table != std::vector<std::int32_t>({0, 1, 2, 3, 4, 5})) return 1;
+            paged[0].length = 5;
+            paged[0].reset();
+            if (paged[0].length != 0 || paged[0].capacity() != 9) return 1;
+
+            auto delta = model.create_delta_state_cache(backend, 2, 5);
+            if (delta.size() != 1 || delta[0].state.shape() != motifcl::Shape({2, 4, 8, 5})) return 1;
+            auto delta_values = delta[0].state.to_vector<float>();
+            for (float v : delta_values) {
+                if (std::fabs(v) > 1e-8f) return 1;
+            }
+            delta[0].zero();
+            if (delta[0].state.shape() != motifcl::Shape({2, 4, 8, 5})) return 1;
+        }
+
+        {
+            motifcl::nn::ModernGPTModel model(backend, cfg);
+            auto paged = model.create_paged_kv_cache(backend, 1, 2);
+            std::vector<std::int32_t> ids = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+            for (std::size_t i = 0; i < ids.size(); ++i) {
+                auto token = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, ids.data() + i);
+                auto logits = model.forward_with_cache(token, paged);
+                if (logits.shape() != motifcl::Shape({1, 1, cfg.vocab_size})) return 1;
+            }
+            if (paged[0].tokens_seen != 10 || paged[0].length != cfg.block_size) return 1;
+        }
+
+        {
+            motifcl::nn::MoEFFN moe(backend, cfg.n_embd, cfg.mlp_hidden, 4, 2);
+            auto x = motifcl::Tensor::randn(backend, {3, cfg.n_embd}, 0.02f);
+            auto y = moe.forward(x);
+            if (y.shape() != motifcl::Shape({3, cfg.n_embd})) return 1;
+            for (float v : y.to_vector<float>()) {
+                if (!std::isfinite(v)) return 1;
+            }
+
+            motifcl::motif::Router router(backend, cfg.n_embd, 4, 2);
+            auto probs = router.forward(x);
+            if (probs.shape() != motifcl::Shape({3, 4})) return 1;
+            auto p = probs.to_vector<float>();
+            for (int r = 0; r < 3; ++r) {
+                float sum = 0.0f;
+                int non_zero = 0;
+                for (int c = 0; c < 4; ++c) {
+                    const float value = p[static_cast<std::size_t>(r * 4 + c)];
+                    sum += value;
+                    if (value > 0.0f) ++non_zero;
+                }
+                if (std::fabs(sum - 1.0f) > 1e-5f || non_zero != 2) return 1;
+            }
+        }
+
+        {
+            motifcl::nn::GatedDeltaNetLayer delta_layer(backend, cfg);
+            motifcl::nn::DeltaStateCache state(backend, 1, cfg.n_head, cfg.n_embd / cfg.n_head, cfg.n_embd / cfg.n_head);
+            auto x = motifcl::Tensor::randn(backend, {2, cfg.n_embd}, 0.02f);
+            auto y = delta_layer.forward_with_state(x, state, 1, 2);
+            if (y.shape() != motifcl::Shape({2, cfg.n_embd})) return 1;
+            bool any_state = false;
+            for (float v : state.state.to_vector<float>()) {
+                if (std::fabs(v) > 1e-9f) any_state = true;
+            }
+            if (!any_state) return 1;
+
+            motifcl::nn::GatedAttentionLayer gated_attn(backend, cfg);
+            auto gy = gated_attn.forward(x, 1, 2, true);
+            if (gy.shape() != motifcl::Shape({2, cfg.n_embd})) return 1;
         }
 
         {

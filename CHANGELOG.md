@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Added `ModernModelSpec` / `LayerSpec` graph extraction, long-context runtime
+  metadata plus paged KV/DeltaNet state-cache containers, Gemma4 dense text-core parsing with per-layer local/global
+  attention windows, Qwen3.5 DeltaNet/Gated-Attention/MoE and Mixtral MoE graph
+  execution through `HybridGPTModel`, and optional `tools/parity_harness.py`.
+- Added GGUF `Q4_0`/`Q8_0` native quant repacking through
+  `gguf::File::read_tensor_quantized()` and packed GGUF `Q4_K`/`Q5_K` tensor
+  reads, plus direct OpenCL `q8_0 x Q4_K/Q5_K` matmul so those payloads can be
+  represented as MotifCL quant tensors without expanding to F32.
+- Added a modern-model runner front door: architecture registry and readiness
+  probe APIs, `motifcl_generate_transformer --inspect`,
+  `--list-architectures`, built-in chat prompt templates (`chatml`, `llama3`,
+  `mistral`, `gemma`, `generic`), Qwen3.5/Mixtral hybrid routing, and explicit
+  blocker reporting for detected but unsupported families such as Gemma 2/3, Qwen3, Phi,
+  DeepSeek, Falcon, GPT-NeoX, and Mamba.
+- Added a GGUF loader foundation for reading metadata, tokenizer token arrays,
+  tensor directory entries, tensor alignment, tensor type/block sizes, and raw
+  tensor payloads; mapping GGUF metadata to `HFTransformerConfig`; mapping
+  common `blk.*` LLaMA-style tensor names; loading F16/F32/BF16 plus direct
+  packed GGUF `Q4_0`, `Q8_0`, `Q4_K`, and `Q5_K` payloads into split
+  `ModernGPTModel` projections/LM head with safe packed transpose/repack; and accepting `.gguf` files through
+  `motifcl_generate_transformer --model`.
+
 ## 1.1.0 - 2026-05-10
 
 - Added generic HF-style modern decoder compatibility APIs: `HFArchitecture`,

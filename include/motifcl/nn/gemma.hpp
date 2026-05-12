@@ -59,6 +59,7 @@ struct GemmaConfig {
     float rope_theta = 10000.0f;
     float attention_dropout = 0.0f;
     bool attention_bias = false;
+    bool attention_k_eq_v = false;
     bool tie_word_embeddings = false;
     int bos_token_id = 1;
     int eos_token_id = 2;
@@ -99,6 +100,10 @@ public:
     GemmaTokenizer() = default;
 
     static GemmaTokenizer byte_fallback(int vocab_size = 256, int bos_token_id = 1, int eos_token_id = 2);
+    static GemmaTokenizer from_tokens(const std::vector<std::string>& tokens,
+                                      int bos_token_id = 1,
+                                      int eos_token_id = 2,
+                                      const std::string& tokenizer_model_type = "GGUF");
     static GemmaTokenizer load_vocab(const std::string& path, int bos_token_id = 1, int eos_token_id = 2);
 
     std::vector<std::int32_t> encode(const std::string& text, bool add_bos = false, bool add_eos = false) const;
@@ -116,7 +121,11 @@ private:
     int eos_token_id_ = 2;
     bool byte_fallback_ = true;
     bool sentencepiece_style_ = false;
+    bool sp_add_dummy_prefix_ = true;
+    bool sp_remove_extra_whitespaces_ = true;
+    bool sp_escape_whitespaces_ = true;
     std::string tokenizer_model_type_ = "byte";
+    std::string sp_normalizer_name_ = "nmt_nfkc";
     std::unordered_map<std::string, std::int32_t> token_to_id_;
     std::unordered_map<std::int32_t, std::string> id_to_token_;
     std::unordered_map<std::string, int> bpe_merge_rank_;
@@ -160,6 +169,8 @@ struct GenerateOptions {
     bool add_bos = false;
     bool prefill_prompt = true;
     bool gpu_greedy_sampling = true;
+    bool use_paged_kv_cache = false;
+    int kv_page_size = 256;
     std::uint32_t seed = 1234;
 };
 

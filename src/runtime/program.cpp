@@ -60,7 +60,9 @@ Kernel Program::get_kernel(const std::string& name) {
     MCL_CHECK(state_ && state_->valid(), "program has no live OpenCL context");
     cl_int err = CL_SUCCESS;
     cl_kernel kernel = clCreateKernel(program_, name.c_str(), &err);
-    MCL_CHECK_CL(err);
+    if (err != CL_SUCCESS) {
+        throw Error("failed to create OpenCL kernel '" + name + "': " + cl_error_name(err));
+    }
     return Kernel(*ctx_, kernel, name, profiler_);
 }
 

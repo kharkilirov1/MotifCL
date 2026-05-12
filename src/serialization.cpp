@@ -95,7 +95,7 @@ Tensor read_tensor_payload_v2(Backend& backend, std::istream& in) {
     auto tensor = Tensor::from_cpu(backend, shape, dtype, bytes.data());
     if (has_quant_scales) {
         tensor._set_quant_scales(quant_scales, quant_scale_axis, quant_block_size);
-    } else if (dtype == DType::Q8_0 || dtype == DType::Q4_0) {
+    } else if (dtype == DType::Q8_0 || dtype == DType::Q4_0 || dtype == DType::Q4_0_COL) {
         tensor._set_quant_scale(quant_scale);
     }
     return tensor;
@@ -168,6 +168,10 @@ std::string checkpoint_dtype_name(DType dtype) {
     switch (dtype) {
     case DType::Q4_0: return "Q4_0";
     case DType::Q8_0: return "Q8_0";
+    case DType::Q4_K: return "Q4_K";
+    case DType::Q5_K: return "Q5_K";
+    case DType::Q6_K: return "Q6_K";
+    case DType::Q4_0_COL: return "Q4_0_COL";
     case DType::F32: return "F32";
     case DType::F16: return "F16";
     case DType::I32: return "I32";

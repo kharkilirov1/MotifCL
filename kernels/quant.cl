@@ -90,6 +90,44 @@ __kernel void quantize_f32_to_q8_0_scaled(__global const float* x,
     out[gid] = (char)q;
 }
 
+__kernel void quantize_f32_to_q8_0_rowwise_fused(__global const float* x,
+                                                 __global char* out,
+                                                 __global float* scales,
+                                                 int rows,
+                                                 int cols,
+                                                 int n,
+                                                 __local float* scratch) {
+    int row = get_group_id(0);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    if (row >= rows) return;
+
+    float max_abs = 0.0f;
+    int base = row * cols;
+    for (int c = lid; c < cols; c += local_size) {
+        max_abs = fmax(max_abs, fabs(x[base + c]));
+    }
+    scratch[lid] = max_abs;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) scratch[lid] = fmax(scratch[lid], scratch[lid + stride]);
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    float scale = scratch[0] <= 0.0f ? 1.0f : scratch[0] / 127.0f;
+    if (lid == 0) scales[row] = scale;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int c = lid; c < cols; c += local_size) {
+        int idx = base + c;
+        if (idx >= n) continue;
+        int q = (int)rint(x[idx] / scale);
+        q = min(127, max(-127, q));
+        out[idx] = (char)q;
+    }
+}
+
 __kernel void dequantize_q8_0_to_f32_scaled(__global const char* x,
                                             __global float* out,
                                             __global const float* scales,

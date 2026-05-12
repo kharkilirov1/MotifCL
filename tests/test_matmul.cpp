@@ -1,4 +1,6 @@
 #include <cmath>
+#include <algorithm>
+#include <cstdint>
 #include <iostream>
 #include <vector>
 #include <motifcl/motifcl.hpp>
@@ -96,6 +98,97 @@ int main() {
                 for (int k = 0; k < KK; ++k) expected += tuned_a[r * KK + k] * tuned_b[k * TN + c];
                 if (std::fabs(tuned_c[r * TN + c] - expected) > 4e-4f) return 6;
             }
+        }
+
+        constexpr int CK = 64;
+        constexpr int CN = 5;
+        constexpr int CB = 32;
+        std::vector<float> col_a(CK);
+        std::vector<float> col_b(CK * CN);
+        for (int i = 0; i < CK; ++i) col_a[i] = static_cast<float>((i % 29) - 14) * 0.013f;
+        for (int i = 0; i < CK * CN; ++i) col_b[i] = static_cast<float>((i % 31) - 15) * 0.017f;
+        const int blocks_per_col = (CK + CB - 1) / CB;
+        std::vector<std::uint8_t> col_q(static_cast<std::size_t>(CK * CN + 1) / 2, 0);
+        std::vector<float> col_scales(CN * blocks_per_col, 1.0f);
+        std::vector<float> col_expected(CN, 0.0f);
+        for (int c = 0; c < CN; ++c) {
+            for (int kb = 0; kb < blocks_per_col; ++kb) {
+                const int begin = kb * CB;
+                const int end = std::min(CK, begin + CB);
+                float max_abs = 0.0f;
+                for (int k = begin; k < end; ++k) {
+                    max_abs = std::max(max_abs, std::fabs(col_b[k * CN + c]));
+                }
+                const float scale = max_abs > 0.0f ? max_abs / 7.0f : 1.0f;
+                col_scales[c * blocks_per_col + kb] = scale;
+                for (int k = begin; k < end; ++k) {
+                    int q = static_cast<int>(std::lrint(col_b[k * CN + c] / scale));
+                    q = std::max(-7, std::min(7, q));
+                    const auto code = static_cast<std::uint8_t>((q + 8) & 0x0f);
+                    const int pos = c * CK + k;
+                    if ((pos & 1) == 0) col_q[static_cast<std::size_t>(pos >> 1)] =
+                        static_cast<std::uint8_t>((col_q[static_cast<std::size_t>(pos >> 1)] & 0xf0u) | code);
+                    else col_q[static_cast<std::size_t>(pos >> 1)] =
+                        static_cast<std::uint8_t>((col_q[static_cast<std::size_t>(pos >> 1)] & 0x0fu) | (code << 4));
+                    col_expected[c] += col_a[k] * static_cast<float>(q) * scale;
+                }
+            }
+        }
+        auto ColA = motifcl::Tensor::from_cpu(backend, {1, CK}, motifcl::DType::F32, col_a.data());
+        auto ColB = motifcl::Tensor::from_cpu(backend, {CK, CN}, motifcl::DType::Q4_0_COL, col_q.data());
+        auto ColS = motifcl::Tensor::from_cpu(backend, {static_cast<int64_t>(col_scales.size())}, motifcl::DType::F32, col_scales.data());
+        ColB._set_quant_scales(ColS, 3, CB);
+        auto ColC = motifcl::matmul(ColA, ColB).to_vector<float>();
+        for (int c = 0; c < CN; ++c) {
+            if (std::fabs(ColC[c] - col_expected[c]) > 2e-4f) return 7;
+        }
+
+        constexpr int TN8 = 13;
+        std::vector<float> tile_b(CK * TN8);
+        for (int i = 0; i < CK * TN8; ++i) tile_b[i] = static_cast<float>((i % 37) - 18) * 0.011f;
+        std::vector<std::uint8_t> tile_q(static_cast<std::size_t>(CK * TN8 + 1) / 2, 0);
+        std::vector<float> tile_scales(TN8 * blocks_per_col, 1.0f);
+        std::vector<float> tile_expected(TN8, 0.0f);
+        constexpr int TCOL = 8;
+        for (int c0 = 0; c0 < TN8; c0 += TCOL) {
+            const int cols_in_tile = std::min(TCOL, TN8 - c0);
+            const int tile = c0 / TCOL;
+            for (int kb = 0; kb < blocks_per_col; ++kb) {
+                const int begin = kb * CB;
+                for (int tc = 0; tc < cols_in_tile; ++tc) {
+                    const int c = c0 + tc;
+                    float max_abs = 0.0f;
+                    for (int kk = 0; kk < CB; ++kk) {
+                        const int k = begin + kk;
+                        max_abs = std::max(max_abs, std::fabs(tile_b[k * TN8 + c]));
+                    }
+                    const float scale = max_abs > 0.0f ? max_abs / 7.0f : 1.0f;
+                    tile_scales[tile * blocks_per_col * TCOL + kb * cols_in_tile + tc] = scale;
+                }
+                for (int kk = 0; kk < CB; ++kk) {
+                    const int k = begin + kk;
+                    for (int tc = 0; tc < cols_in_tile; ++tc) {
+                        const int c = c0 + tc;
+                        const float scale = tile_scales[tile * blocks_per_col * TCOL + kb * cols_in_tile + tc];
+                        int q = static_cast<int>(std::lrint(tile_b[k * TN8 + c] / scale));
+                        q = std::max(-7, std::min(7, q));
+                        const auto code = static_cast<std::uint8_t>((q + 8) & 0x0f);
+                        const int pos = tile * blocks_per_col * CB * TCOL + (kb * CB + kk) * cols_in_tile + tc;
+                        if ((pos & 1) == 0) tile_q[static_cast<std::size_t>(pos >> 1)] =
+                            static_cast<std::uint8_t>((tile_q[static_cast<std::size_t>(pos >> 1)] & 0xf0u) | code);
+                        else tile_q[static_cast<std::size_t>(pos >> 1)] =
+                            static_cast<std::uint8_t>((tile_q[static_cast<std::size_t>(pos >> 1)] & 0x0fu) | (code << 4));
+                        tile_expected[c] += col_a[k] * static_cast<float>(q) * scale;
+                    }
+                }
+            }
+        }
+        auto TileB = motifcl::Tensor::from_cpu(backend, {CK, TN8}, motifcl::DType::Q4_0_COL, tile_q.data());
+        auto TileS = motifcl::Tensor::from_cpu(backend, {static_cast<int64_t>(tile_scales.size())}, motifcl::DType::F32, tile_scales.data());
+        TileB._set_quant_scales(TileS, 4, CB);
+        auto TileC = motifcl::matmul(ColA, TileB).to_vector<float>();
+        for (int c = 0; c < TN8; ++c) {
+            if (std::fabs(TileC[c] - tile_expected[c]) > 2e-4f) return 8;
         }
     } catch (const std::exception& e) {
         return motifcl_test::handle_exception(e);

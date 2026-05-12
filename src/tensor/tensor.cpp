@@ -110,8 +110,10 @@ Tensor::Tensor(Backend& backend, Shape shape, DType dtype, std::shared_ptr<Stora
     impl_->strides = contiguous_strides(impl_->shape);
     impl_->dtype = dtype;
     impl_->offset = offset;
-    const cl_mem mem = impl_->storage && impl_->storage->buffer.valid() ? impl_->storage->buffer.raw() : nullptr;
-    autograd::register_tensor(impl_->id, impl_->shape, impl_->dtype, nbytes(), mem);
+    if (autograd::is_enabled() || autograd::is_graph_capturing()) {
+        const cl_mem mem = impl_->storage && impl_->storage->buffer.valid() ? impl_->storage->buffer.raw() : nullptr;
+        autograd::register_tensor(impl_->id, impl_->shape, impl_->dtype, nbytes(), mem);
+    }
 }
 
 Backend& Tensor::backend() const {
@@ -388,8 +390,10 @@ void Tensor::_set_quant_scales(const Tensor& scales, int axis, int64_t block_siz
     MCL_CHECK(scales.valid(), "quant scale tensor is invalid");
     MCL_CHECK(scales.dtype() == DType::F32, "quant scale tensor must be f32");
     MCL_CHECK(scales.backend_ptr() == backend_ptr(), "quant scale tensor must be on same backend");
-    MCL_CHECK(axis == 0 || axis == 1 || axis == 2, "quant scale axis must be 0, 1, or 2");
+    MCL_CHECK(axis == 0 || axis == 1 || axis == 2 || axis == 3 || axis == 4,
+              "quant scale axis must be 0, 1, 2, 3, or 4");
     MCL_CHECK(axis != 2 || block_size > 0, "blockwise quantization requires positive block size");
+    MCL_CHECK(axis != 3 || block_size > 0, "column-block quantization requires positive block size");
     impl_->quant_scales = std::make_shared<Tensor>(scales);
     impl_->quant_scale_axis = axis;
     impl_->quant_block_size = block_size;

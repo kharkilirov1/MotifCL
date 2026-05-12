@@ -48,8 +48,13 @@ void append_utf8(std::string& out, unsigned int cp) {
     } else if (cp <= 0x7ffu) {
         out.push_back(static_cast<char>(0xc0u | (cp >> 6)));
         out.push_back(static_cast<char>(0x80u | (cp & 0x3fu)));
-    } else {
+    } else if (cp <= 0xffffu) {
         out.push_back(static_cast<char>(0xe0u | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3fu)));
+    } else {
+        out.push_back(static_cast<char>(0xf0u | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3fu)));
         out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3fu)));
         out.push_back(static_cast<char>(0x80u | (cp & 0x3fu)));
     }
@@ -173,10 +178,39 @@ std::string extract_json_array_for_key(const std::string& text, const std::strin
 }
 
 std::string json_string_or_empty(const std::string& text, const std::string& key) {
-    std::regex re("\"" + regex_escape(key) + "\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
-    std::smatch m;
-    if (!std::regex_search(text, m, re)) return {};
-    return json_unescape(m[1].str());
+    const std::string needle = "\"" + key + "\"";
+    std::size_t search = 0;
+    while (search < text.size()) {
+        const auto key_pos = text.find(needle, search);
+        if (key_pos == std::string::npos) return {};
+        const auto colon = text.find(':', key_pos + needle.size());
+        if (colon == std::string::npos) return {};
+        auto pos = text.find_first_not_of(" \t\r\n", colon + 1);
+        if (pos == std::string::npos) return {};
+        if (text[pos] != '"') {
+            search = pos + 1;
+            continue;
+        }
+        ++pos;
+        std::string raw;
+        bool escape = false;
+        for (; pos < text.size(); ++pos) {
+            const char c = text[pos];
+            if (escape) {
+                raw.push_back('\\');
+                raw.push_back(c);
+                escape = false;
+            } else if (c == '\\') {
+                escape = true;
+            } else if (c == '"') {
+                return json_unescape(raw);
+            } else {
+                raw.push_back(c);
+            }
+        }
+        return {};
+    }
+    return {};
 }
 
 std::vector<std::string> json_strings_in(const std::string& text) {
@@ -315,6 +349,10 @@ bool protobuf_skip_field(const std::string& data, std::size_t& pos, int wire_typ
 struct SentencePieceModelLite {
     std::vector<std::string> pieces;
     std::string model_type = "SentencePiece";
+    std::string normalizer_name = "nmt_nfkc";
+    bool add_dummy_prefix = true;
+    bool remove_extra_whitespaces = true;
+    bool escape_whitespaces = true;
 };
 
 std::string parse_sentencepiece_piece_message(const std::string& msg) {
@@ -359,6 +397,32 @@ std::string parse_sentencepiece_trainer_spec(const std::string& msg) {
     return "SentencePiece";
 }
 
+void parse_sentencepiece_normalizer_spec(const std::string& msg, SentencePieceModelLite& out) {
+    std::size_t pos = 0;
+    while (pos < msg.size()) {
+        std::uint64_t key = 0;
+        if (!protobuf_read_varint(msg, pos, key)) break;
+        const int field = static_cast<int>(key >> 3);
+        const int wire = static_cast<int>(key & 0x7u);
+        if (field == 1 && wire == 2) {
+            std::uint64_t len = 0;
+            if (!protobuf_read_varint(msg, pos, len)) break;
+            if (pos + static_cast<std::size_t>(len) > msg.size()) break;
+            out.normalizer_name = msg.substr(pos, static_cast<std::size_t>(len));
+            pos += static_cast<std::size_t>(len);
+        } else if ((field == 3 || field == 4 || field == 5) && wire == 0) {
+            std::uint64_t value = 0;
+            if (!protobuf_read_varint(msg, pos, value)) break;
+            const bool enabled = value != 0;
+            if (field == 3) out.add_dummy_prefix = enabled;
+            else if (field == 4) out.remove_extra_whitespaces = enabled;
+            else if (field == 5) out.escape_whitespaces = enabled;
+        } else if (!protobuf_skip_field(msg, pos, wire)) {
+            break;
+        }
+    }
+}
+
 SentencePieceModelLite parse_sentencepiece_model_proto(const std::string& data) {
     SentencePieceModelLite out;
     std::size_t pos = 0;
@@ -367,7 +431,7 @@ SentencePieceModelLite parse_sentencepiece_model_proto(const std::string& data) 
         if (!protobuf_read_varint(data, pos, key)) break;
         const int field = static_cast<int>(key >> 3);
         const int wire = static_cast<int>(key & 0x7u);
-        if ((field == 1 || field == 2) && wire == 2) {
+        if ((field == 1 || field == 2 || field == 3) && wire == 2) {
             std::uint64_t len = 0;
             if (!protobuf_read_varint(data, pos, len)) break;
             if (pos + static_cast<std::size_t>(len) > data.size()) break;
@@ -377,7 +441,8 @@ SentencePieceModelLite parse_sentencepiece_model_proto(const std::string& data) 
                 auto piece = parse_sentencepiece_piece_message(msg);
                 if (!piece.empty()) out.pieces.push_back(std::move(piece));
             } else {
-                out.model_type = parse_sentencepiece_trainer_spec(msg);
+                if (field == 2) out.model_type = parse_sentencepiece_trainer_spec(msg);
+                else parse_sentencepiece_normalizer_spec(msg, out);
             }
         } else if (!protobuf_skip_field(data, pos, wire)) {
             break;
@@ -553,8 +618,6 @@ nn::GemmaConfig normalize_gemma_config(nn::GemmaConfig cfg) {
     MCL_CHECK(cfg.num_attention_heads > 0, "GemmaConfig num_attention_heads must be positive");
     MCL_CHECK(cfg.num_key_value_heads > 0, "GemmaConfig num_key_value_heads must be positive");
     MCL_CHECK(cfg.head_dim > 0, "GemmaConfig head_dim must be positive");
-    MCL_CHECK(cfg.hidden_size == cfg.num_attention_heads * cfg.head_dim,
-              "GemmaConfig hidden_size must equal num_attention_heads * head_dim");
     MCL_CHECK(cfg.num_attention_heads % cfg.num_key_value_heads == 0,
               "GemmaConfig num_attention_heads must be divisible by num_key_value_heads");
     return cfg;
@@ -638,10 +701,6 @@ private:
     std::unordered_map<std::string, int> index;
 };
 
-void mark_missing(std::vector<std::string>& missing, const SafeTensorsArchive& archive, const std::string& name) {
-    if (!archive.contains(name)) missing.push_back(name);
-}
-
 bool shape_is(const SafeTensorInfo& info, std::initializer_list<int64_t> dims) {
     return info.shape == std::vector<int64_t>(dims);
 }
@@ -694,6 +753,7 @@ Tensor last_token_logits_tensor(const Tensor& logits, int vocab_size) {
     MCL_CHECK(logits.numel() >= vocab_size && logits.numel() % vocab_size == 0,
               "generate logits size is not divisible by vocab_size");
     const int64_t rows = logits.numel() / vocab_size;
+    if (rows == 1) return logits.view({1, vocab_size});
     return slice_rows(logits.view({rows, vocab_size}), rows - 1, rows);
 }
 
@@ -748,6 +808,112 @@ void replace_all(std::string& s, const std::string& from, const std::string& to)
         s.replace(pos, from.size(), to);
         pos += to.size();
     }
+}
+
+bool utf8_decode_one(const std::string& s, std::size_t pos, std::uint32_t& cp, std::size_t& len) {
+    if (pos >= s.size()) return false;
+    const auto c0 = static_cast<unsigned char>(s[pos]);
+    if (c0 < 0x80) {
+        cp = c0;
+        len = 1;
+        return true;
+    }
+    auto cont = [&](std::size_t off) -> int {
+        if (pos + off >= s.size()) return -1;
+        const auto c = static_cast<unsigned char>(s[pos + off]);
+        return (c & 0xc0) == 0x80 ? static_cast<int>(c & 0x3f) : -1;
+    };
+    if ((c0 & 0xe0) == 0xc0) {
+        const int c1 = cont(1);
+        if (c1 < 0) return false;
+        cp = ((c0 & 0x1fu) << 6) | static_cast<std::uint32_t>(c1);
+        len = 2;
+        return true;
+    }
+    if ((c0 & 0xf0) == 0xe0) {
+        const int c1 = cont(1);
+        const int c2 = cont(2);
+        if (c1 < 0 || c2 < 0) return false;
+        cp = ((c0 & 0x0fu) << 12) | (static_cast<std::uint32_t>(c1) << 6) | static_cast<std::uint32_t>(c2);
+        len = 3;
+        return true;
+    }
+    if ((c0 & 0xf8) == 0xf0) {
+        const int c1 = cont(1);
+        const int c2 = cont(2);
+        const int c3 = cont(3);
+        if (c1 < 0 || c2 < 0 || c3 < 0) return false;
+        cp = ((c0 & 0x07u) << 18) | (static_cast<std::uint32_t>(c1) << 12) |
+             (static_cast<std::uint32_t>(c2) << 6) | static_cast<std::uint32_t>(c3);
+        len = 4;
+        return true;
+    }
+    return false;
+}
+
+bool sentencepiece_is_space(std::uint32_t cp) {
+    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == '\f' || cp == '\v' ||
+           cp == 0x00a0 || cp == 0x3000;
+}
+
+std::string sentencepiece_nfkc_lite(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (std::size_t pos = 0; pos < text.size();) {
+        std::uint32_t cp = 0;
+        std::size_t len = 0;
+        if (!utf8_decode_one(text, pos, cp, len)) {
+            out.push_back(text[pos++]);
+            continue;
+        }
+        pos += len;
+        if (cp == 0x00a0 || cp == 0x3000) {
+            out.push_back(' ');
+        } else if (cp >= 0xff01 && cp <= 0xff5e) {
+            out.push_back(static_cast<char>(cp - 0xfee0));
+        } else if (cp == 0x2018 || cp == 0x2019) {
+            out.push_back('\'');
+        } else if (cp == 0x201c || cp == 0x201d) {
+            out.push_back('"');
+        } else {
+            append_utf8(out, cp);
+        }
+    }
+    return out;
+}
+
+std::string sentencepiece_normalize_text(const std::string& text,
+                                         bool add_dummy_prefix,
+                                         bool remove_extra_whitespaces,
+                                         bool escape_whitespaces) {
+    auto s = sentencepiece_nfkc_lite(text);
+    if (remove_extra_whitespaces) {
+        std::string collapsed;
+        collapsed.reserve(s.size());
+        bool pending_space = false;
+        bool emitted = false;
+        for (std::size_t pos = 0; pos < s.size();) {
+            std::uint32_t cp = 0;
+            std::size_t len = 0;
+            if (!utf8_decode_one(s, pos, cp, len)) {
+                cp = static_cast<unsigned char>(s[pos]);
+                len = 1;
+            }
+            pos += len;
+            if (sentencepiece_is_space(cp)) {
+                pending_space = emitted;
+                continue;
+            }
+            if (pending_space) collapsed.push_back(' ');
+            append_utf8(collapsed, cp);
+            pending_space = false;
+            emitted = true;
+        }
+        s = std::move(collapsed);
+    }
+    if (add_dummy_prefix && (s.empty() || s.front() != ' ')) s.insert(s.begin(), ' ');
+    if (escape_whitespaces) replace_all(s, " ", "\xE2\x96\x81");
+    return s;
 }
 
 } // namespace
@@ -851,7 +1017,12 @@ std::unordered_map<std::string, Tensor> load_safetensors(Backend& backend,
 namespace nn {
 
 GemmaConfig load_gemma_config_json(const std::string& path) {
-    const auto text = read_text_file(path);
+    const auto raw_text = read_text_file(path);
+    const auto text_config = extract_json_object_for_key(raw_text, "text_config");
+    const bool use_text_config = !text_config.empty() &&
+                                 (json_string_or_empty(raw_text, "model_type") == "gemma4" ||
+                                  json_string_or_empty(text_config, "model_type").find("gemma4") != std::string::npos);
+    const auto& text = use_text_config ? text_config : raw_text;
     GemmaConfig cfg;
     cfg.vocab_size = json_int_or(text, {"vocab_size"}, cfg.vocab_size);
     cfg.max_position_embeddings = json_int_or(text, {"max_position_embeddings", "block_size", "seq_length", "max_seq_len", "max_sequence_length", "context_length"}, cfg.max_position_embeddings);
@@ -865,10 +1036,11 @@ GemmaConfig load_gemma_config_json(const std::string& path) {
     cfg.rope_theta = json_float_or(text, {"rope_theta", "rope_base"}, cfg.rope_theta);
     cfg.attention_dropout = json_float_or(text, {"attention_dropout", "dropout"}, cfg.attention_dropout);
     cfg.attention_bias = json_bool_or(text, {"attention_bias", "use_qkv_bias"}, cfg.attention_bias);
+    cfg.attention_k_eq_v = json_bool_or(text, {"attention_k_eq_v", "k_eq_v", "key_equals_value"}, cfg.attention_k_eq_v);
     cfg.tie_word_embeddings = json_bool_or(text, {"tie_word_embeddings"}, cfg.tie_word_embeddings);
-    cfg.bos_token_id = json_int_or(text, {"bos_token_id"}, cfg.bos_token_id);
-    cfg.eos_token_id = json_int_or(text, {"eos_token_id"}, cfg.eos_token_id);
-    cfg.pad_token_id = json_int_or(text, {"pad_token_id"}, cfg.pad_token_id);
+    cfg.bos_token_id = json_int_or(text, {"bos_token_id"}, json_int_or(raw_text, {"bos_token_id"}, cfg.bos_token_id));
+    cfg.eos_token_id = json_int_or(text, {"eos_token_id"}, json_int_or(raw_text, {"eos_token_id"}, cfg.eos_token_id));
+    cfg.pad_token_id = json_int_or(text, {"pad_token_id"}, json_int_or(raw_text, {"pad_token_id"}, cfg.pad_token_id));
     cfg.sliding_window = json_int_or(text, {"sliding_window"}, cfg.sliding_window);
     return normalize_gemma_config(cfg);
 }
@@ -881,9 +1053,12 @@ TransformerConfig to_transformer_config(const GemmaConfig& raw_cfg) {
     out.n_embd = cfg.hidden_size;
     out.n_head = cfg.num_attention_heads;
     out.n_kv_head = cfg.num_key_value_heads;
+    out.head_dim = cfg.head_dim;
     out.n_layer = cfg.num_hidden_layers;
     out.mlp_hidden = cfg.intermediate_size;
     out.dropout = cfg.attention_dropout;
+    out.rms_norm_eps = cfg.rms_norm_eps;
+    out.embedding_scale = std::sqrt(static_cast<float>(cfg.hidden_size));
     out.use_rope = true;
     out.use_swiglu = true;
     out.use_qkv_bias = cfg.attention_bias;
@@ -891,6 +1066,7 @@ TransformerConfig to_transformer_config(const GemmaConfig& raw_cfg) {
     out.learned_position_embeddings = false;
     out.rope_theta = cfg.rope_theta;
     out.rotary_dim = cfg.head_dim;
+    out.sliding_window = cfg.sliding_window;
     return out;
 }
 
@@ -900,18 +1076,29 @@ ModernGPTModel make_gemma_model(Backend& backend, const GemmaConfig& cfg) {
     for (auto& block : model.blocks) {
         block->norm1().eps = cfg.rms_norm_eps;
         block->norm2().eps = cfg.rms_norm_eps;
+        block->attention().q_norm().eps = cfg.rms_norm_eps;
+        block->attention().k_norm().eps = cfg.rms_norm_eps;
+        block->post_attention_norm().eps = cfg.rms_norm_eps;
+        block->post_ffw_norm().eps = cfg.rms_norm_eps;
     }
     return model;
 }
 
 GemmaWeightName map_gemma_hf_weight_name(const std::string& hf_name) {
-    if (hf_name == "model.embed_tokens.weight") return {hf_name, "token_embedding.weight", "token_embedding", -1};
-    if (hf_name == "lm_head.weight") return {hf_name, "lm_head.weight", "lm_head", -1};
-    if (hf_name == "model.norm.weight") return {hf_name, "final_norm.weight", "final_norm", -1};
+    std::string name = hf_name;
+    const std::string text_prefix = "model.language_model.";
+    if (name.rfind(text_prefix, 0) == 0) {
+        const auto rest = name.substr(text_prefix.size());
+        name = rest == "lm_head.weight" ? rest : "model." + rest;
+    }
+    if (name == "model.lm_head.weight") name = "lm_head.weight";
+    if (name == "model.embed_tokens.weight") return {hf_name, "token_embedding.weight", "token_embedding", -1};
+    if (name == "lm_head.weight") return {hf_name, "lm_head.weight", "lm_head", -1};
+    if (name == "model.norm.weight") return {hf_name, "final_norm.weight", "final_norm", -1};
 
     std::smatch m;
     std::regex layer_re(R"(^model\.layers\.(\d+)\.(.+)$)");
-    if (!std::regex_match(hf_name, m, layer_re)) return {hf_name, hf_name, "unknown", -1};
+    if (!std::regex_match(name, m, layer_re)) return {hf_name, hf_name, "unknown", -1};
     const int layer = std::stoi(m[1].str());
     const std::string suffix = m[2].str();
     const std::string base = "blocks." + std::to_string(layer) + ".";
@@ -971,105 +1158,165 @@ GemmaWeightLoadReport load_gemma_hf_weights(Backend& backend,
     SafeTensorsArchive archive(safetensors_paths);
     GemmaWeightLoadReport report;
 
+    auto aliases_for = [](const std::string& canonical) {
+        std::vector<std::string> aliases{canonical};
+        if (canonical == "lm_head.weight") {
+            aliases.push_back("model.lm_head.weight");
+            aliases.push_back("model.language_model.lm_head.weight");
+        }
+        const std::string model_prefix = "model.";
+        if (canonical.rfind(model_prefix, 0) == 0) {
+            aliases.push_back("model.language_model." + canonical.substr(model_prefix.size()));
+        }
+        return aliases;
+    };
+
+    auto first_existing = [&](const std::vector<std::string>& aliases) -> std::string {
+        for (const auto& name : aliases) {
+            if (archive.contains(name)) return name;
+        }
+        return {};
+    };
+
+    auto any_existing = [&](const std::vector<std::string>& aliases) -> bool {
+        return !first_existing(aliases).empty();
+    };
+
+    auto layer_aliases = [&](int layer, const std::string& suffix) {
+        return aliases_for("model.layers." + std::to_string(layer) + "." + suffix);
+    };
+
+    auto k_alias_for_v = [&](const std::string& v_name) {
+        auto k_name = v_name;
+        const auto pos = k_name.find("self_attn.v_proj.");
+        if (pos != std::string::npos) k_name.replace(pos, std::string("self_attn.v_proj.").size(), "self_attn.k_proj.");
+        return aliases_for(k_name);
+    };
+
     const auto expected = expected_gemma_hf_weight_names(cfg, !cfg.tie_word_embeddings);
-    std::unordered_set<std::string> expected_set(expected.begin(), expected.end());
+    std::unordered_set<std::string> expected_set;
+    for (const auto& name : expected) {
+        for (const auto& alias : aliases_for(name)) expected_set.insert(alias);
+    }
+    if (cfg.tie_word_embeddings) {
+        for (const auto& alias : aliases_for("lm_head.weight")) expected_set.insert(alias);
+    }
     for (const auto& name : archive.names()) {
         if (expected_set.find(name) == expected_set.end()) report.unexpected.push_back(name);
     }
-    for (const auto& name : expected) mark_missing(report.missing, archive, name);
-    if (cfg.tie_word_embeddings && archive.contains("lm_head.weight")) {
-        report.unexpected.erase(std::remove(report.unexpected.begin(), report.unexpected.end(), "lm_head.weight"), report.unexpected.end());
+    for (const auto& name : expected) {
+        const auto aliases = aliases_for(name);
+        if (any_existing(aliases)) continue;
+        if (cfg.attention_k_eq_v && name.find(".self_attn.v_proj.") != std::string::npos && any_existing(k_alias_for_v(name))) {
+            continue;
+        }
+        report.missing.push_back(name);
     }
     if (strict && !report.missing.empty()) {
         MCL_CHECK(false, "missing required Gemma HF weights; first missing: " + report.missing.front());
     }
 
-    auto apply_direct = [&](const std::string& name, Parameter& parameter) {
-        if (!archive.contains(name)) return;
+    auto apply_direct = [&](const std::vector<std::string>& aliases, Parameter& parameter) -> bool {
+        const auto name = first_existing(aliases);
+        if (name.empty()) return false;
         const auto values = archive.f32(name);
         assign_parameter(parameter, tensor_from_f32(backend, archive.info(name).shape, values), trainable);
         report.applied.push_back(name);
         ++report.loaded_tensors;
+        return true;
     };
-    auto apply_transposed = [&](const std::string& name, Parameter& parameter) {
-        if (!archive.contains(name)) return;
+    auto apply_transposed = [&](const std::vector<std::string>& aliases, Parameter& parameter) -> bool {
+        const auto name = first_existing(aliases);
+        if (name.empty()) return false;
         const auto& info = archive.info(name);
         MCL_CHECK(info.shape.size() == 2, "expected rank-2 HF weight: " + name);
         const auto values = transpose_2d(archive.f32(name), info.shape[0], info.shape[1]);
         assign_parameter(parameter, tensor_from_f32(backend, {info.shape[1], info.shape[0]}, values), trainable);
         report.applied.push_back(name);
         ++report.loaded_tensors;
+        return true;
     };
 
-    apply_direct("model.embed_tokens.weight", model.token_embedding.weight);
-    apply_direct("model.norm.weight", model.final_norm.weight);
-    if (archive.contains("lm_head.weight")) {
-        apply_transposed("lm_head.weight", model.lm_head);
-    } else if (cfg.tie_word_embeddings && archive.contains("model.embed_tokens.weight")) {
-        const auto& info = archive.info("model.embed_tokens.weight");
-        const auto values = transpose_2d(archive.f32("model.embed_tokens.weight"), info.shape[0], info.shape[1]);
-        assign_parameter(model.lm_head, tensor_from_f32(backend, {info.shape[1], info.shape[0]}, values), trainable);
-        report.applied.push_back("model.embed_tokens.weight->lm_head.weight");
+    const auto embed_aliases = aliases_for("model.embed_tokens.weight");
+    apply_direct(embed_aliases, model.token_embedding.weight);
+    apply_direct(aliases_for("model.norm.weight"), model.final_norm.weight);
+    if (!apply_transposed(aliases_for("lm_head.weight"), model.lm_head) &&
+        cfg.tie_word_embeddings) {
+        const auto embed_name = first_existing(embed_aliases);
+        if (!embed_name.empty()) {
+            const auto& info = archive.info(embed_name);
+            const auto values = transpose_2d(archive.f32(embed_name), info.shape[0], info.shape[1]);
+            assign_parameter(model.lm_head, tensor_from_f32(backend, {info.shape[1], info.shape[0]}, values), trainable);
+            report.applied.push_back(embed_name + "->lm_head.weight");
+        }
     }
 
     const int64_t hidden = cfg.hidden_size;
-    const int64_t q_dim = static_cast<int64_t>(cfg.num_attention_heads) * cfg.head_dim;
-    const int64_t kv_dim = static_cast<int64_t>(cfg.num_key_value_heads) * cfg.head_dim;
-    const int64_t qkv_dim = q_dim + 2 * kv_dim;
     const int64_t mlp_hidden = cfg.intermediate_size;
 
     for (int i = 0; i < cfg.num_hidden_layers; ++i) {
         auto& block = *model.blocks[static_cast<std::size_t>(i)];
-        const std::string p = "model.layers." + std::to_string(i) + ".";
-        apply_direct(p + "input_layernorm.weight", block.norm1().weight);
-        if (archive.contains(p + "post_attention_layernorm.weight")) {
-            apply_direct(p + "post_attention_layernorm.weight", block.norm2().weight);
-        } else {
-            apply_direct(p + "pre_feedforward_layernorm.weight", block.norm2().weight);
+        apply_direct(layer_aliases(i, "input_layernorm.weight"), block.norm1().weight);
+        if (!apply_direct(layer_aliases(i, "post_attention_layernorm.weight"), block.norm2().weight)) {
+            apply_direct(layer_aliases(i, "pre_feedforward_layernorm.weight"), block.norm2().weight);
         }
-        apply_transposed(p + "self_attn.o_proj.weight", block.attention().o_proj().weight);
-        if (block.attention().o_proj().has_bias()) apply_direct(p + "self_attn.o_proj.bias", block.attention().o_proj().bias);
-        apply_transposed(p + "mlp.down_proj.weight", block.mlp().down_proj.weight);
+        apply_transposed(layer_aliases(i, "self_attn.o_proj.weight"), block.attention().o_proj().weight);
+        if (block.attention().o_proj().has_bias()) apply_direct(layer_aliases(i, "self_attn.o_proj.bias"), block.attention().o_proj().bias);
+        apply_transposed(layer_aliases(i, "mlp.down_proj.weight"), block.mlp().down_proj.weight);
 
-        const auto q_name = p + "self_attn.q_proj.weight";
-        const auto k_name = p + "self_attn.k_proj.weight";
-        const auto v_name = p + "self_attn.v_proj.weight";
-        if (archive.contains(q_name) && archive.contains(k_name) && archive.contains(v_name)) {
-            MCL_CHECK(shape_is(archive.info(q_name), {q_dim, hidden}), "q_proj shape mismatch: " + q_name);
-            MCL_CHECK(shape_is(archive.info(k_name), {kv_dim, hidden}), "k_proj shape mismatch: " + k_name);
-            MCL_CHECK(shape_is(archive.info(v_name), {kv_dim, hidden}), "v_proj shape mismatch: " + v_name);
+        const int64_t q_dim = block.attention().q_proj().out_features();
+        const int64_t kv_dim = block.attention().k_proj().out_features();
+        const int64_t qkv_dim = block.attention().qkv_proj().out_features();
+        MCL_CHECK(qkv_dim == q_dim + 2 * kv_dim, "ModernSelfAttention qkv shape mismatch for Gemma layer " + std::to_string(i));
+
+        const auto q_name = first_existing(layer_aliases(i, "self_attn.q_proj.weight"));
+        const auto k_name = first_existing(layer_aliases(i, "self_attn.k_proj.weight"));
+        const auto v_name = first_existing(layer_aliases(i, "self_attn.v_proj.weight"));
+        const bool v_from_k = v_name.empty() && cfg.attention_k_eq_v && !k_name.empty();
+        if (!q_name.empty() && !k_name.empty() && (!v_name.empty() || v_from_k)) {
+            const auto& q_info = archive.info(q_name);
+            const auto& k_info = archive.info(k_name);
+            const auto& v_info = archive.info(v_from_k ? k_name : v_name);
+            MCL_CHECK(shape_is(q_info, {q_dim, hidden}), "q_proj shape mismatch: " + q_name);
+            MCL_CHECK(shape_is(k_info, {kv_dim, hidden}), "k_proj shape mismatch: " + k_name);
+            MCL_CHECK(shape_is(v_info, {kv_dim, hidden}), "v_proj shape mismatch: " + (v_from_k ? k_name : v_name));
             std::vector<float> packed(static_cast<std::size_t>(hidden * qkv_dim));
-            pack_transposed_projection(packed, qkv_dim, 0, archive.f32(q_name), q_dim, hidden);
-            pack_transposed_projection(packed, qkv_dim, q_dim, archive.f32(k_name), kv_dim, hidden);
-            pack_transposed_projection(packed, qkv_dim, q_dim + kv_dim, archive.f32(v_name), kv_dim, hidden);
+            const auto q_values = archive.f32(q_name);
+            const auto k_values = archive.f32(k_name);
+            const auto v_values = v_from_k ? k_values : archive.f32(v_name);
+            pack_transposed_projection(packed, qkv_dim, 0, q_values, q_dim, hidden);
+            pack_transposed_projection(packed, qkv_dim, q_dim, k_values, kv_dim, hidden);
+            pack_transposed_projection(packed, qkv_dim, q_dim + kv_dim, v_values, kv_dim, hidden);
             assign_parameter(block.attention().qkv_proj().weight, tensor_from_f32(backend, {hidden, qkv_dim}, packed), trainable);
-            report.applied.push_back(q_name + "+" + k_name + "+" + v_name + "->qkv_proj.weight");
-            report.loaded_tensors += 3;
+            report.applied.push_back(q_name + "+" + k_name + "+" + (v_from_k ? (k_name + "(as_v)") : v_name) + "->qkv_proj.weight");
+            report.loaded_tensors += v_from_k ? 2 : 3;
         }
 
-        const auto qb_name = p + "self_attn.q_proj.bias";
-        const auto kb_name = p + "self_attn.k_proj.bias";
-        const auto vb_name = p + "self_attn.v_proj.bias";
+        const auto qb_name = first_existing(layer_aliases(i, "self_attn.q_proj.bias"));
+        const auto kb_name = first_existing(layer_aliases(i, "self_attn.k_proj.bias"));
+        const auto vb_name = first_existing(layer_aliases(i, "self_attn.v_proj.bias"));
+        const bool vb_from_k = vb_name.empty() && cfg.attention_k_eq_v && !kb_name.empty();
         if (block.attention().qkv_proj().has_bias() &&
-            archive.contains(qb_name) && archive.contains(kb_name) && archive.contains(vb_name)) {
+            !qb_name.empty() && !kb_name.empty() && (!vb_name.empty() || vb_from_k)) {
             MCL_CHECK(shape_is(archive.info(qb_name), {q_dim}), "q_proj bias shape mismatch: " + qb_name);
             MCL_CHECK(shape_is(archive.info(kb_name), {kv_dim}), "k_proj bias shape mismatch: " + kb_name);
-            MCL_CHECK(shape_is(archive.info(vb_name), {kv_dim}), "v_proj bias shape mismatch: " + vb_name);
+            MCL_CHECK(shape_is(archive.info(vb_from_k ? kb_name : vb_name), {kv_dim}),
+                      "v_proj bias shape mismatch: " + (vb_from_k ? kb_name : vb_name));
             std::vector<float> packed(static_cast<std::size_t>(qkv_dim));
             auto qv = archive.f32(qb_name);
             auto kv = archive.f32(kb_name);
-            auto vv = archive.f32(vb_name);
+            auto vv = vb_from_k ? kv : archive.f32(vb_name);
             std::copy(qv.begin(), qv.end(), packed.begin());
             std::copy(kv.begin(), kv.end(), packed.begin() + q_dim);
             std::copy(vv.begin(), vv.end(), packed.begin() + q_dim + kv_dim);
             assign_parameter(block.attention().qkv_proj().bias, tensor_from_f32(backend, {qkv_dim}, packed), trainable);
-            report.applied.push_back(qb_name + "+" + kb_name + "+" + vb_name + "->qkv_proj.bias");
-            report.loaded_tensors += 3;
+            report.applied.push_back(qb_name + "+" + kb_name + "+" + (vb_from_k ? (kb_name + "(as_v)") : vb_name) + "->qkv_proj.bias");
+            report.loaded_tensors += vb_from_k ? 2 : 3;
         }
 
-        const auto gate_name = p + "mlp.gate_proj.weight";
-        const auto up_name = p + "mlp.up_proj.weight";
-        if (archive.contains(gate_name) && archive.contains(up_name)) {
+        const auto gate_name = first_existing(layer_aliases(i, "mlp.gate_proj.weight"));
+        const auto up_name = first_existing(layer_aliases(i, "mlp.up_proj.weight"));
+        if (!gate_name.empty() && !up_name.empty()) {
             MCL_CHECK(shape_is(archive.info(gate_name), {mlp_hidden, hidden}), "gate_proj shape mismatch: " + gate_name);
             MCL_CHECK(shape_is(archive.info(up_name), {mlp_hidden, hidden}), "up_proj shape mismatch: " + up_name);
             std::vector<float> packed(static_cast<std::size_t>(hidden * mlp_hidden * 2));
@@ -1093,6 +1340,37 @@ GemmaTokenizer GemmaTokenizer::byte_fallback(int vocab_size, int bos_token_id, i
     return tok;
 }
 
+GemmaTokenizer GemmaTokenizer::from_tokens(const std::vector<std::string>& tokens,
+                                           int bos_token_id,
+                                           int eos_token_id,
+                                           const std::string& tokenizer_model_type) {
+    if (tokens.empty()) return byte_fallback(256, bos_token_id, eos_token_id);
+    GemmaTokenizer tok;
+    tok.byte_fallback_ = false;
+    tok.bos_token_id_ = bos_token_id;
+    tok.eos_token_id_ = eos_token_id;
+    tok.tokenizer_model_type_ = tokenizer_model_type.empty() ? "GGUF" : tokenizer_model_type;
+    tok.vocab_size_ = static_cast<int>(tokens.size());
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
+        const auto id = static_cast<std::int32_t>(i);
+        tok.token_to_id_[tokens[i]] = id;
+        tok.id_to_token_[id] = tokens[i];
+        if (tokens[i].find("\xE2\x96\x81") != std::string::npos) tok.sentencepiece_style_ = true;
+    }
+    const auto model_type = lower_ascii(tok.tokenizer_model_type_);
+    if (model_type.find("unigram") != std::string::npos ||
+        model_type.find("sentencepiece") != std::string::npos) {
+        tok.sentencepiece_style_ = true;
+    }
+    if (tok.sentencepiece_style_) {
+        tok.sp_add_dummy_prefix_ = true;
+        tok.sp_remove_extra_whitespaces_ = true;
+        tok.sp_escape_whitespaces_ = true;
+        tok.sp_normalizer_name_ = "nmt_nfkc";
+    }
+    return tok;
+}
+
 GemmaTokenizer GemmaTokenizer::load_vocab(const std::string& path, int bos_token_id, int eos_token_id) {
     GemmaTokenizer tok;
     tok.byte_fallback_ = false;
@@ -1102,7 +1380,9 @@ GemmaTokenizer GemmaTokenizer::load_vocab(const std::string& path, int bos_token
     const auto path_ext = lower_ascii(std::filesystem::path(path).extension().string());
     const auto filename = lower_ascii(std::filesystem::path(path).filename().string());
     const bool is_plain_vocab_json = filename == "vocab.json";
-    tok.tokenizer_model_type_ = is_plain_vocab_json ? "BPE" : json_string_or_empty(text, "type");
+    const auto model_object_for_type = is_plain_vocab_json ? std::string{} : extract_json_object_for_key(text, "model");
+    tok.tokenizer_model_type_ = is_plain_vocab_json ? "BPE" :
+        json_string_or_empty(model_object_for_type.empty() ? text : model_object_for_type, "type");
     if (tok.tokenizer_model_type_.empty()) tok.tokenizer_model_type_ = "vocab";
 
     auto add_token = [&](const std::string& token, std::int32_t id) {
@@ -1117,6 +1397,10 @@ GemmaTokenizer GemmaTokenizer::load_vocab(const std::string& path, int bos_token
         if (!sp.pieces.empty()) {
             tok.tokenizer_model_type_ = sp.model_type.empty() ? "SentencePiece" : sp.model_type;
             tok.sentencepiece_style_ = true;
+            tok.sp_add_dummy_prefix_ = sp.add_dummy_prefix;
+            tok.sp_remove_extra_whitespaces_ = sp.remove_extra_whitespaces;
+            tok.sp_escape_whitespaces_ = sp.escape_whitespaces;
+            tok.sp_normalizer_name_ = sp.normalizer_name;
             for (std::size_t i = 0; i < sp.pieces.size(); ++i) {
                 add_token(sp.pieces[i], static_cast<std::int32_t>(i));
             }
@@ -1140,10 +1424,34 @@ GemmaTokenizer GemmaTokenizer::load_vocab(const std::string& path, int bos_token
     if (tok.token_to_id_.empty()) {
         const std::string vocab_array = extract_json_array_for_key(text, "vocab");
         if (!vocab_array.empty()) {
-            std::regex entry_re(R"json(\[\s*"((?:\\.|[^"\\])*)"\s*,)json");
             std::int32_t id = 0;
-            for (std::sregex_iterator it(vocab_array.begin(), vocab_array.end(), entry_re), end; it != end; ++it) {
-                add_token(json_unescape((*it)[1].str()), id++);
+            for (std::size_t i = 0; i < vocab_array.size();) {
+                if (vocab_array[i] != '[') {
+                    ++i;
+                    continue;
+                }
+                ++i;
+                while (i < vocab_array.size() && std::isspace(static_cast<unsigned char>(vocab_array[i]))) ++i;
+                if (i >= vocab_array.size() || vocab_array[i] != '"') continue;
+                ++i;
+                std::string raw;
+                bool escape = false;
+                for (; i < vocab_array.size(); ++i) {
+                    const char c = vocab_array[i];
+                    if (escape) {
+                        raw.push_back('\\');
+                        raw.push_back(c);
+                        escape = false;
+                    } else if (c == '\\') {
+                        escape = true;
+                    } else if (c == '"') {
+                        ++i;
+                        break;
+                    } else {
+                        raw.push_back(c);
+                    }
+                }
+                add_token(json_unescape(raw), id++);
             }
         }
     }
@@ -1173,13 +1481,21 @@ GemmaTokenizer GemmaTokenizer::load_vocab(const std::string& path, int bos_token
     }
 
     if (!is_plain_vocab_json) {
-        std::regex added_re_1(R"json(\{[^{}]*"id"\s*:\s*(\d+)[^{}]*"content"\s*:\s*"((?:\\.|[^"\\])*)"[^{}]*\})json");
-        for (std::sregex_iterator it(text.begin(), text.end(), added_re_1), end; it != end; ++it) {
-            add_token(json_unescape((*it)[2].str()), static_cast<std::int32_t>(std::stol((*it)[1].str())));
-        }
-        std::regex added_re_2(R"json(\{[^{}]*"content"\s*:\s*"((?:\\.|[^"\\])*)"[^{}]*"id"\s*:\s*(\d+)[^{}]*\})json");
-        for (std::sregex_iterator it(text.begin(), text.end(), added_re_2), end; it != end; ++it) {
-            add_token(json_unescape((*it)[1].str()), static_cast<std::int32_t>(std::stol((*it)[2].str())));
+        const std::string added_array = extract_json_array_for_key(text, "added_tokens");
+        for (std::size_t i = 0; i < added_array.size();) {
+            if (added_array[i] != '{') {
+                ++i;
+                continue;
+            }
+            const auto end = find_matching_json(added_array, i, '{', '}');
+            if (end == std::string::npos) break;
+            const auto object = added_array.substr(i + 1, end - i - 1);
+            const auto content = json_string_or_empty(object, "content");
+            const auto id = json_int_or(object, {"id"}, -1);
+            if (!content.empty() && id >= 0 && id <= std::numeric_limits<std::int32_t>::max()) {
+                add_token(content, static_cast<std::int32_t>(id));
+            }
+            i = end + 1;
         }
     }
 
@@ -1258,6 +1574,11 @@ std::vector<std::int32_t> GemmaTokenizer::encode(const std::string& text, bool a
                     ids.push_back(best_id);
                     pos += best_len;
                 } else {
+                    if (sentencepiece_style_ && sp_escape_whitespaces_ &&
+                        segment.compare(pos, 3, "\xE2\x96\x81") == 0) {
+                        pos += 3;
+                        continue;
+                    }
                     ids.push_back(static_cast<std::int32_t>(static_cast<unsigned char>(segment[pos])));
                     ++pos;
                 }
@@ -1266,13 +1587,10 @@ std::vector<std::int32_t> GemmaTokenizer::encode(const std::string& text, bool a
 
         std::string normalized = text;
         if (sentencepiece_style_) {
-            replace_all(normalized, " ", "\xE2\x96\x81");
-            if (normalized.rfind("\xE2\x96\x81", 0) != 0 &&
-                std::any_of(token_to_id_.begin(), token_to_id_.end(), [](const auto& kv) {
-                    return kv.first.rfind("\xE2\x96\x81", 0) == 0;
-                })) {
-                normalized = "\xE2\x96\x81" + normalized;
-            }
+            normalized = sentencepiece_normalize_text(text,
+                                                      sp_add_dummy_prefix_,
+                                                      sp_remove_extra_whitespaces_,
+                                                      sp_escape_whitespaces_);
         }
 
         if (!bpe_merge_rank_.empty()) {
@@ -1319,8 +1637,8 @@ std::string GemmaTokenizer::decode(const std::vector<std::int32_t>& ids, bool sk
             }
         }
     }
-    replace_all(out, "\xE2\x96\x81", " ");
-    if (sentencepiece_style_ && !out.empty() && out.front() == ' ') out.erase(out.begin());
+    if (sentencepiece_style_ && sp_escape_whitespaces_) replace_all(out, "\xE2\x96\x81", " ");
+    if (sentencepiece_style_ && sp_add_dummy_prefix_ && !out.empty() && out.front() == ' ') out.erase(out.begin());
     return out;
 }
 
@@ -1368,34 +1686,87 @@ std::vector<std::int32_t> generate(Backend& backend,
     tokens.insert(tokens.end(), prompt_tokens.begin(), prompt_tokens.end());
     MCL_CHECK(!tokens.empty(), "generate requires a non-empty prompt or add_bos=true");
     MCL_CHECK(static_cast<int>(tokens.size()) <= model.config.block_size, "prompt exceeds model block_size");
+    MCL_CHECK(options.kv_page_size > 0, "GenerateOptions kv_page_size must be positive");
+    if (options.max_new_tokens == 0) return tokens;
 
-    auto caches = model.create_kv_cache(backend, 1);
     Tensor logits;
-    if (options.prefill_prompt) {
-        auto input = Tensor::from_cpu(backend,
-                                      {1, static_cast<int64_t>(tokens.size())},
-                                      DType::I32,
-                                      tokens.data());
-        logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
-    } else {
-        for (std::size_t i = 0; i < tokens.size(); ++i) {
-            std::int32_t id = tokens[i];
-            auto input = Tensor::from_cpu(backend, {1, 1}, DType::I32, &id);
+    if (options.use_paged_kv_cache) {
+        auto caches = model.create_paged_kv_cache(backend, 1, options.kv_page_size);
+        if (options.prefill_prompt) {
+            auto input = Tensor::from_cpu(backend,
+                                          {1, static_cast<int64_t>(tokens.size())},
+                                          DType::I32,
+                                          tokens.data());
+            logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+        } else {
+            for (std::size_t i = 0; i < tokens.size(); ++i) {
+                std::int32_t id = tokens[i];
+                auto input = Tensor::from_cpu(backend, {1, 1}, DType::I32, &id);
+                logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+            }
+        }
+
+        std::mt19937 rng(options.seed);
+        std::vector<float> cpu_logits;
+        for (int step = 0; step < options.max_new_tokens; ++step) {
+            MCL_CHECK(static_cast<int>(tokens.size()) < model.config.block_size, "generate reached model block_size");
+            Tensor next_tensor;
+            std::int32_t next = 0;
+            if (options.gpu_greedy_sampling) {
+                next_tensor = rowwise_sample_top_p(logits, options.temperature, options.top_k, options.top_p,
+                                                   static_cast<std::uint32_t>(rng()));
+                next = next_tensor.to_vector<std::int32_t>()[0];
+            } else {
+                next = choose_next_token(logits, options, rng, cpu_logits);
+            }
+            tokens.push_back(next);
+            if (options.eos_token_id >= 0 && next == options.eos_token_id) break;
+            if (step + 1 >= options.max_new_tokens) break;
+            auto input = options.gpu_greedy_sampling
+                ? next_tensor.view({1, 1})
+                : Tensor::from_cpu(backend, {1, 1}, DType::I32, &next);
             logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
         }
-    }
+        return tokens;
+    } else {
+        auto caches = model.create_kv_cache(backend, 1);
+        if (options.prefill_prompt) {
+            auto input = Tensor::from_cpu(backend,
+                                          {1, static_cast<int64_t>(tokens.size())},
+                                          DType::I32,
+                                          tokens.data());
+            logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+        } else {
+            for (std::size_t i = 0; i < tokens.size(); ++i) {
+                std::int32_t id = tokens[i];
+                auto input = Tensor::from_cpu(backend, {1, 1}, DType::I32, &id);
+                logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+            }
+        }
 
-    std::mt19937 rng(options.seed);
-    std::vector<float> cpu_logits;
-    for (int step = 0; step < options.max_new_tokens; ++step) {
-        MCL_CHECK(static_cast<int>(tokens.size()) < model.config.block_size, "generate reached model block_size");
-        const auto next = choose_next_token(logits, options, rng, cpu_logits);
-        tokens.push_back(next);
-        if (options.eos_token_id >= 0 && next == options.eos_token_id) break;
-        auto input = Tensor::from_cpu(backend, {1, 1}, DType::I32, &next);
-        logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+        std::mt19937 rng(options.seed);
+        std::vector<float> cpu_logits;
+        for (int step = 0; step < options.max_new_tokens; ++step) {
+            MCL_CHECK(static_cast<int>(tokens.size()) < model.config.block_size, "generate reached model block_size");
+            Tensor next_tensor;
+            std::int32_t next = 0;
+            if (options.gpu_greedy_sampling) {
+                next_tensor = rowwise_sample_top_p(logits, options.temperature, options.top_k, options.top_p,
+                                                   static_cast<std::uint32_t>(rng()));
+                next = next_tensor.to_vector<std::int32_t>()[0];
+            } else {
+                next = choose_next_token(logits, options, rng, cpu_logits);
+            }
+            tokens.push_back(next);
+            if (options.eos_token_id >= 0 && next == options.eos_token_id) break;
+            if (step + 1 >= options.max_new_tokens) break;
+            auto input = options.gpu_greedy_sampling
+                ? next_tensor.view({1, 1})
+                : Tensor::from_cpu(backend, {1, 1}, DType::I32, &next);
+            logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+        }
+        return tokens;
     }
-    return tokens;
 }
 
 std::string generate_text(Backend& backend,
@@ -1417,7 +1788,7 @@ std::vector<std::vector<std::int32_t>> generate_batch(
     const GenerateOptions& options) {
     MCL_CHECK(options.max_new_tokens >= 0, "GenerateOptions max_new_tokens must be non-negative");
     if (prompt_tokens.empty()) return {};
-    if (!options.prefill_prompt) {
+    if (!options.prefill_prompt || options.use_paged_kv_cache) {
         std::vector<std::vector<std::int32_t>> debug_out;
         debug_out.reserve(prompt_tokens.size());
         for (const auto& prompt : prompt_tokens) debug_out.push_back(generate(backend, model, prompt, options));

@@ -97,23 +97,48 @@ struct TokenPositionEmbeddingBackwardNode : autograd::Node {
 };
 } // namespace
 
-Embedding::Embedding(Backend& backend, int vocab_size, int embed_dim)
-    : weight(Tensor::randn(backend, {vocab_size, embed_dim}, 1.0f / std::sqrt(static_cast<float>(embed_dim)))),
+Embedding::Embedding(Backend& backend, int vocab_size, int embed_dim, bool skip_weight_init)
+    : weight(),
       vocab_size_(vocab_size),
       embed_dim_(embed_dim) {
-    weight.data.set_requires_grad(true);
+    if (!skip_weight_init) {
+        weight = Parameter(Tensor::randn(backend, {vocab_size, embed_dim},
+                                         1.0f / std::sqrt(static_cast<float>(embed_dim))));
+        weight.data.set_requires_grad(true);
+    } else {
+        weight.trainable = false;
+    }
 }
 
 Tensor Embedding::forward(const Tensor& indices) {
     MCL_CHECK(indices.dtype() == DType::I32, "Embedding indices must be i32");
     MCL_CHECK(indices.ndim() == 1 || indices.ndim() == 2, "Embedding indices must be rank-1 or rank-2");
-    MCL_CHECK(indices.backend_ptr() == weight.data.backend_ptr(), "Embedding indices and weights must share backend");
+    MCL_CHECK(weight.data.valid() || quantized_weight_transposed_.valid(), "Embedding weight is not initialized");
 
     const int64_t token_count = indices.numel();
     Shape out_shape = indices.ndim() == 1 ? Shape{token_count, embed_dim_} : Shape{indices.shape()[0], indices.shape()[1], embed_dim_};
     auto out = Tensor::empty(indices.backend(), out_shape, DType::F32);
-    auto k = indices.backend().kernels.get("embedding_gather_f32_i32");
     int n = static_cast<int>(token_count * embed_dim_);
+    if (quantized_weight_transposed_.valid()) {
+        MCL_CHECK(indices.backend_ptr() == quantized_weight_transposed_.backend_ptr(),
+                  "Embedding indices and quantized weights must share backend");
+        const char* kernel_name = quantized_weight_dtype_ == DType::Q4_K
+            ? "embedding_gather_transposed_q4_k_i32"
+            : "embedding_gather_transposed_q5_k_i32";
+        auto k = indices.backend().kernels.get(kernel_name);
+        k.set_arg(0, quantized_weight_transposed_.buffer());
+        k.set_arg(1, indices.buffer());
+        k.set_arg(2, out.buffer());
+        k.set_arg(3, vocab_size_);
+        k.set_arg(4, embed_dim_);
+        k.set_arg(5, n);
+        k.launch1d(round_up(static_cast<std::size_t>(n), 256), 256);
+        autograd::record_op(kernel_name, {quantized_weight_transposed_.id(), indices.id()}, {out.id()});
+        return out;
+    }
+
+    MCL_CHECK(indices.backend_ptr() == weight.data.backend_ptr(), "Embedding indices and weights must share backend");
+    auto k = indices.backend().kernels.get("embedding_gather_f32_i32");
     k.set_arg(0, weight.data.buffer());
     k.set_arg(1, indices.buffer());
     k.set_arg(2, out.buffer());
@@ -127,6 +152,22 @@ Tensor Embedding::forward(const Tensor& indices) {
         out._set_grad_fn(std::make_shared<EmbeddingBackwardNode>(indices, weight.data));
     }
     return out;
+}
+
+void Embedding::set_quantized_weight_transposed(const Tensor& weight_value) {
+    MCL_CHECK(weight_value.valid() && (weight_value.dtype() == DType::Q4_K || weight_value.dtype() == DType::Q5_K),
+              "Embedding quantized transposed weight must be Q4_K or Q5_K");
+    MCL_CHECK(weight_value.ndim() == 2 &&
+                  weight_value.shape()[0] == embed_dim_ &&
+                  weight_value.shape()[1] == vocab_size_,
+              "Embedding quantized transposed weight shape mismatch");
+    quantized_weight_transposed_ = weight_value;
+    quantized_weight_dtype_ = weight_value.dtype();
+}
+
+void Embedding::clear_quantized_weight() {
+    quantized_weight_transposed_ = Tensor{};
+    quantized_weight_dtype_ = DType::F32;
 }
 
 Tensor token_position_embedding(const Tensor& token_ids, const Tensor& token_weight, const Tensor& position_weight) {

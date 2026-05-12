@@ -10,7 +10,8 @@ public:
     Parameter weight;
     Parameter bias;
 
-    Linear(Backend& backend, int in_features, int out_features, bool use_bias = true);
+    Linear(Backend& backend, int in_features, int out_features,
+           bool use_bias = true, bool skip_weight_init = false);
     Tensor forward(const Tensor& x) override;
     std::vector<Parameter*> parameters() override;
 

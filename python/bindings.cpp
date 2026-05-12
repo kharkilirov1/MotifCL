@@ -18,7 +18,11 @@ PYBIND11_MODULE(_motifcl, m) {
         .value("U8", motifcl::DType::U8)
         .value("F16", motifcl::DType::F16)
         .value("Q8_0", motifcl::DType::Q8_0)
-        .value("Q4_0", motifcl::DType::Q4_0);
+        .value("Q4_0", motifcl::DType::Q4_0)
+        .value("Q4_K", motifcl::DType::Q4_K)
+        .value("Q5_K", motifcl::DType::Q5_K)
+        .value("Q6_K", motifcl::DType::Q6_K)
+        .value("Q4_0_COL", motifcl::DType::Q4_0_COL);
 
     py::class_<motifcl::DeviceInfo>(m, "DeviceInfo")
         .def_readonly("platform_name", &motifcl::DeviceInfo::platform_name)
@@ -283,6 +287,10 @@ PYBIND11_MODULE(_motifcl, m) {
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("n_head"), py::arg("n_kv_head"),
           py::arg("causal") = true, py::arg("batch_size") = 1, py::arg("query_len") = 0,
           py::arg("key_len") = 0, py::arg("query_offset") = 0);
+    m.def("grouped_query_attention_windowed", &motifcl::grouped_query_attention_windowed,
+          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("n_head"), py::arg("n_kv_head"),
+          py::arg("sliding_window"), py::arg("causal") = true, py::arg("batch_size") = 1,
+          py::arg("query_len") = 0, py::arg("key_len") = 0, py::arg("query_offset") = 0);
     m.def("grouped_query_attention_masked", &motifcl::grouped_query_attention_masked,
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask"),
           py::arg("n_head"), py::arg("n_kv_head"), py::arg("causal") = true,
@@ -404,6 +412,7 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readwrite("n_embd", &motifcl::nn::TransformerConfig::n_embd)
         .def_readwrite("n_head", &motifcl::nn::TransformerConfig::n_head)
         .def_readwrite("n_kv_head", &motifcl::nn::TransformerConfig::n_kv_head)
+        .def_readwrite("head_dim", &motifcl::nn::TransformerConfig::head_dim)
         .def_readwrite("n_layer", &motifcl::nn::TransformerConfig::n_layer)
         .def_readwrite("mlp_hidden", &motifcl::nn::TransformerConfig::mlp_hidden)
         .def_readwrite("dropout", &motifcl::nn::TransformerConfig::dropout)
@@ -413,7 +422,11 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readwrite("causal", &motifcl::nn::TransformerConfig::causal)
         .def_readwrite("learned_position_embeddings", &motifcl::nn::TransformerConfig::learned_position_embeddings)
         .def_readwrite("rope_theta", &motifcl::nn::TransformerConfig::rope_theta)
-        .def_readwrite("rotary_dim", &motifcl::nn::TransformerConfig::rotary_dim);
+        .def_readwrite("rotary_dim", &motifcl::nn::TransformerConfig::rotary_dim)
+        .def_readwrite("sliding_window", &motifcl::nn::TransformerConfig::sliding_window)
+        .def_readwrite("layer_head_dims", &motifcl::nn::TransformerConfig::layer_head_dims)
+        .def_readwrite("split_qkv_projections", &motifcl::nn::TransformerConfig::split_qkv_projections)
+        .def_readwrite("split_mlp_projections", &motifcl::nn::TransformerConfig::split_mlp_projections);
 
     py::class_<motifcl::nn::KVCache>(m, "KVCache")
         .def(py::init<>())
@@ -429,6 +442,37 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readwrite("head_dim", &motifcl::nn::KVCache::head_dim)
         .def("reset", &motifcl::nn::KVCache::reset);
 
+    py::class_<motifcl::nn::PagedKVCache>(m, "PagedKVCache")
+        .def(py::init<>())
+        .def(py::init<motifcl::Backend&, int64_t, int64_t, int64_t, int, int>(),
+             py::arg("backend"), py::arg("batch_size"), py::arg("max_seq_len"),
+             py::arg("page_size"), py::arg("n_kv_head"), py::arg("head_dim"))
+        .def_readwrite("k_pages", &motifcl::nn::PagedKVCache::k_pages)
+        .def_readwrite("v_pages", &motifcl::nn::PagedKVCache::v_pages)
+        .def_readwrite("page_table", &motifcl::nn::PagedKVCache::page_table)
+        .def_readwrite("batch_size", &motifcl::nn::PagedKVCache::batch_size)
+        .def_readwrite("max_seq_len", &motifcl::nn::PagedKVCache::max_seq_len)
+        .def_readwrite("page_size", &motifcl::nn::PagedKVCache::page_size)
+        .def_readwrite("page_count", &motifcl::nn::PagedKVCache::page_count)
+        .def_readwrite("length", &motifcl::nn::PagedKVCache::length)
+        .def_readwrite("tokens_seen", &motifcl::nn::PagedKVCache::tokens_seen)
+        .def_readwrite("n_kv_head", &motifcl::nn::PagedKVCache::n_kv_head)
+        .def_readwrite("head_dim", &motifcl::nn::PagedKVCache::head_dim)
+        .def("capacity", &motifcl::nn::PagedKVCache::capacity)
+        .def("reset", &motifcl::nn::PagedKVCache::reset);
+
+    py::class_<motifcl::nn::DeltaStateCache>(m, "DeltaStateCache")
+        .def(py::init<>())
+        .def(py::init<motifcl::Backend&, int64_t, int, int, int>(),
+             py::arg("backend"), py::arg("batch_size"), py::arg("num_heads"),
+             py::arg("head_dim"), py::arg("state_dim"))
+        .def_readwrite("state", &motifcl::nn::DeltaStateCache::state)
+        .def_readwrite("batch_size", &motifcl::nn::DeltaStateCache::batch_size)
+        .def_readwrite("num_heads", &motifcl::nn::DeltaStateCache::num_heads)
+        .def_readwrite("head_dim", &motifcl::nn::DeltaStateCache::head_dim)
+        .def_readwrite("state_dim", &motifcl::nn::DeltaStateCache::state_dim)
+        .def("zero", &motifcl::nn::DeltaStateCache::zero);
+
     py::class_<motifcl::nn::ModernMLP, motifcl::nn::Module, std::shared_ptr<motifcl::nn::ModernMLP>>(m, "ModernMLP")
         .def(py::init<motifcl::Backend&, int, int, bool, bool, float>(),
              py::arg("backend"), py::arg("n_embd"), py::arg("hidden"),
@@ -440,8 +484,36 @@ PYBIND11_MODULE(_motifcl, m) {
         .def("disable_quantized_inference", &motifcl::nn::ModernMLP::disable_quantized_inference)
         .def("quantized_inference_enabled", &motifcl::nn::ModernMLP::quantized_inference_enabled)
         .def("quantized_weight_dtype", &motifcl::nn::ModernMLP::quantized_weight_dtype)
+        .def("enable_split_projections", &motifcl::nn::ModernMLP::enable_split_projections, py::arg("enabled") = true)
+        .def("split_projections_enabled", &motifcl::nn::ModernMLP::split_projections_enabled)
         .def_readwrite("use_swiglu", &motifcl::nn::ModernMLP::use_swiglu)
         .def_readwrite("dropout_p", &motifcl::nn::ModernMLP::dropout_p);
+
+    py::class_<motifcl::nn::MoEFFN, motifcl::nn::Module, std::shared_ptr<motifcl::nn::MoEFFN>>(m, "MoEFFN")
+        .def(py::init<motifcl::Backend&, int, int, int, int>(),
+             py::arg("backend"), py::arg("n_embd"), py::arg("hidden"),
+             py::arg("num_experts"), py::arg("experts_per_token"))
+        .def("forward", &motifcl::nn::MoEFFN::forward)
+        .def("parameters", &motifcl::nn::MoEFFN::parameters, py::return_value_policy::reference)
+        .def_readwrite("router_weight", &motifcl::nn::MoEFFN::router_weight)
+        .def_readwrite("expert_gate_weight", &motifcl::nn::MoEFFN::expert_gate_weight)
+        .def_readwrite("expert_up_weight", &motifcl::nn::MoEFFN::expert_up_weight)
+        .def_readwrite("expert_down_weight", &motifcl::nn::MoEFFN::expert_down_weight)
+        .def_readwrite("num_experts", &motifcl::nn::MoEFFN::num_experts)
+        .def_readwrite("experts_per_token", &motifcl::nn::MoEFFN::experts_per_token);
+
+    py::class_<motifcl::nn::GatedDeltaNetLayer, motifcl::nn::Module, std::shared_ptr<motifcl::nn::GatedDeltaNetLayer>>(m, "GatedDeltaNetLayer")
+        .def(py::init<motifcl::Backend&, const motifcl::nn::TransformerConfig&, int>(),
+             py::arg("backend"), py::arg("config"), py::arg("state_dim") = 0)
+        .def("forward", &motifcl::nn::GatedDeltaNetLayer::forward)
+        .def("forward_with_state", &motifcl::nn::GatedDeltaNetLayer::forward_with_state,
+             py::arg("x"), py::arg("state"), py::arg("batch_size"), py::arg("seq_len"))
+        .def("parameters", &motifcl::nn::GatedDeltaNetLayer::parameters, py::return_value_policy::reference)
+        .def("n_head", &motifcl::nn::GatedDeltaNetLayer::n_head)
+        .def("head_dim", &motifcl::nn::GatedDeltaNetLayer::head_dim)
+        .def("state_dim", &motifcl::nn::GatedDeltaNetLayer::state_dim)
+        .def("decay", &motifcl::nn::GatedDeltaNetLayer::decay)
+        .def("set_decay", &motifcl::nn::GatedDeltaNetLayer::set_decay);
 
     py::class_<motifcl::nn::ModernSelfAttention, motifcl::nn::Module, std::shared_ptr<motifcl::nn::ModernSelfAttention>>(m, "ModernSelfAttention")
         .def(py::init<motifcl::Backend&, const motifcl::nn::TransformerConfig&>(),
@@ -451,7 +523,9 @@ PYBIND11_MODULE(_motifcl, m) {
              py::arg("x"), py::arg("batch_size"), py::arg("seq_len"), py::arg("causal") = true)
         .def("forward_masked", &motifcl::nn::ModernSelfAttention::forward_masked,
              py::arg("x"), py::arg("mask"), py::arg("batch_size"), py::arg("seq_len"), py::arg("causal") = true)
-        .def("forward_with_cache", &motifcl::nn::ModernSelfAttention::forward_with_cache,
+        .def("forward_with_cache", py::overload_cast<const motifcl::Tensor&, motifcl::nn::KVCache&, int64_t, int64_t>(&motifcl::nn::ModernSelfAttention::forward_with_cache),
+             py::arg("x"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
+        .def("forward_with_paged_cache", py::overload_cast<const motifcl::Tensor&, motifcl::nn::PagedKVCache&, int64_t, int64_t>(&motifcl::nn::ModernSelfAttention::forward_with_cache),
              py::arg("x"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
         .def("forward_with_cache_masked", &motifcl::nn::ModernSelfAttention::forward_with_cache_masked,
              py::arg("x"), py::arg("mask"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
@@ -463,7 +537,21 @@ PYBIND11_MODULE(_motifcl, m) {
              py::arg("qdtype") = motifcl::DType::Q4_0)
         .def("disable_quantized_inference", &motifcl::nn::ModernSelfAttention::disable_quantized_inference)
         .def("quantized_inference_enabled", &motifcl::nn::ModernSelfAttention::quantized_inference_enabled)
-        .def("quantized_weight_dtype", &motifcl::nn::ModernSelfAttention::quantized_weight_dtype);
+        .def("quantized_weight_dtype", &motifcl::nn::ModernSelfAttention::quantized_weight_dtype)
+        .def("enable_split_projections", &motifcl::nn::ModernSelfAttention::enable_split_projections, py::arg("enabled") = true)
+        .def("split_projections_enabled", &motifcl::nn::ModernSelfAttention::split_projections_enabled);
+
+    py::class_<motifcl::nn::GatedAttentionLayer, motifcl::nn::Module, std::shared_ptr<motifcl::nn::GatedAttentionLayer>>(m, "GatedAttentionLayer")
+        .def(py::init<motifcl::Backend&, const motifcl::nn::TransformerConfig&>(),
+             py::arg("backend"), py::arg("config"))
+        .def("forward", py::overload_cast<const motifcl::Tensor&>(&motifcl::nn::GatedAttentionLayer::forward))
+        .def("forward", py::overload_cast<const motifcl::Tensor&, int64_t, int64_t, bool>(&motifcl::nn::GatedAttentionLayer::forward),
+             py::arg("x"), py::arg("batch_size"), py::arg("seq_len"), py::arg("causal") = true)
+        .def("forward_with_cache", py::overload_cast<const motifcl::Tensor&, motifcl::nn::KVCache&, int64_t, int64_t>(&motifcl::nn::GatedAttentionLayer::forward_with_cache),
+             py::arg("x"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
+        .def("forward_with_paged_cache", py::overload_cast<const motifcl::Tensor&, motifcl::nn::PagedKVCache&, int64_t, int64_t>(&motifcl::nn::GatedAttentionLayer::forward_with_cache),
+             py::arg("x"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
+        .def("parameters", &motifcl::nn::GatedAttentionLayer::parameters, py::return_value_policy::reference);
 
     py::class_<motifcl::nn::ModernTransformerBlock, motifcl::nn::Module, std::shared_ptr<motifcl::nn::ModernTransformerBlock>>(m, "ModernTransformerBlock")
         .def(py::init<motifcl::Backend&, const motifcl::nn::TransformerConfig&>(),
@@ -473,7 +561,9 @@ PYBIND11_MODULE(_motifcl, m) {
              py::arg("x"), py::arg("batch_size"), py::arg("seq_len"))
         .def("forward_masked", &motifcl::nn::ModernTransformerBlock::forward_masked,
              py::arg("x"), py::arg("mask"), py::arg("batch_size"), py::arg("seq_len"))
-        .def("forward_with_cache", &motifcl::nn::ModernTransformerBlock::forward_with_cache,
+        .def("forward_with_cache", py::overload_cast<const motifcl::Tensor&, motifcl::nn::KVCache&, int64_t, int64_t>(&motifcl::nn::ModernTransformerBlock::forward_with_cache),
+             py::arg("x"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
+        .def("forward_with_paged_cache", py::overload_cast<const motifcl::Tensor&, motifcl::nn::PagedKVCache&, int64_t, int64_t>(&motifcl::nn::ModernTransformerBlock::forward_with_cache),
              py::arg("x"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
         .def("forward_with_cache_masked", &motifcl::nn::ModernTransformerBlock::forward_with_cache_masked,
              py::arg("x"), py::arg("mask"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
@@ -499,12 +589,24 @@ PYBIND11_MODULE(_motifcl, m) {
         .def("forward_with_cache", [](motifcl::nn::ModernGPTModel& model,
                                       const motifcl::Tensor& token_ids,
                                       py::list cache_list) {
-            std::vector<motifcl::nn::KVCache*> caches;
-            caches.reserve(static_cast<std::size_t>(py::len(cache_list)));
+            std::vector<motifcl::nn::KVCache*> kv_caches;
+            kv_caches.reserve(static_cast<std::size_t>(py::len(cache_list)));
+            bool all_kv = true;
             for (py::handle item : cache_list) {
-                caches.push_back(&item.cast<motifcl::nn::KVCache&>());
+                try {
+                    kv_caches.push_back(&item.cast<motifcl::nn::KVCache&>());
+                } catch (const py::cast_error&) {
+                    all_kv = false;
+                    break;
+                }
             }
-            return model.forward_with_cache(token_ids, caches);
+            if (all_kv) return model.forward_with_cache(token_ids, kv_caches);
+            std::vector<motifcl::nn::PagedKVCache*> paged_caches;
+            paged_caches.reserve(static_cast<std::size_t>(py::len(cache_list)));
+            for (py::handle item : cache_list) {
+                paged_caches.push_back(&item.cast<motifcl::nn::PagedKVCache&>());
+            }
+            return model.forward_with_cache(token_ids, paged_caches);
         }, py::arg("token_ids"), py::arg("caches"))
         .def("forward_with_cache_masked", [](motifcl::nn::ModernGPTModel& model,
                                              const motifcl::Tensor& token_ids,
@@ -520,6 +622,12 @@ PYBIND11_MODULE(_motifcl, m) {
         .def("parameters", &motifcl::nn::ModernGPTModel::parameters, py::return_value_policy::reference)
         .def("create_kv_cache", &motifcl::nn::ModernGPTModel::create_kv_cache,
              py::arg("backend"), py::arg("batch_size"))
+        .def("create_paged_kv_cache", &motifcl::nn::ModernGPTModel::create_paged_kv_cache,
+             py::arg("backend"), py::arg("batch_size"), py::arg("page_size") = 256)
+        .def("create_delta_state_cache", &motifcl::nn::ModernGPTModel::create_delta_state_cache,
+             py::arg("backend"), py::arg("batch_size"), py::arg("state_dim") = 0)
+        .def("set_layer_attention_window", &motifcl::nn::ModernGPTModel::set_layer_attention_window,
+             py::arg("layer"), py::arg("window"))
         .def("enable_quantized_inference", [](motifcl::nn::ModernGPTModel& model, motifcl::DType qdtype) {
             model.enable_quantized_inference(qdtype);
         }, py::arg("qdtype") = motifcl::DType::Q4_0)
@@ -532,6 +640,48 @@ PYBIND11_MODULE(_motifcl, m) {
         .def("quantized_weight_dtype", &motifcl::nn::ModernGPTModel::quantized_weight_dtype)
         .def("quantized_lm_head", &motifcl::nn::ModernGPTModel::quantized_lm_head, py::return_value_policy::reference_internal)
         .def_readwrite("config", &motifcl::nn::ModernGPTModel::config);
+
+    py::enum_<motifcl::nn::HybridAttentionKind>(m, "HybridAttentionKind")
+        .value("FullAttention", motifcl::nn::HybridAttentionKind::FullAttention)
+        .value("SlidingAttention", motifcl::nn::HybridAttentionKind::SlidingAttention)
+        .value("GatedAttention", motifcl::nn::HybridAttentionKind::GatedAttention)
+        .value("GatedDeltaNet", motifcl::nn::HybridAttentionKind::GatedDeltaNet);
+
+    py::enum_<motifcl::nn::HybridFFNKind>(m, "HybridFFNKind")
+        .value("SwiGLUFFN", motifcl::nn::HybridFFNKind::SwiGLUFFN)
+        .value("MoEFFN", motifcl::nn::HybridFFNKind::MoEFFN);
+
+    py::class_<motifcl::nn::HybridLayerConfig>(m, "HybridLayerConfig")
+        .def(py::init<>())
+        .def_readwrite("attention", &motifcl::nn::HybridLayerConfig::attention)
+        .def_readwrite("ffn", &motifcl::nn::HybridLayerConfig::ffn)
+        .def_readwrite("sliding_window", &motifcl::nn::HybridLayerConfig::sliding_window)
+        .def_readwrite("num_experts", &motifcl::nn::HybridLayerConfig::num_experts)
+        .def_readwrite("experts_per_token", &motifcl::nn::HybridLayerConfig::experts_per_token)
+        .def_readwrite("delta_state_dim", &motifcl::nn::HybridLayerConfig::delta_state_dim);
+
+    py::class_<motifcl::nn::HybridRuntimeCache>(m, "HybridRuntimeCache")
+        .def("reset", &motifcl::nn::HybridRuntimeCache::reset)
+        .def_readwrite("use_paged_kv", &motifcl::nn::HybridRuntimeCache::use_paged_kv)
+        .def_readwrite("batch_size", &motifcl::nn::HybridRuntimeCache::batch_size)
+        .def_readwrite("page_size", &motifcl::nn::HybridRuntimeCache::page_size);
+
+    py::class_<motifcl::nn::HybridGPTModel, motifcl::nn::Module, std::shared_ptr<motifcl::nn::HybridGPTModel>>(m, "HybridGPTModel")
+        .def(py::init<motifcl::Backend&, const motifcl::nn::TransformerConfig&, const std::vector<motifcl::nn::HybridLayerConfig>&>(),
+             py::arg("backend"), py::arg("config"), py::arg("layer_configs") = std::vector<motifcl::nn::HybridLayerConfig>{})
+        .def("forward", &motifcl::nn::HybridGPTModel::forward)
+        .def("forward_with_cache", &motifcl::nn::HybridGPTModel::forward_with_cache,
+             py::arg("token_ids"), py::arg("cache"))
+        .def("parameters", &motifcl::nn::HybridGPTModel::parameters, py::return_value_policy::reference)
+        .def("create_runtime_cache", &motifcl::nn::HybridGPTModel::create_runtime_cache,
+             py::arg("backend"), py::arg("batch_size"), py::arg("use_paged_kv") = false, py::arg("page_size") = 256)
+        .def("set_quantized_lm_head", &motifcl::nn::HybridGPTModel::set_quantized_lm_head, py::arg("weight"))
+        .def("disable_quantized_inference", &motifcl::nn::HybridGPTModel::disable_quantized_inference)
+        .def("quantized_inference_enabled", &motifcl::nn::HybridGPTModel::quantized_inference_enabled)
+        .def("quantized_weight_dtype", &motifcl::nn::HybridGPTModel::quantized_weight_dtype)
+        .def("quantized_lm_head", &motifcl::nn::HybridGPTModel::quantized_lm_head, py::return_value_policy::reference_internal)
+        .def_readwrite("config", &motifcl::nn::HybridGPTModel::config)
+        .def_readwrite("layer_configs", &motifcl::nn::HybridGPTModel::layer_configs);
 
     py::class_<motifcl::nn::GemmaConfig>(m, "GemmaConfig")
         .def(py::init<>())
@@ -547,6 +697,7 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readwrite("rope_theta", &motifcl::nn::GemmaConfig::rope_theta)
         .def_readwrite("attention_dropout", &motifcl::nn::GemmaConfig::attention_dropout)
         .def_readwrite("attention_bias", &motifcl::nn::GemmaConfig::attention_bias)
+        .def_readwrite("attention_k_eq_v", &motifcl::nn::GemmaConfig::attention_k_eq_v)
         .def_readwrite("tie_word_embeddings", &motifcl::nn::GemmaConfig::tie_word_embeddings)
         .def_readwrite("bos_token_id", &motifcl::nn::GemmaConfig::bos_token_id)
         .def_readwrite("eos_token_id", &motifcl::nn::GemmaConfig::eos_token_id)
@@ -593,15 +744,85 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readwrite("add_bos", &motifcl::nn::GenerateOptions::add_bos)
         .def_readwrite("prefill_prompt", &motifcl::nn::GenerateOptions::prefill_prompt)
         .def_readwrite("gpu_greedy_sampling", &motifcl::nn::GenerateOptions::gpu_greedy_sampling)
+        .def_readwrite("use_paged_kv_cache", &motifcl::nn::GenerateOptions::use_paged_kv_cache)
+        .def_readwrite("kv_page_size", &motifcl::nn::GenerateOptions::kv_page_size)
         .def_readwrite("seed", &motifcl::nn::GenerateOptions::seed);
 
     py::enum_<motifcl::nn::HFArchitecture>(m, "HFArchitecture")
         .value("Auto", motifcl::nn::HFArchitecture::Auto)
         .value("GenericDecoder", motifcl::nn::HFArchitecture::GenericDecoder)
         .value("Gemma", motifcl::nn::HFArchitecture::Gemma)
+        .value("Gemma2", motifcl::nn::HFArchitecture::Gemma2)
+        .value("Gemma3", motifcl::nn::HFArchitecture::Gemma3)
+        .value("Gemma4", motifcl::nn::HFArchitecture::Gemma4)
         .value("Llama", motifcl::nn::HFArchitecture::Llama)
         .value("Mistral", motifcl::nn::HFArchitecture::Mistral)
-        .value("Qwen2", motifcl::nn::HFArchitecture::Qwen2);
+        .value("Qwen2", motifcl::nn::HFArchitecture::Qwen2)
+        .value("Qwen3", motifcl::nn::HFArchitecture::Qwen3)
+        .value("Qwen35", motifcl::nn::HFArchitecture::Qwen35)
+        .value("Phi3", motifcl::nn::HFArchitecture::Phi3)
+        .value("Phi4", motifcl::nn::HFArchitecture::Phi4)
+        .value("Mixtral", motifcl::nn::HFArchitecture::Mixtral)
+        .value("DeepSeek", motifcl::nn::HFArchitecture::DeepSeek)
+        .value("Falcon", motifcl::nn::HFArchitecture::Falcon)
+        .value("GPTNeoX", motifcl::nn::HFArchitecture::GPTNeoX)
+        .value("Mamba", motifcl::nn::HFArchitecture::Mamba);
+
+    py::enum_<motifcl::nn::HFChatTemplateKind>(m, "HFChatTemplateKind")
+        .value("Auto", motifcl::nn::HFChatTemplateKind::Auto)
+        .value("None_", motifcl::nn::HFChatTemplateKind::None)
+        .value("Generic", motifcl::nn::HFChatTemplateKind::Generic)
+        .value("ChatML", motifcl::nn::HFChatTemplateKind::ChatML)
+        .value("Llama2", motifcl::nn::HFChatTemplateKind::Llama2)
+        .value("Llama3", motifcl::nn::HFChatTemplateKind::Llama3)
+        .value("Mistral", motifcl::nn::HFChatTemplateKind::Mistral)
+        .value("Gemma", motifcl::nn::HFChatTemplateKind::Gemma);
+
+    py::enum_<motifcl::nn::ModernLayerKind>(m, "ModernLayerKind")
+        .value("FullAttention", motifcl::nn::ModernLayerKind::FullAttention)
+        .value("SlidingAttention", motifcl::nn::ModernLayerKind::SlidingAttention)
+        .value("GatedDeltaNet", motifcl::nn::ModernLayerKind::GatedDeltaNet)
+        .value("GatedAttention", motifcl::nn::ModernLayerKind::GatedAttention)
+        .value("MoEFFN", motifcl::nn::ModernLayerKind::MoEFFN)
+        .value("VisionProjector", motifcl::nn::ModernLayerKind::VisionProjector)
+        .value("AudioProjector", motifcl::nn::ModernLayerKind::AudioProjector)
+        .value("SwiGLUFFN", motifcl::nn::ModernLayerKind::SwiGLUFFN);
+
+    py::class_<motifcl::nn::LayerSpec>(m, "LayerSpec")
+        .def_readonly("graph_index", &motifcl::nn::LayerSpec::graph_index)
+        .def_readonly("transformer_layer", &motifcl::nn::LayerSpec::transformer_layer)
+        .def_readonly("kind", &motifcl::nn::LayerSpec::kind)
+        .def_readonly("sliding_window", &motifcl::nn::LayerSpec::sliding_window)
+        .def_readonly("num_experts", &motifcl::nn::LayerSpec::num_experts)
+        .def_readonly("experts_per_token", &motifcl::nn::LayerSpec::experts_per_token)
+        .def_readonly("uses_kv_cache", &motifcl::nn::LayerSpec::uses_kv_cache)
+        .def_readonly("uses_state_cache", &motifcl::nn::LayerSpec::uses_state_cache)
+        .def_readonly("consumes_per_layer_input", &motifcl::nn::LayerSpec::consumes_per_layer_input)
+        .def_readonly("name", &motifcl::nn::LayerSpec::name);
+
+    py::class_<motifcl::nn::ModernModelSpec>(m, "ModernModelSpec")
+        .def_readonly("architecture", &motifcl::nn::ModernModelSpec::architecture)
+        .def_readonly("architecture_name", &motifcl::nn::ModernModelSpec::architecture_name)
+        .def_readonly("transformer", &motifcl::nn::ModernModelSpec::transformer)
+        .def_readonly("layers", &motifcl::nn::ModernModelSpec::layers)
+        .def_readonly("text_core", &motifcl::nn::ModernModelSpec::text_core)
+        .def_readonly("per_layer_inputs", &motifcl::nn::ModernModelSpec::per_layer_inputs)
+        .def_readonly("has_moe", &motifcl::nn::ModernModelSpec::has_moe)
+        .def_readonly("has_vision_projector", &motifcl::nn::ModernModelSpec::has_vision_projector)
+        .def_readonly("has_audio_projector", &motifcl::nn::ModernModelSpec::has_audio_projector)
+        .def_readonly("has_recurrent_state", &motifcl::nn::ModernModelSpec::has_recurrent_state)
+        .def_readonly("blockers", &motifcl::nn::ModernModelSpec::blockers);
+
+    py::class_<motifcl::nn::LongContextRuntimeSpec>(m, "LongContextRuntimeSpec")
+        .def_readonly("max_context", &motifcl::nn::LongContextRuntimeSpec::max_context)
+        .def_readonly("page_size", &motifcl::nn::LongContextRuntimeSpec::page_size)
+        .def_readonly("sliding_window", &motifcl::nn::LongContextRuntimeSpec::sliding_window)
+        .def_readonly("kv_cache_layers", &motifcl::nn::LongContextRuntimeSpec::kv_cache_layers)
+        .def_readonly("sliding_window_layers", &motifcl::nn::LongContextRuntimeSpec::sliding_window_layers)
+        .def_readonly("state_cache_layers", &motifcl::nn::LongContextRuntimeSpec::state_cache_layers)
+        .def_readonly("needs_paged_kv", &motifcl::nn::LongContextRuntimeSpec::needs_paged_kv)
+        .def_readonly("needs_sliding_window_cache", &motifcl::nn::LongContextRuntimeSpec::needs_sliding_window_cache)
+        .def_readonly("needs_state_cache", &motifcl::nn::LongContextRuntimeSpec::needs_state_cache);
 
     py::class_<motifcl::nn::HFTransformerConfig>(m, "HFTransformerConfig")
         .def(py::init<>())
@@ -611,10 +832,33 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readwrite("rms_norm_eps", &motifcl::nn::HFTransformerConfig::rms_norm_eps)
         .def_readwrite("tie_word_embeddings", &motifcl::nn::HFTransformerConfig::tie_word_embeddings)
         .def_readwrite("attention_bias", &motifcl::nn::HFTransformerConfig::attention_bias)
+        .def_readwrite("attention_k_eq_v", &motifcl::nn::HFTransformerConfig::attention_k_eq_v)
         .def_readwrite("bos_token_id", &motifcl::nn::HFTransformerConfig::bos_token_id)
         .def_readwrite("eos_token_id", &motifcl::nn::HFTransformerConfig::eos_token_id)
         .def_readwrite("pad_token_id", &motifcl::nn::HFTransformerConfig::pad_token_id)
-        .def_readwrite("sliding_window", &motifcl::nn::HFTransformerConfig::sliding_window);
+        .def_readwrite("sliding_window", &motifcl::nn::HFTransformerConfig::sliding_window)
+        .def_readwrite("layer_types", &motifcl::nn::HFTransformerConfig::layer_types)
+        .def_readwrite("local_attention_layers", &motifcl::nn::HFTransformerConfig::local_attention_layers)
+        .def_readwrite("global_attention_layers", &motifcl::nn::HFTransformerConfig::global_attention_layers)
+        .def_readwrite("per_layer_inputs", &motifcl::nn::HFTransformerConfig::per_layer_inputs)
+        .def_readwrite("has_moe", &motifcl::nn::HFTransformerConfig::has_moe)
+        .def_readwrite("num_experts", &motifcl::nn::HFTransformerConfig::num_experts)
+        .def_readwrite("experts_per_token", &motifcl::nn::HFTransformerConfig::experts_per_token)
+        .def_readwrite("has_vision_projector", &motifcl::nn::HFTransformerConfig::has_vision_projector)
+        .def_readwrite("has_audio_projector", &motifcl::nn::HFTransformerConfig::has_audio_projector)
+        .def_readwrite("has_gated_delta_net", &motifcl::nn::HFTransformerConfig::has_gated_delta_net)
+        .def_readwrite("has_gated_attention", &motifcl::nn::HFTransformerConfig::has_gated_attention);
+
+    py::class_<motifcl::nn::HFChatMessage>(m, "HFChatMessage")
+        .def(py::init<>())
+        .def(py::init([](std::string role, std::string content) {
+            motifcl::nn::HFChatMessage msg;
+            msg.role = std::move(role);
+            msg.content = std::move(content);
+            return msg;
+        }), py::arg("role"), py::arg("content"))
+        .def_readwrite("role", &motifcl::nn::HFChatMessage::role)
+        .def_readwrite("content", &motifcl::nn::HFChatMessage::content);
 
     m.attr("HFWeightName") = m.attr("GemmaWeightName");
     m.attr("HFWeightLoadReport") = m.attr("GemmaWeightLoadReport");
@@ -643,16 +887,48 @@ PYBIND11_MODULE(_motifcl, m) {
           py::arg("options") = motifcl::nn::GenerateOptions{});
     m.def("hf_architecture_name", &motifcl::nn::hf_architecture_name, py::arg("architecture"));
     m.def("parse_hf_architecture", &motifcl::nn::parse_hf_architecture, py::arg("value"));
+    m.def("modern_layer_kind_name", &motifcl::nn::modern_layer_kind_name, py::arg("kind"));
+    m.def("parse_modern_layer_kind", &motifcl::nn::parse_modern_layer_kind, py::arg("value"));
     m.def("load_hf_transformer_config_json", &motifcl::nn::load_hf_transformer_config_json,
           py::arg("path"), py::arg("architecture") = motifcl::nn::HFArchitecture::Auto);
+    m.def("load_hf_transformer_config_gguf", &motifcl::nn::load_hf_transformer_config_gguf,
+          py::arg("path"), py::arg("architecture") = motifcl::nn::HFArchitecture::Auto);
+    m.def("modern_model_spec_from_config", &motifcl::nn::modern_model_spec_from_config, py::arg("config"));
+    m.def("load_modern_model_spec_json", &motifcl::nn::load_modern_model_spec_json,
+          py::arg("path"), py::arg("architecture") = motifcl::nn::HFArchitecture::Auto);
+    m.def("modern_model_spec_runnable_by_modern_gpt", &motifcl::nn::modern_model_spec_runnable_by_modern_gpt,
+          py::arg("spec"));
+    m.def("modern_model_spec_runnable_by_hybrid", &motifcl::nn::modern_model_spec_runnable_by_hybrid,
+          py::arg("spec"));
+    m.def("modern_model_spec_blockers", &motifcl::nn::modern_model_spec_blockers, py::arg("spec"));
+    m.def("long_context_runtime_spec_from_model_spec", &motifcl::nn::long_context_runtime_spec_from_model_spec,
+          py::arg("spec"), py::arg("page_size") = 256);
+    m.def("format_modern_model_spec", &motifcl::nn::format_modern_model_spec, py::arg("spec"));
+    m.def("infer_hf_chat_template_kind", &motifcl::nn::infer_hf_chat_template_kind,
+          py::arg("architecture"), py::arg("model_dir_or_tokenizer_config") = "");
+    m.def("apply_hf_chat_template", &motifcl::nn::apply_hf_chat_template,
+          py::arg("messages"),
+          py::arg("architecture") = motifcl::nn::HFArchitecture::GenericDecoder,
+          py::arg("kind") = motifcl::nn::HFChatTemplateKind::Auto,
+          py::arg("add_generation_prompt") = true);
     m.def("to_gemma_compatible_config", &motifcl::nn::to_gemma_compatible_config, py::arg("config"));
     m.def("make_hf_transformer_model", &motifcl::nn::make_hf_transformer_model,
+          py::arg("backend"), py::arg("config"));
+    m.def("hybrid_layer_configs_from_model_spec", &motifcl::nn::hybrid_layer_configs_from_model_spec,
+          py::arg("spec"));
+    m.def("make_hf_hybrid_transformer_model", &motifcl::nn::make_hf_hybrid_transformer_model,
           py::arg("backend"), py::arg("config"));
     m.def("map_hf_transformer_weight_name", &motifcl::nn::map_hf_transformer_weight_name,
           py::arg("architecture"), py::arg("hf_name"));
     m.def("expected_hf_transformer_weight_names", &motifcl::nn::expected_hf_transformer_weight_names,
           py::arg("config"), py::arg("include_lm_head") = true);
     m.def("load_hf_transformer_weights", &motifcl::nn::load_hf_transformer_weights,
+          py::arg("backend"), py::arg("model"), py::arg("safetensors_paths"), py::arg("config"),
+          py::arg("strict") = false, py::arg("trainable") = false);
+    m.def("load_hf_transformer_gguf_weights", &motifcl::nn::load_hf_transformer_gguf_weights,
+          py::arg("backend"), py::arg("model"), py::arg("gguf_path"), py::arg("config"),
+          py::arg("strict") = false, py::arg("trainable") = false);
+    m.def("load_hf_hybrid_transformer_weights", &motifcl::nn::load_hf_hybrid_transformer_weights,
           py::arg("backend"), py::arg("model"), py::arg("safetensors_paths"), py::arg("config"),
           py::arg("strict") = false, py::arg("trainable") = false);
     m.def("enable_hf_transformer_quantized_inference", &motifcl::nn::enable_hf_transformer_quantized_inference,
@@ -662,6 +938,9 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("load_hf_tokenizer", &motifcl::nn::load_hf_tokenizer,
           py::arg("model_dir_or_vocab_path"), py::arg("config"));
     m.def("generate_hf_text", &motifcl::nn::generate_hf_text,
+          py::arg("backend"), py::arg("model"), py::arg("tokenizer"), py::arg("prompt"),
+          py::arg("options") = motifcl::nn::GenerateOptions{});
+    m.def("generate_hf_hybrid_text", &motifcl::nn::generate_hf_hybrid_text,
           py::arg("backend"), py::arg("model"), py::arg("tokenizer"), py::arg("prompt"),
           py::arg("options") = motifcl::nn::GenerateOptions{});
     m.def("generate_hf_batch_text", &motifcl::nn::generate_hf_batch_text,
