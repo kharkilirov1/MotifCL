@@ -469,6 +469,14 @@ public:
     Tensor forward_with_cache(const Tensor& token_ids, std::vector<KVCache*>& caches);
     Tensor forward_with_cache(const Tensor& token_ids, std::vector<PagedKVCache>& caches);
     Tensor forward_with_cache(const Tensor& token_ids, std::vector<PagedKVCache*>& caches);
+    Tensor forward_with_cache_last_logits(const Tensor& token_ids, std::vector<KVCache>& caches);
+    Tensor forward_with_cache_last_logits(const Tensor& token_ids, std::vector<KVCache*>& caches);
+    Tensor forward_with_cache_last_logits(const Tensor& token_ids, std::vector<PagedKVCache>& caches);
+    Tensor forward_with_cache_last_logits(const Tensor& token_ids, std::vector<PagedKVCache*>& caches);
+    Tensor decode_step(const Tensor& token_ids, std::vector<KVCache>& caches);
+    Tensor decode_step(const Tensor& token_ids, std::vector<KVCache*>& caches);
+    Tensor decode_step(const Tensor& token_ids, std::vector<PagedKVCache>& caches);
+    Tensor decode_step(const Tensor& token_ids, std::vector<PagedKVCache*>& caches);
     Tensor forward_with_cache_masked(const Tensor& token_ids, const Tensor& mask, std::vector<KVCache>& caches);
     Tensor forward_with_cache_masked(const Tensor& token_ids, const Tensor& mask, std::vector<KVCache*>& caches);
     Tensor forward_with_cache_positions_masked(const Tensor& token_ids, const Tensor& positions, const Tensor& mask,
@@ -531,6 +539,8 @@ public:
                    const std::vector<HybridLayerConfig>& layer_configs = {});
     Tensor forward(const Tensor& token_ids) override;
     Tensor forward_with_cache(const Tensor& token_ids, HybridRuntimeCache& cache);
+    Tensor forward_with_cache_last_logits(const Tensor& token_ids, HybridRuntimeCache& cache);
+    Tensor decode_step(const Tensor& token_ids, HybridRuntimeCache& cache);
     std::vector<Parameter*> parameters() override;
     HybridRuntimeCache create_runtime_cache(Backend& backend, int64_t batch_size,
                                             bool use_paged_kv = false,

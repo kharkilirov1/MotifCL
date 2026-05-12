@@ -3,7 +3,6 @@
 #include <motifcl/autograd/node.hpp>
 #include <motifcl/core/error.hpp>
 #include <motifcl/gguf.hpp>
-#include <motifcl/ops/indexing.hpp>
 #include <motifcl/ops/quant.hpp>
 #include <motifcl/ops/reduce.hpp>
 #include <motifcl/tensor/storage.hpp>
@@ -1172,6 +1171,23 @@ bool is_supported_gguf_weight_name(const std::string& name) {
 }
 
 } // namespace
+
+Tensor repack_gguf_k_quant_to_q4_0_col(Backend& backend,
+                                       const gguf::File& file,
+                                       const std::string& name,
+                                       bool tile8,
+                                       bool direct) {
+    const auto& info = file.tensor_info(name);
+    MCL_CHECK(info.dimensions.size() == 2, "Q4_0_COL repack expects rank-2 GGUF tensor: " + name);
+    MCL_CHECK(info.dimensions[0] <= static_cast<std::uint64_t>(std::numeric_limits<int64_t>::max()) &&
+                  info.dimensions[1] <= static_cast<std::uint64_t>(std::numeric_limits<int64_t>::max()),
+              "Q4_0_COL repack tensor dimensions are too large: " + name);
+    const auto rows = static_cast<int64_t>(info.dimensions[0]);
+    const auto cols = static_cast<int64_t>(info.dimensions[1]);
+    return tile8
+        ? gguf_k_quant_matrix_to_q4_0_tile8(backend, file, name, rows, cols, direct)
+        : gguf_k_quant_matrix_to_q4_0_col(backend, file, name, rows, cols, direct);
+}
 
 std::string hf_architecture_name(HFArchitecture architecture) {
     switch (architecture) {
@@ -2740,12 +2756,6 @@ std::string generate_hf_hybrid_text(Backend& backend,
     if (options.max_new_tokens == 0) return tokenizer.decode(tokens, true);
 
     auto cache = model.create_runtime_cache(backend, 1, options.use_paged_kv_cache, options.kv_page_size);
-    auto last_logits = [&](const Tensor& logits, int64_t seq_len) {
-        if (seq_len == 1) return logits.view({1, model.config.vocab_size});
-        std::int32_t pos = static_cast<std::int32_t>(seq_len - 1);
-        auto positions = Tensor::from_cpu(backend, {1}, DType::I32, &pos);
-        return gather_last_token_logits(logits, positions, 1, seq_len, model.config.vocab_size);
-    };
 
     Tensor logits;
     if (options.prefill_prompt) {
@@ -2753,12 +2763,12 @@ std::string generate_hf_hybrid_text(Backend& backend,
                                       {1, static_cast<int64_t>(tokens.size())},
                                       DType::I32,
                                       tokens.data());
-        logits = last_logits(model.forward_with_cache(input, cache), static_cast<int64_t>(tokens.size()));
+        logits = model.forward_with_cache_last_logits(input, cache);
     } else {
         for (std::size_t i = 0; i < tokens.size(); ++i) {
             std::int32_t id = tokens[i];
             auto input = Tensor::from_cpu(backend, {1, 1}, DType::I32, &id);
-            logits = last_logits(model.forward_with_cache(input, cache), 1);
+            logits = model.decode_step(input, cache);
         }
     }
 
@@ -2776,7 +2786,7 @@ std::string generate_hf_hybrid_text(Backend& backend,
         if (options.eos_token_id >= 0 && next == options.eos_token_id) break;
         if (step + 1 >= options.max_new_tokens) break;
         auto input = next_tensor.view({1, 1});
-        logits = last_logits(model.forward_with_cache(input, cache), 1);
+        logits = model.decode_step(input, cache);
     }
     return tokenizer.decode(tokens, true);
 }

@@ -608,6 +608,50 @@ PYBIND11_MODULE(_motifcl, m) {
             }
             return model.forward_with_cache(token_ids, paged_caches);
         }, py::arg("token_ids"), py::arg("caches"))
+        .def("forward_with_cache_last_logits", [](motifcl::nn::ModernGPTModel& model,
+                                                  const motifcl::Tensor& token_ids,
+                                                  py::list cache_list) {
+            std::vector<motifcl::nn::KVCache*> kv_caches;
+            kv_caches.reserve(static_cast<std::size_t>(py::len(cache_list)));
+            bool all_kv = true;
+            for (py::handle item : cache_list) {
+                try {
+                    kv_caches.push_back(&item.cast<motifcl::nn::KVCache&>());
+                } catch (const py::cast_error&) {
+                    all_kv = false;
+                    break;
+                }
+            }
+            if (all_kv) return model.forward_with_cache_last_logits(token_ids, kv_caches);
+            std::vector<motifcl::nn::PagedKVCache*> paged_caches;
+            paged_caches.reserve(static_cast<std::size_t>(py::len(cache_list)));
+            for (py::handle item : cache_list) {
+                paged_caches.push_back(&item.cast<motifcl::nn::PagedKVCache&>());
+            }
+            return model.forward_with_cache_last_logits(token_ids, paged_caches);
+        }, py::arg("token_ids"), py::arg("caches"))
+        .def("decode_step", [](motifcl::nn::ModernGPTModel& model,
+                               const motifcl::Tensor& token_ids,
+                               py::list cache_list) {
+            std::vector<motifcl::nn::KVCache*> kv_caches;
+            kv_caches.reserve(static_cast<std::size_t>(py::len(cache_list)));
+            bool all_kv = true;
+            for (py::handle item : cache_list) {
+                try {
+                    kv_caches.push_back(&item.cast<motifcl::nn::KVCache&>());
+                } catch (const py::cast_error&) {
+                    all_kv = false;
+                    break;
+                }
+            }
+            if (all_kv) return model.decode_step(token_ids, kv_caches);
+            std::vector<motifcl::nn::PagedKVCache*> paged_caches;
+            paged_caches.reserve(static_cast<std::size_t>(py::len(cache_list)));
+            for (py::handle item : cache_list) {
+                paged_caches.push_back(&item.cast<motifcl::nn::PagedKVCache&>());
+            }
+            return model.decode_step(token_ids, paged_caches);
+        }, py::arg("token_ids"), py::arg("caches"))
         .def("forward_with_cache_masked", [](motifcl::nn::ModernGPTModel& model,
                                              const motifcl::Tensor& token_ids,
                                              const motifcl::Tensor& mask,
@@ -671,6 +715,10 @@ PYBIND11_MODULE(_motifcl, m) {
              py::arg("backend"), py::arg("config"), py::arg("layer_configs") = std::vector<motifcl::nn::HybridLayerConfig>{})
         .def("forward", &motifcl::nn::HybridGPTModel::forward)
         .def("forward_with_cache", &motifcl::nn::HybridGPTModel::forward_with_cache,
+             py::arg("token_ids"), py::arg("cache"))
+        .def("forward_with_cache_last_logits", &motifcl::nn::HybridGPTModel::forward_with_cache_last_logits,
+             py::arg("token_ids"), py::arg("cache"))
+        .def("decode_step", &motifcl::nn::HybridGPTModel::decode_step,
              py::arg("token_ids"), py::arg("cache"))
         .def("parameters", &motifcl::nn::HybridGPTModel::parameters, py::return_value_policy::reference)
         .def("create_runtime_cache", &motifcl::nn::HybridGPTModel::create_runtime_cache,

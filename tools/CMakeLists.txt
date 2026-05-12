@@ -3,6 +3,7 @@ set(MOTIFCL_TOOLS
     compare_cpu_gpu
     kernel_tuner
     generate_transformer
+    warm_decode_bench
 )
 
 foreach(tool ${MOTIFCL_TOOLS})

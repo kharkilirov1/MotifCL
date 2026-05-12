@@ -747,7 +747,7 @@ int choose_next_token(const std::vector<float>& logits, const nn::GenerateOption
     return indices[dist(rng)];
 }
 
-Tensor last_token_logits_tensor(const Tensor& logits, int vocab_size) {
+[[maybe_unused]] Tensor last_token_logits_tensor(const Tensor& logits, int vocab_size) {
     MCL_CHECK(vocab_size > 0, "generate requires positive vocab_size");
     MCL_CHECK(logits.dtype() == DType::F32, "generate logits must be f32");
     MCL_CHECK(logits.numel() >= vocab_size && logits.numel() % vocab_size == 0,
@@ -1697,12 +1697,12 @@ std::vector<std::int32_t> generate(Backend& backend,
                                           {1, static_cast<int64_t>(tokens.size())},
                                           DType::I32,
                                           tokens.data());
-            logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+            logits = model.forward_with_cache_last_logits(input, caches);
         } else {
             for (std::size_t i = 0; i < tokens.size(); ++i) {
                 std::int32_t id = tokens[i];
                 auto input = Tensor::from_cpu(backend, {1, 1}, DType::I32, &id);
-                logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+                logits = model.decode_step(input, caches);
             }
         }
 
@@ -1725,7 +1725,7 @@ std::vector<std::int32_t> generate(Backend& backend,
             auto input = options.gpu_greedy_sampling
                 ? next_tensor.view({1, 1})
                 : Tensor::from_cpu(backend, {1, 1}, DType::I32, &next);
-            logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+            logits = model.decode_step(input, caches);
         }
         return tokens;
     } else {
@@ -1735,12 +1735,12 @@ std::vector<std::int32_t> generate(Backend& backend,
                                           {1, static_cast<int64_t>(tokens.size())},
                                           DType::I32,
                                           tokens.data());
-            logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+            logits = model.forward_with_cache_last_logits(input, caches);
         } else {
             for (std::size_t i = 0; i < tokens.size(); ++i) {
                 std::int32_t id = tokens[i];
                 auto input = Tensor::from_cpu(backend, {1, 1}, DType::I32, &id);
-                logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+                logits = model.decode_step(input, caches);
             }
         }
 
@@ -1763,7 +1763,7 @@ std::vector<std::int32_t> generate(Backend& backend,
             auto input = options.gpu_greedy_sampling
                 ? next_tensor.view({1, 1})
                 : Tensor::from_cpu(backend, {1, 1}, DType::I32, &next);
-            logits = last_token_logits_tensor(model.forward_with_cache(input, caches), model.config.vocab_size);
+            logits = model.decode_step(input, caches);
         }
         return tokens;
     }

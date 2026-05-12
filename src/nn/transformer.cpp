@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <motifcl/autograd/graph.hpp>
 #include <motifcl/autograd/node.hpp>
@@ -37,6 +38,24 @@ Parameter random_parameter_or_empty(Backend& backend,
         return p;
     }
     return Parameter(Tensor::randn(backend, Shape(shape), scale));
+}
+
+Tensor last_sequence_hidden_rows(const Tensor& h, int64_t batch_size, int64_t seq_len, int64_t width) {
+    MCL_CHECK(h.dtype() == DType::F32 && h.ndim() == 2, "last hidden rows expects flattened f32 [B*T,H]");
+    MCL_CHECK(batch_size > 0 && seq_len > 0 && width > 0, "last hidden rows invalid dimensions");
+    MCL_CHECK(h.shape()[0] == batch_size * seq_len && h.shape()[1] == width,
+              "last hidden rows shape mismatch");
+    if (seq_len == 1) return h.view({batch_size, width});
+    std::vector<int32_t> positions(static_cast<std::size_t>(batch_size),
+                                   static_cast<int32_t>(seq_len - 1));
+    auto pos = Tensor::from_cpu(h.backend(), {batch_size}, DType::I32, positions.data());
+    return gather_last_token_logits(h, pos, batch_size, seq_len, width);
+}
+
+void check_decode_step_token_shape(const Tensor& token_ids, const char* owner) {
+    MCL_CHECK(token_ids.ndim() == 1 || token_ids.ndim() == 2, std::string(owner) + " decode_step expects [1] or [B,1]");
+    const int64_t T = token_ids.ndim() == 2 ? token_ids.shape()[1] : token_ids.shape()[0];
+    MCL_CHECK(T == 1, std::string(owner) + " decode_step expects exactly one token per batch");
 }
 
 } // namespace
@@ -2705,6 +2724,44 @@ Tensor ModernGPTModel::forward_with_cache(const Tensor& token_ids, std::vector<K
     return logits;
 }
 
+Tensor ModernGPTModel::forward_with_cache_last_logits(const Tensor& token_ids, std::vector<KVCache>& caches) {
+    std::vector<KVCache*> ptrs;
+    ptrs.reserve(caches.size());
+    for (auto& cache : caches) ptrs.push_back(&cache);
+    return forward_with_cache_last_logits(token_ids, ptrs);
+}
+
+Tensor ModernGPTModel::forward_with_cache_last_logits(const Tensor& token_ids, std::vector<KVCache*>& caches) {
+    MCL_CHECK(token_ids.dtype() == DType::I32, "ModernGPTModel token ids must be i32");
+    MCL_CHECK(token_ids.ndim() == 1 || token_ids.ndim() == 2, "ModernGPTModel token ids must be [T] or [B,T]");
+    MCL_CHECK(caches.size() == blocks.size(), "ModernGPTModel KV cache count must match layer count");
+    MCL_CHECK(!use_positions_, "ModernGPTModel cached inference currently expects RoPE/token-only positions");
+    const int64_t B = token_ids.ndim() == 2 ? token_ids.shape()[0] : 1;
+    const int64_t T = token_ids.ndim() == 2 ? token_ids.shape()[1] : token_ids.shape()[0];
+    MCL_CHECK(T > 0 && T <= config.block_size, "ModernGPTModel invalid cached sequence length");
+    if (!caches.empty()) {
+        MCL_CHECK(caches[0] != nullptr, "ModernGPTModel null KV cache");
+        const int64_t start = caches[0]->length;
+        MCL_CHECK(start + T <= config.block_size, "ModernGPTModel KV cache exceeds block_size");
+        for (auto* cache : caches) {
+            MCL_CHECK(cache != nullptr, "ModernGPTModel null KV cache");
+            MCL_CHECK(cache->length == start, "ModernGPTModel KV caches must have equal current length");
+        }
+    }
+    Tensor h = input_embeddings(token_ids, B, T);
+    Tensor per_layer_inputs = config.use_per_layer_inputs ? compute_per_layer_inputs(token_ids, h, B, T) : Tensor{};
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        h = config.use_per_layer_inputs
+            ? blocks[i]->forward_with_cache_packed_per_layer_input(h, *caches[i], B, T,
+                                                                   &per_layer_inputs,
+                                                                   static_cast<int>(i),
+                                                                   B * T)
+            : blocks[i]->forward_with_cache(h, *caches[i], B, T, nullptr);
+    }
+    h = final_norm.forward(h);
+    return project_logits(last_sequence_hidden_rows(h, B, T, config.n_embd));
+}
+
 Tensor ModernGPTModel::forward_with_cache(const Tensor& token_ids, std::vector<PagedKVCache>& caches) {
     std::vector<PagedKVCache*> ptrs;
     ptrs.reserve(caches.size());
@@ -2742,6 +2799,63 @@ Tensor ModernGPTModel::forward_with_cache(const Tensor& token_ids, std::vector<P
     Tensor logits = project_logits(h);
     if (token_ids.ndim() == 2) return logits.view({B, T, config.vocab_size});
     return logits;
+}
+
+Tensor ModernGPTModel::forward_with_cache_last_logits(const Tensor& token_ids, std::vector<PagedKVCache>& caches) {
+    std::vector<PagedKVCache*> ptrs;
+    ptrs.reserve(caches.size());
+    for (auto& cache : caches) ptrs.push_back(&cache);
+    return forward_with_cache_last_logits(token_ids, ptrs);
+}
+
+Tensor ModernGPTModel::forward_with_cache_last_logits(const Tensor& token_ids, std::vector<PagedKVCache*>& caches) {
+    MCL_CHECK(token_ids.dtype() == DType::I32, "ModernGPTModel token ids must be i32");
+    MCL_CHECK(token_ids.ndim() == 1 || token_ids.ndim() == 2, "ModernGPTModel token ids must be [T] or [B,T]");
+    MCL_CHECK(caches.size() == blocks.size(), "ModernGPTModel paged KV cache count must match layer count");
+    MCL_CHECK(!use_positions_, "ModernGPTModel paged cached inference currently expects RoPE/token-only positions");
+    const int64_t B = token_ids.ndim() == 2 ? token_ids.shape()[0] : 1;
+    const int64_t T = token_ids.ndim() == 2 ? token_ids.shape()[1] : token_ids.shape()[0];
+    MCL_CHECK(T > 0 && T <= config.block_size, "ModernGPTModel invalid paged cached sequence length");
+    if (!caches.empty()) {
+        MCL_CHECK(caches[0] != nullptr, "ModernGPTModel null paged KV cache");
+        const int64_t start = caches[0]->tokens_seen;
+        for (auto* cache : caches) {
+            MCL_CHECK(cache != nullptr, "ModernGPTModel null paged KV cache");
+            MCL_CHECK(cache->tokens_seen == start, "ModernGPTModel paged KV caches must have equal current length");
+        }
+    }
+    Tensor h = input_embeddings(token_ids, B, T);
+    Tensor per_layer_inputs = config.use_per_layer_inputs ? compute_per_layer_inputs(token_ids, h, B, T) : Tensor{};
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        h = config.use_per_layer_inputs
+            ? blocks[i]->forward_with_cache_packed_per_layer_input(h, *caches[i], B, T,
+                                                                   &per_layer_inputs,
+                                                                   static_cast<int>(i),
+                                                                   B * T)
+            : blocks[i]->forward_with_cache(h, *caches[i], B, T, nullptr);
+    }
+    h = final_norm.forward(h);
+    return project_logits(last_sequence_hidden_rows(h, B, T, config.n_embd));
+}
+
+Tensor ModernGPTModel::decode_step(const Tensor& token_ids, std::vector<KVCache>& caches) {
+    check_decode_step_token_shape(token_ids, "ModernGPTModel");
+    return forward_with_cache_last_logits(token_ids, caches);
+}
+
+Tensor ModernGPTModel::decode_step(const Tensor& token_ids, std::vector<KVCache*>& caches) {
+    check_decode_step_token_shape(token_ids, "ModernGPTModel");
+    return forward_with_cache_last_logits(token_ids, caches);
+}
+
+Tensor ModernGPTModel::decode_step(const Tensor& token_ids, std::vector<PagedKVCache>& caches) {
+    check_decode_step_token_shape(token_ids, "ModernGPTModel");
+    return forward_with_cache_last_logits(token_ids, caches);
+}
+
+Tensor ModernGPTModel::decode_step(const Tensor& token_ids, std::vector<PagedKVCache*>& caches) {
+    check_decode_step_token_shape(token_ids, "ModernGPTModel");
+    return forward_with_cache_last_logits(token_ids, caches);
 }
 
 Tensor ModernGPTModel::forward_with_cache_masked(const Tensor& token_ids, const Tensor& mask, std::vector<KVCache>& caches) {
@@ -3046,6 +3160,52 @@ Tensor HybridGPTModel::forward_with_cache(const Tensor& token_ids, HybridRuntime
     auto logits = project_logits(h);
     if (token_ids.ndim() == 2) return logits.view({B, T, config.vocab_size});
     return logits;
+}
+
+Tensor HybridGPTModel::forward_with_cache_last_logits(const Tensor& token_ids, HybridRuntimeCache& cache) {
+    MCL_CHECK(token_ids.dtype() == DType::I32, "HybridGPTModel token ids must be i32");
+    MCL_CHECK(token_ids.ndim() == 1 || token_ids.ndim() == 2, "HybridGPTModel token ids must be [T] or [B,T]");
+    MCL_CHECK(!use_positions_, "HybridGPTModel cached inference currently expects RoPE/token-only positions");
+    MCL_CHECK(cache.kv_caches.size() == blocks.size() &&
+                  cache.paged_kv_caches.size() == blocks.size() &&
+                  cache.delta_states.size() == blocks.size(),
+              "HybridGPTModel runtime cache count must match layer count");
+    const int64_t B = token_ids.ndim() == 2 ? token_ids.shape()[0] : 1;
+    const int64_t T = token_ids.ndim() == 2 ? token_ids.shape()[1] : token_ids.shape()[0];
+    MCL_CHECK(T > 0 && T <= config.block_size, "HybridGPTModel invalid cached sequence length");
+    MCL_CHECK(cache.batch_size == B, "HybridGPTModel runtime cache batch size mismatch");
+
+    int64_t first_kv_length = -1;
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        if (!blocks[i]->uses_kv_cache()) continue;
+        const auto length = cache.use_paged_kv
+            ? cache.paged_kv_caches[i].tokens_seen
+            : cache.kv_caches[i].length;
+        if (first_kv_length < 0) first_kv_length = length;
+        MCL_CHECK(length == first_kv_length, "HybridGPTModel KV caches must have equal current length");
+    }
+    if (first_kv_length >= 0) {
+        MCL_CHECK(first_kv_length + T <= config.block_size,
+                  "HybridGPTModel KV cache exceeds block_size");
+    }
+
+    Tensor h = token_embedding.forward(token_ids).view({B * T, config.n_embd});
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        h = blocks[i]->forward_with_cache(h,
+                                          blocks[i]->uses_kv_cache() ? &cache.kv_caches[i] : nullptr,
+                                          blocks[i]->uses_kv_cache() ? &cache.paged_kv_caches[i] : nullptr,
+                                          blocks[i]->uses_state_cache() ? &cache.delta_states[i] : nullptr,
+                                          cache.use_paged_kv,
+                                          B,
+                                          T);
+    }
+    h = final_norm.forward(h);
+    return project_logits(last_sequence_hidden_rows(h, B, T, config.n_embd));
+}
+
+Tensor HybridGPTModel::decode_step(const Tensor& token_ids, HybridRuntimeCache& cache) {
+    check_decode_step_token_shape(token_ids, "HybridGPTModel");
+    return forward_with_cache_last_logits(token_ids, cache);
 }
 
 std::vector<Parameter*> HybridGPTModel::parameters() {

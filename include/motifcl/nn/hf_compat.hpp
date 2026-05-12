@@ -7,6 +7,10 @@
 #include <motifcl/nn/gemma.hpp>
 #include <motifcl/nn/transformer.hpp>
 
+namespace motifcl::gguf {
+class File;
+}
+
 namespace motifcl::nn {
 
 enum class HFArchitecture {
@@ -228,6 +232,12 @@ HFWeightLoadReport load_hf_hybrid_transformer_weights(Backend& backend,
                                                       const HFTransformerConfig& cfg,
                                                       bool strict = false,
                                                       bool trainable = false);
+
+Tensor repack_gguf_k_quant_to_q4_0_col(Backend& backend,
+                                       const gguf::File& file,
+                                       const std::string& name,
+                                       bool tile8 = false,
+                                       bool direct = true);
 
 void enable_hf_transformer_quantized_inference(ModernGPTModel& model, DType qdtype = DType::Q4_0);
 void disable_hf_transformer_quantized_inference(ModernGPTModel& model);

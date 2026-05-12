@@ -430,13 +430,37 @@ int main() {
             auto masked_logits = model.forward_masked(tokens, mask);
             if (masked_logits.shape() != motifcl::Shape({1, 4, cfg.vocab_size})) return 1;
 
+            {
+                motifcl::autograd::NoGradGuard no_grad;
+                auto full_caches = model.create_kv_cache(backend, 1);
+                auto last_caches = model.create_kv_cache(backend, 1);
+                auto full_cached = model.forward_with_cache(tokens, full_caches).view({4, cfg.vocab_size});
+                auto last_logits = model.forward_with_cache_last_logits(tokens, last_caches);
+                if (last_logits.shape() != motifcl::Shape({1, cfg.vocab_size}) ||
+                    full_caches[0].length != 4 || last_caches[0].length != 4) return 1;
+                auto full_last = motifcl::slice_rows(full_cached, 3, 4);
+                require_close_vec(last_logits.to_vector<float>(), full_last.to_vector<float>(), 1e-4f);
+            }
+
+            {
+                motifcl::autograd::NoGradGuard no_grad;
+                auto paged_full = model.create_paged_kv_cache(backend, 1, 2);
+                auto paged_last = model.create_paged_kv_cache(backend, 1, 2);
+                auto full_cached = model.forward_with_cache(tokens, paged_full).view({4, cfg.vocab_size});
+                auto last_logits = model.forward_with_cache_last_logits(tokens, paged_last);
+                if (last_logits.shape() != motifcl::Shape({1, cfg.vocab_size}) ||
+                    paged_full[0].tokens_seen != 4 || paged_last[0].tokens_seen != 4) return 1;
+                auto full_last = motifcl::slice_rows(full_cached, 3, 4);
+                require_close_vec(last_logits.to_vector<float>(), full_last.to_vector<float>(), 1e-4f);
+            }
+
             auto caches = model.create_kv_cache(backend, 1);
             auto step1 = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, ids.data());
             auto step_logits1 = model.forward_with_cache(step1, caches);
             if (step_logits1.shape() != motifcl::Shape({1, 1, cfg.vocab_size}) || caches[0].length != 1) return 1;
             auto step2 = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, ids.data() + 1);
-            auto step_logits2 = model.forward_with_cache(step2, caches);
-            if (step_logits2.shape() != motifcl::Shape({1, 1, cfg.vocab_size}) || caches[0].length != 2) return 1;
+            auto step_logits2 = model.decode_step(step2, caches);
+            if (step_logits2.shape() != motifcl::Shape({1, cfg.vocab_size}) || caches[0].length != 2) return 1;
 
             auto masked_caches = model.create_kv_cache(backend, 1);
             std::vector<std::int32_t> cache_mask_host(static_cast<std::size_t>(cfg.block_size), 0);
