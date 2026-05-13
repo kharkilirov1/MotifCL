@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@ struct Options {
     int limit = 8;
     std::uint64_t max_elements = 64000000ull;
     std::string type = "all";
+    std::vector<int> m_values{1, 8, 16, 32, 64, 128};
     bool no_repack = false;
 };
 
@@ -37,16 +39,37 @@ void usage() {
     std::cerr
         << "Usage: bench_kquant_m1 --model MODEL.gguf [options]\n"
         << "\n"
-        << "Benchmarks M=1 x [D,N] matmul for GGUF Q4_K/Q6_K tensors and compares\n"
-        << "direct K-quant kernels with dequantize+Q4_0_COL repack when tensor size is safe.\n"
+        << "Benchmarks M=1/8/16/32/64/128 x [D,N] GGUF Q4_K/Q6_K matmul and compares\n"
+        << "direct K-quant prefill with streaming Q4_0_COL_TILE8 repack when tensor size is safe.\n"
         << "\nOptions:\n"
         << "  --model PATH             GGUF file\n"
         << "  --iters N                measured matmul iterations (default: 8)\n"
         << "  --warmup N               warmup iterations (default: 2)\n"
         << "  --limit N                max tensors to benchmark (default: 8)\n"
+        << "  --m-list LIST            comma-separated M values (default: 1,8,16,32,64,128)\n"
         << "  --max-elements N         skip repack for larger tensors (default: 64000000)\n"
         << "  --type all|q4|q6         filter tensor type (default: all)\n"
         << "  --no-repack              direct K-quant only\n";
+}
+
+std::vector<int> parse_m_list(const std::string& value) {
+    std::vector<int> out;
+    std::stringstream ss(value);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (item.empty()) continue;
+        int m = std::stoi(item);
+        if (m <= 0) {
+            std::cerr << "--m-list values must be positive\n";
+            std::exit(2);
+        }
+        out.push_back(m);
+    }
+    if (out.empty()) {
+        std::cerr << "--m-list must contain at least one positive value\n";
+        std::exit(2);
+    }
+    return out;
 }
 
 Options parse_args(int argc, char** argv) {
@@ -65,6 +88,7 @@ Options parse_args(int argc, char** argv) {
         else if (arg == "--iters") opts.iters = std::stoi(require_value("--iters"));
         else if (arg == "--warmup") opts.warmup = std::stoi(require_value("--warmup"));
         else if (arg == "--limit") opts.limit = std::stoi(require_value("--limit"));
+        else if (arg == "--m-list") opts.m_values = parse_m_list(require_value("--m-list"));
         else if (arg == "--max-elements") opts.max_elements = static_cast<std::uint64_t>(std::stoull(require_value("--max-elements")));
         else if (arg == "--type") opts.type = require_value("--type");
         else if (arg == "--no-repack") opts.no_repack = true;
@@ -141,6 +165,12 @@ std::vector<int64_t> tensor_shape_i64(const motifcl::gguf::TensorInfo& info) {
     return shape;
 }
 
+const char* quant_type_short(motifcl::gguf::TensorType type) {
+    if (type == motifcl::gguf::TensorType::Q4_K) return "q4";
+    if (type == motifcl::gguf::TensorType::Q6_K) return "q6";
+    return "qk";
+}
+
 void print_profile(motifcl::Backend& backend, const std::string& indent = "    ") {
     int shown = 0;
     for (const auto& row : backend.profiler.summary()) {
@@ -180,57 +210,57 @@ int main(int argc, char** argv) {
                   << " elements=" << cand.elements << "\n";
 
         auto weight = file.read_tensor_quantized(backend, info.name);
-        auto x = motifcl::Tensor::randn(backend, {1, k}, 0.02f);
-        backend.profiler.clear();
-        backend.profiler.set_enabled(true);
-        const double direct_ms = bench_ms(backend, opts.warmup, opts.iters, [&]() {
-            return motifcl::matmul(x, weight);
-        });
-        backend.profiler.set_enabled(false);
-        std::cout << "direct_" << motifcl::gguf::tensor_type_name(info.type)
-                  << "_ms=" << std::fixed << std::setprecision(3) << direct_ms << "\n";
-        print_profile(backend);
-
-        if (opts.no_repack || cand.elements > opts.max_elements) {
-            std::cout << "repack_q4_0_col_ms=skipped";
+        motifcl::Tensor q4_tile8;
+        double repack_ms = 0.0;
+        if (!opts.no_repack && cand.elements <= opts.max_elements) {
+            const auto repack_start = Clock::now();
+            q4_tile8 = motifcl::nn::repack_gguf_k_quant_to_q4_0_col(backend, file, info.name, true, true);
+            backend.finish();
+            repack_ms = elapsed_ms(repack_start, Clock::now());
+            std::cout << "repack_q4_0_col_tile8_load_ms=" << std::fixed << std::setprecision(3) << repack_ms << "\n";
+        } else {
+            std::cout << "repack_q4_0_col_tile8_load_ms=skipped";
             if (cand.elements > opts.max_elements) std::cout << " reason=max_elements";
             std::cout << "\n";
-            continue;
         }
 
-        {
-            const auto repack_start = Clock::now();
-            auto q4_col = motifcl::nn::repack_gguf_k_quant_to_q4_0_col(backend, file, info.name, false, true);
+        for (int m : opts.m_values) {
+            auto x_f32 = motifcl::Tensor::randn(backend, {m, k}, 0.02f);
+            auto x_q8 = motifcl::quantize_q8_symmetric_rows(x_f32);
             backend.finish();
-            const double repack_ms = elapsed_ms(repack_start, Clock::now());
+
             backend.profiler.clear();
             backend.profiler.set_enabled(true);
-            const double q4_ms = bench_ms(backend, opts.warmup, opts.iters, [&]() {
-                return motifcl::matmul(x, q4_col);
+            const double direct_ms = bench_ms(backend, opts.warmup, opts.iters, [&]() {
+                return motifcl::matmul(x_q8, weight);
             });
             backend.profiler.set_enabled(false);
-            std::cout << "repack_q4_0_col_load_ms=" << std::fixed << std::setprecision(3) << repack_ms << "\n"
-                      << "repack_q4_0_col_ms=" << q4_ms << "\n"
-                      << "direct_over_repack_q4_0_col_ms_ratio="
-                      << (q4_ms > 0.0 ? direct_ms / q4_ms : 0.0) << "\n";
+            std::cout << "M=" << m
+                      << " direct_" << quant_type_short(info.type) << "_prefill_ms="
+                      << std::fixed << std::setprecision(3) << direct_ms
+                      << " direct_per_row_ms=" << (direct_ms / static_cast<double>(m)) << "\n";
             print_profile(backend);
-        }
 
-        {
-            const auto repack_start = Clock::now();
-            auto q4_tile8 = motifcl::nn::repack_gguf_k_quant_to_q4_0_col(backend, file, info.name, true, true);
+            if (!q4_tile8.valid()) continue;
+            std::vector<motifcl::Tensor> rows;
+            rows.reserve(static_cast<std::size_t>(m));
+            for (int r = 0; r < m; ++r) {
+                rows.push_back(motifcl::Tensor::randn(backend, {1, k}, 0.02f));
+            }
             backend.finish();
-            const double repack_ms = elapsed_ms(repack_start, Clock::now());
             backend.profiler.clear();
             backend.profiler.set_enabled(true);
-            const double q4_ms = bench_ms(backend, opts.warmup, opts.iters, [&]() {
-                return motifcl::matmul(x, q4_tile8);
+            const double stream_ms = bench_ms(backend, opts.warmup, opts.iters, [&]() {
+                motifcl::Tensor y;
+                for (const auto& row : rows) y = motifcl::matmul(row, q4_tile8);
+                return y;
             });
             backend.profiler.set_enabled(false);
-            std::cout << "repack_q4_0_col_tile8_load_ms=" << std::fixed << std::setprecision(3) << repack_ms << "\n"
-                      << "repack_q4_0_col_tile8_ms=" << q4_ms << "\n"
-                      << "direct_over_repack_q4_0_col_tile8_ms_ratio="
-                      << (q4_ms > 0.0 ? direct_ms / q4_ms : 0.0) << "\n";
+            std::cout << "M=" << m
+                      << " repack_q4_0_col_tile8_stream_ms=" << std::fixed << std::setprecision(3) << stream_ms
+                      << " stream_per_row_ms=" << (stream_ms / static_cast<double>(m))
+                      << " direct_over_stream_ratio=" << (stream_ms > 0.0 ? direct_ms / stream_ms : 0.0)
+                      << "\n";
             print_profile(backend);
         }
     }

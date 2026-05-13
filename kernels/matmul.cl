@@ -1506,6 +1506,7 @@ __kernel void KERNEL_NAME(__global const char* A, \
 }
 
 DEFINE_MATMUL_Q8_QK_ROW4_F32(matmul_q8_q4_k_row4_f32, gguf_q4_k_value)
+DEFINE_MATMUL_Q8_QK_ROW4_F32(matmul_q8_q6_k_row4_f32, gguf_q6_k_value)
 
 #undef DEFINE_MATMUL_Q8_QK_ROW4_F32
 
