@@ -2477,6 +2477,107 @@ __kernel void grouped_query_attention_windowed_f32(__global const float* q,
     out[gid] = denom > 0.0f ? acc / denom : 0.0f;
 }
 
+__kernel void grouped_query_attention_prefill_wg_f32(__global const float* q,
+                                                     __global const float* k,
+                                                     __global const float* v,
+                                                     __global float* out,
+                                                     int batch,
+                                                     int query_tokens,
+                                                     int key_tokens,
+                                                     int n_head,
+                                                     int n_kv_head,
+                                                     int head_dim,
+                                                     int causal,
+                                                     int query_offset,
+                                                     int sliding_window,
+                                                     int key_stride,
+                                                     float scale,
+                                                     __local float* scratch) {
+    int group_id = get_group_id(0);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int query_token = group_id % query_tokens;
+    int head_batch = group_id / query_tokens;
+    int q_head = head_batch % n_head;
+    int b = head_batch / n_head;
+    if (b >= batch) return;
+
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_base = (b * query_tokens + query_token) * q_channels + q_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int abs_query = query_offset + query_token;
+
+    int min_key = 0;
+    if (sliding_window > 0) {
+        min_key = abs_query - sliding_window + 1;
+        if (min_key < 0) min_key = 0;
+    }
+    int max_key = key_tokens - 1;
+    if (causal && abs_query < max_key) max_key = abs_query;
+    int valid = max_key >= min_key ? (max_key - min_key + 1) : 0;
+
+    if (valid <= 0) {
+        int out_base_zero = (b * query_tokens + query_token) * q_channels + q_head * head_dim;
+        for (int d = lid; d < head_dim; d += local_size) out[out_base_zero + d] = 0.0f;
+        return;
+    }
+
+    __local float* scores = scratch;
+    __local float* red = scratch + valid;
+
+    for (int idx = lid; idx < valid; idx += local_size) {
+        int kt = min_key + idx;
+        int k_base = (b * key_stride + kt) * kv_channels + kv_head_offset;
+        float dot = 0.0f;
+        for (int i = 0; i < head_dim; ++i) dot += q[q_base + i] * k[k_base + i];
+        scores[idx] = dot * scale;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    float local_max = -3.402823466e+38F;
+    for (int idx = lid; idx < valid; idx += local_size) {
+        local_max = fmax(local_max, scores[idx]);
+    }
+    red[lid] = local_max;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) red[lid] = fmax(red[lid], red[lid + stride]);
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float max_score = red[0];
+
+    float local_denom = 0.0f;
+    for (int idx = lid; idx < valid; idx += local_size) {
+        float p = exp(scores[idx] - max_score);
+        scores[idx] = p;
+        local_denom += p;
+    }
+    red[lid] = local_denom;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) red[lid] += red[lid + stride];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float denom = red[0];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    int out_base = (b * query_tokens + query_token) * q_channels + q_head * head_dim;
+    for (int d = lid; d < head_dim; d += local_size) {
+        float acc = 0.0f;
+        if (denom > 0.0f) {
+            for (int idx = 0; idx < valid; ++idx) {
+                int kt = min_key + idx;
+                acc += scores[idx] * v[(b * key_stride + kt) * kv_channels + kv_head_offset + d];
+            }
+            acc /= denom;
+        }
+        out[out_base + d] = acc;
+    }
+}
+
 __kernel void grouped_query_attention_decode_f32(__global const float* q,
                                                  __global const float* k,
                                                  __global const float* v,

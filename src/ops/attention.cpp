@@ -7,6 +7,7 @@
 #include <motifcl/ops/basic_ops.hpp>
 #include <motifcl/runtime/backend.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cmath>
 #include <memory>
@@ -22,6 +23,11 @@ constexpr int64_t kFlashAttentionMaxHeadDim = 128;
 constexpr int64_t kStagedAttentionMaxSeqLen = 128;
 
 bool can_use_grouped_query_decode_wg(const Backend& backend, int64_t query_tokens, int64_t key_tokens, bool causal);
+bool can_use_grouped_query_prefill_wg(const Backend& backend,
+                                      int64_t query_tokens,
+                                      int64_t key_tokens,
+                                      int sliding_window,
+                                      bool causal);
 Tensor grouped_query_attention_decode_wg(const Tensor& q,
                                          const Tensor& k,
                                          const Tensor& v,
@@ -33,6 +39,19 @@ Tensor grouped_query_attention_decode_wg(const Tensor& q,
                                          int64_t key_stride,
                                          int64_t query_offset,
                                          int64_t head_dim);
+Tensor grouped_query_attention_prefill_wg(const Tensor& q,
+                                          const Tensor& k,
+                                          const Tensor& v,
+                                          int n_head,
+                                          int n_kv_head,
+                                          int sliding_window,
+                                          bool causal,
+                                          int64_t batch,
+                                          int64_t query_tokens,
+                                          int64_t key_tokens,
+                                          int64_t key_stride,
+                                          int64_t query_offset,
+                                          int64_t head_dim);
 
 int env_int(const char* name, int fallback) {
     if (const char* env = std::getenv(name)) {
@@ -580,6 +599,13 @@ Tensor grouped_query_attention(const Tensor& q, const Tensor& k, const Tensor& v
                                                  s.batch, s.key_tokens, s.key_stride,
                                                  query_offset, s.head_dim);
     }
+    const bool needs_grad = autograd::is_enabled() && (q.requires_grad() || k.requires_grad() || v.requires_grad());
+    if (!needs_grad && can_use_grouped_query_prefill_wg(q.backend(), s.query_tokens, s.key_tokens, 0, causal)) {
+        return grouped_query_attention_prefill_wg(q, k, v, n_head, n_kv_head, 0,
+                                                  causal,
+                                                  s.batch, s.query_tokens, s.key_tokens,
+                                                  s.key_stride, query_offset, s.head_dim);
+    }
     auto out = Tensor::empty(q.backend(), q.shape(), DType::F32);
     auto kernel = q.backend().kernels.get("grouped_query_attention_f32");
     const float scale_value = 1.0f / std::sqrt(static_cast<float>(s.head_dim));
@@ -621,6 +647,13 @@ Tensor grouped_query_attention_windowed(const Tensor& q, const Tensor& k, const 
         return grouped_query_attention_decode_wg(q, k, v, n_head, n_kv_head, sliding_window,
                                                  s.batch, s.key_tokens, s.key_stride,
                                                  query_offset, s.head_dim);
+    }
+    const bool needs_grad = autograd::is_enabled() && (q.requires_grad() || k.requires_grad() || v.requires_grad());
+    if (!needs_grad && can_use_grouped_query_prefill_wg(q.backend(), s.query_tokens, s.key_tokens, sliding_window, causal)) {
+        return grouped_query_attention_prefill_wg(q, k, v, n_head, n_kv_head, sliding_window,
+                                                  causal,
+                                                  s.batch, s.query_tokens, s.key_tokens,
+                                                  s.key_stride, query_offset, s.head_dim);
     }
     auto out = Tensor::empty(q.backend(), q.shape(), DType::F32);
     auto kernel = q.backend().kernels.get("grouped_query_attention_windowed_f32");
@@ -1624,12 +1657,33 @@ bool grouped_query_decode_wg_enabled() {
              std::string(env) != "false" && std::string(env) != "FALSE");
 }
 
+bool grouped_query_prefill_wg_enabled() {
+    const char* env = std::getenv("MOTIFCL_DISABLE_GQA_PREFILL_WG");
+    return !(env && *env && std::string(env) != "0" &&
+             std::string(env) != "false" && std::string(env) != "FALSE");
+}
+
 bool can_use_grouped_query_decode_wg(const Backend& backend, int64_t query_tokens, int64_t key_tokens, bool causal) {
     constexpr std::size_t kLocal = 256;
     if (!grouped_query_decode_wg_enabled() || !causal || query_tokens != 1 || key_tokens <= 0) return false;
     const auto& info = backend.device_info();
     if (info.max_work_group_size < kLocal) return false;
     const std::size_t local_bytes = (static_cast<std::size_t>(key_tokens) + kLocal) * sizeof(float);
+    return local_bytes <= info.local_mem_size;
+}
+
+bool can_use_grouped_query_prefill_wg(const Backend& backend,
+                                      int64_t query_tokens,
+                                      int64_t key_tokens,
+                                      int sliding_window,
+                                      bool causal) {
+    constexpr std::size_t kLocal = 256;
+    if (!grouped_query_prefill_wg_enabled() || query_tokens <= 1 || key_tokens <= 0) return false;
+    const auto& info = backend.device_info();
+    if (info.max_work_group_size < kLocal) return false;
+    int64_t attended_keys = key_tokens;
+    if (sliding_window > 0 && causal) attended_keys = std::min<int64_t>(attended_keys, sliding_window);
+    const std::size_t local_bytes = (static_cast<std::size_t>(attended_keys) + kLocal) * sizeof(float);
     return local_bytes <= info.local_mem_size;
 }
 
@@ -1665,6 +1719,48 @@ Tensor grouped_query_attention_decode_wg(const Tensor& q,
     kernel.launch1d(static_cast<std::size_t>(batch * n_head) * kLocal, kLocal);
     autograd::record_op(sliding_window > 0 ? "grouped_query_attention_decode_windowed_f32"
                                            : "grouped_query_attention_decode_f32",
+                        {q.id(), k.id(), v.id()}, {out.id()});
+    return out;
+}
+
+Tensor grouped_query_attention_prefill_wg(const Tensor& q,
+                                          const Tensor& k,
+                                          const Tensor& v,
+                                          int n_head,
+                                          int n_kv_head,
+                                          int sliding_window,
+                                          bool causal,
+                                          int64_t batch,
+                                          int64_t query_tokens,
+                                          int64_t key_tokens,
+                                          int64_t key_stride,
+                                          int64_t query_offset,
+                                          int64_t head_dim) {
+    auto out = Tensor::empty(q.backend(), q.shape(), DType::F32);
+    auto kernel = q.backend().kernels.get("grouped_query_attention_prefill_wg_f32");
+    constexpr int kLocal = 256;
+    const float scale_value = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    int64_t attended_keys = key_tokens;
+    if (sliding_window > 0 && causal) attended_keys = std::min<int64_t>(attended_keys, sliding_window);
+    kernel.set_arg(0, q.buffer());
+    kernel.set_arg(1, k.buffer());
+    kernel.set_arg(2, v.buffer());
+    kernel.set_arg(3, out.buffer());
+    kernel.set_arg(4, static_cast<int>(batch));
+    kernel.set_arg(5, static_cast<int>(query_tokens));
+    kernel.set_arg(6, static_cast<int>(key_tokens));
+    kernel.set_arg(7, n_head);
+    kernel.set_arg(8, n_kv_head);
+    kernel.set_arg(9, static_cast<int>(head_dim));
+    kernel.set_arg(10, causal ? 1 : 0);
+    kernel.set_arg(11, static_cast<int>(query_offset));
+    kernel.set_arg(12, sliding_window);
+    kernel.set_arg(13, static_cast<int>(key_stride));
+    kernel.set_arg(14, scale_value);
+    kernel.set_arg_local(15, (static_cast<std::size_t>(attended_keys) + kLocal) * sizeof(float));
+    kernel.launch1d(static_cast<std::size_t>(batch * n_head * query_tokens) * kLocal, kLocal);
+    autograd::record_op(sliding_window > 0 ? "grouped_query_attention_prefill_windowed_wg_f32"
+                                           : "grouped_query_attention_prefill_wg_f32",
                         {q.id(), k.id(), v.id()}, {out.id()});
     return out;
 }
