@@ -30,11 +30,14 @@ Tensor Linear::forward(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::F32 && x.ndim() == 2, "Linear expects rank-2 f32 input");
     MCL_CHECK(x.shape()[1] == in_features_, "Linear input feature mismatch");
     if (quantized_weight_.valid() && (!autograd::is_enabled() || !weight.data.valid())) {
-        if ((quantized_weight_dtype_ == DType::Q4_0 || quantized_weight_dtype_ == DType::Q4_0_COL ||
-             quantized_weight_dtype_ == DType::Q4_K || quantized_weight_dtype_ == DType::Q5_K ||
-             quantized_weight_dtype_ == DType::Q6_K) &&
-            x.shape()[0] == 1) {
-            auto y = matmul(x, quantized_weight_);
+        const bool m1 = x.shape()[0] == 1;
+        const Tensor& decode_weight = decode_quantized_weight_.valid() ? decode_quantized_weight_ : quantized_weight_;
+        const DType decode_dtype = decode_quantized_weight_.valid() ? decode_quantized_weight_dtype_ : quantized_weight_dtype_;
+        if ((decode_dtype == DType::Q4_0 || decode_dtype == DType::Q4_0_COL ||
+             decode_dtype == DType::Q4_K || decode_dtype == DType::Q5_K ||
+             decode_dtype == DType::Q6_K) &&
+            m1) {
+            auto y = matmul(x, decode_weight);
             return use_bias_ ? add_bias_rows(y, bias.data) : y;
         }
         auto xq = quantize_q8_symmetric_rows(x);
@@ -60,6 +63,8 @@ void Linear::enable_quantized_inference(DType qdtype) {
     quantized_weight_ = qdtype == DType::Q4_0
         ? quantize_q4_symmetric_cols(weight.data)
         : quantize_q8_symmetric_cols(weight.data);
+    decode_quantized_weight_ = Tensor{};
+    decode_quantized_weight_dtype_ = DType::F32;
 }
 
 void Linear::set_quantized_weight(const Tensor& qweight) {
@@ -71,11 +76,26 @@ void Linear::set_quantized_weight(const Tensor& qweight) {
               "Linear quantized weight shape mismatch");
     quantized_weight_ = qweight;
     quantized_weight_dtype_ = qweight.dtype();
+    decode_quantized_weight_ = Tensor{};
+    decode_quantized_weight_dtype_ = DType::F32;
+}
+
+void Linear::set_decode_quantized_weight(const Tensor& qweight) {
+    MCL_CHECK(qweight.valid() && (qweight.dtype() == DType::Q8_0 || qweight.dtype() == DType::Q4_0 ||
+                                  qweight.dtype() == DType::Q4_0_COL || qweight.dtype() == DType::Q4_K ||
+                                  qweight.dtype() == DType::Q5_K || qweight.dtype() == DType::Q6_K),
+              "Linear decode quantized weight must be Q8_0, Q4_0, Q4_0_COL, Q4_K, Q5_K, or Q6_K");
+    MCL_CHECK(qweight.ndim() == 2 && qweight.shape()[0] == in_features_ && qweight.shape()[1] == out_features_,
+              "Linear decode quantized weight shape mismatch");
+    decode_quantized_weight_ = qweight;
+    decode_quantized_weight_dtype_ = qweight.dtype();
 }
 
 void Linear::disable_quantized_inference() {
     quantized_weight_ = Tensor{};
     quantized_weight_dtype_ = DType::F32;
+    decode_quantized_weight_ = Tensor{};
+    decode_quantized_weight_dtype_ = DType::F32;
 }
 
 } // namespace motifcl::nn

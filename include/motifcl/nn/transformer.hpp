@@ -495,6 +495,7 @@ public:
     void enable_quantized_inference(DType qdtype = DType::Q4_0);
     void enable_quantized_inference(const QuantizationPolicy& policy);
     void set_quantized_lm_head(const Tensor& weight);
+    void set_decode_quantized_lm_head(const Tensor& weight);
     void disable_quantized_inference();
     bool quantized_inference_enabled() const { return quantized_lm_head_.valid(); }
     DType quantized_weight_dtype() const { return quantized_weight_dtype_; }
@@ -503,7 +504,9 @@ public:
 private:
     bool use_positions_ = false;
     Tensor quantized_lm_head_;
+    Tensor decode_quantized_lm_head_;
     DType quantized_weight_dtype_ = DType::F32;
+    DType decode_quantized_lm_head_dtype_ = DType::F32;
     Tensor input_embeddings(const Tensor& token_ids, int64_t batch_size, int64_t seq_len);
     Tensor compute_per_layer_inputs(const Tensor& token_ids,
                                     const Tensor& inputs_embeds,
@@ -546,6 +549,7 @@ public:
                                             bool use_paged_kv = false,
                                             int64_t page_size = 256) const;
     void set_quantized_lm_head(const Tensor& weight);
+    void set_decode_quantized_lm_head(const Tensor& weight);
     void disable_quantized_inference();
     bool quantized_inference_enabled() const { return quantized_lm_head_.valid(); }
     DType quantized_weight_dtype() const { return quantized_weight_dtype_; }
@@ -554,7 +558,9 @@ public:
 private:
     bool use_positions_ = false;
     Tensor quantized_lm_head_;
+    Tensor decode_quantized_lm_head_;
     DType quantized_weight_dtype_ = DType::F32;
+    DType decode_quantized_lm_head_dtype_ = DType::F32;
     Tensor project_logits(const Tensor& h);
 };
 

@@ -17,10 +17,13 @@ public:
 
     void enable_quantized_inference(DType qdtype = DType::Q4_0);
     void set_quantized_weight(const Tensor& weight);
+    void set_decode_quantized_weight(const Tensor& weight);
     void disable_quantized_inference();
     bool quantized_inference_enabled() const { return quantized_weight_.valid(); }
     DType quantized_weight_dtype() const { return quantized_weight_dtype_; }
     const Tensor& quantized_weight() const { return quantized_weight_; }
+    DType decode_quantized_weight_dtype() const { return decode_quantized_weight_dtype_; }
+    const Tensor& decode_quantized_weight() const { return decode_quantized_weight_; }
 
     int in_features() const { return in_features_; }
     int out_features() const { return out_features_; }
@@ -32,6 +35,8 @@ private:
     bool use_bias_ = true;
     Tensor quantized_weight_;
     DType quantized_weight_dtype_ = DType::F32;
+    Tensor decode_quantized_weight_;
+    DType decode_quantized_weight_dtype_ = DType::F32;
 };
 
 } // namespace motifcl::nn

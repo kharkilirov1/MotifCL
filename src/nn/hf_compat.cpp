@@ -412,6 +412,17 @@ bool repack_gguf_k_quant_to_q4_0_tile8() {
            (repack_gguf_k_quant_to_q4_0_col() && !env_flag_enabled("MOTIFCL_DISABLE_Q4_0_TILE8_REPACK"));
 }
 
+bool decode_repack_gguf_k_quant_to_q4_0_col() {
+    return !env_flag_enabled("MOTIFCL_DISABLE_GGUF_DECODE_REPACK") &&
+           !env_flag_enabled("MOTIFCL_DISABLE_GGUF_DECODE_Q4_0_COL_REPACK");
+}
+
+bool decode_repack_gguf_k_quant_to_q4_0_tile8() {
+    return decode_repack_gguf_k_quant_to_q4_0_col() &&
+           !env_flag_enabled("MOTIFCL_DISABLE_GGUF_DECODE_Q4_0_TILE8_REPACK") &&
+           !env_flag_enabled("MOTIFCL_DISABLE_Q4_0_TILE8_REPACK");
+}
+
 bool gguf_type_is_k_quant(gguf::TensorType type) {
     return type == gguf::TensorType::Q4_K || type == gguf::TensorType::Q5_K || type == gguf::TensorType::Q6_K;
 }
@@ -1028,14 +1039,53 @@ Tensor gguf_quantized_matrix_for_shape(Backend& backend,
     return quantize_q8_symmetric_cols(dense);
 }
 
+Tensor gguf_primary_quantized_matrix_for_shape(Backend& backend,
+                                               const gguf::File& file,
+                                               const std::string& name,
+                                               int64_t rows,
+                                               int64_t cols) {
+    const auto& info = file.tensor_info(name);
+    const bool direct = gguf_shape_is_direct_matrix(info, rows, cols);
+    if (direct) return file.read_tensor_quantized(backend, name);
+    MCL_CHECK(gguf_shape_is_transposed_matrix(info, rows, cols),
+              "packed GGUF tensor shape mismatch for " + name);
+    const auto values = transpose_2d(gguf_tensor_f32(file, name), cols, rows);
+    auto dense = tensor_from_f32(backend, {rows, cols}, values);
+    if (info.type == gguf::TensorType::Q4_0) return quantize_q4_symmetric_cols(dense);
+    return quantize_q8_symmetric_cols(dense);
+}
+
 bool apply_gguf_quantized_linear(Backend& backend,
                                  const gguf::File& file,
                                  const std::string& name,
                                  Linear& linear,
                                  HFWeightLoadReport& report) {
     if (!gguf_tensor_is_native_quant(file, name)) return false;
-    const auto direct = gguf_shape_is_direct_matrix(file.tensor_info(name),
-                                                   linear.in_features(), linear.out_features());
+    const auto& info = file.tensor_info(name);
+    const auto direct = gguf_shape_is_direct_matrix(info, linear.in_features(), linear.out_features());
+    const auto transposed = gguf_shape_is_transposed_matrix(info, linear.in_features(), linear.out_features());
+    MCL_CHECK(direct || transposed, "packed GGUF tensor shape mismatch for " + name);
+    const bool decode_tile8 = repack_gguf_k_quant_to_q4_0_tile8() ||
+                              decode_repack_gguf_k_quant_to_q4_0_tile8();
+    const bool decode_q4_col = decode_tile8 ||
+                               repack_gguf_k_quant_to_q4_0_col() ||
+                               decode_repack_gguf_k_quant_to_q4_0_col();
+    if (gguf_type_is_k_quant(info.type) && decode_q4_col) {
+        auto primary = gguf_primary_quantized_matrix_for_shape(backend, file, name,
+                                                               linear.in_features(), linear.out_features());
+        auto decode = decode_tile8
+            ? gguf_k_quant_matrix_to_q4_0_tile8(backend, file, name,
+                                                linear.in_features(), linear.out_features(), direct)
+            : gguf_k_quant_matrix_to_q4_0_col(backend, file, name,
+                                              linear.in_features(), linear.out_features(), direct);
+        linear.set_quantized_weight(primary);
+        linear.set_decode_quantized_weight(decode);
+        const char* decode_label = decode_tile8 ? "decode_q4_0_tile8" : "decode_q4_0_col";
+        report.applied.push_back(name + (direct ? "->packed_quant+" :
+                                                  "->packed_quant_repacked_transpose+") + decode_label);
+        ++report.loaded_tensors;
+        return true;
+    }
     auto q = gguf_quantized_matrix_for_shape(backend, file, name,
                                             linear.in_features(), linear.out_features());
     linear.set_quantized_weight(q);
@@ -1050,8 +1100,31 @@ bool apply_gguf_quantized_lm_head(Backend& backend,
                                   ModernGPTModel& model,
                                   HFWeightLoadReport& report) {
     if (!gguf_tensor_is_native_quant(file, name)) return false;
-    const auto direct = gguf_shape_is_direct_matrix(file.tensor_info(name),
-                                                   model.config.n_embd, model.config.vocab_size);
+    const auto& info = file.tensor_info(name);
+    const auto direct = gguf_shape_is_direct_matrix(info, model.config.n_embd, model.config.vocab_size);
+    const auto transposed = gguf_shape_is_transposed_matrix(info, model.config.n_embd, model.config.vocab_size);
+    MCL_CHECK(direct || transposed, "packed GGUF tensor shape mismatch for " + name);
+    const bool decode_tile8 = repack_gguf_k_quant_to_q4_0_tile8() ||
+                              decode_repack_gguf_k_quant_to_q4_0_tile8();
+    const bool decode_q4_col = decode_tile8 ||
+                               repack_gguf_k_quant_to_q4_0_col() ||
+                               decode_repack_gguf_k_quant_to_q4_0_col();
+    if (gguf_type_is_k_quant(info.type) && decode_q4_col) {
+        auto primary = gguf_primary_quantized_matrix_for_shape(backend, file, name,
+                                                               model.config.n_embd, model.config.vocab_size);
+        auto decode = decode_tile8
+            ? gguf_k_quant_matrix_to_q4_0_tile8(backend, file, name,
+                                                model.config.n_embd, model.config.vocab_size, direct)
+            : gguf_k_quant_matrix_to_q4_0_col(backend, file, name,
+                                              model.config.n_embd, model.config.vocab_size, direct);
+        model.set_quantized_lm_head(primary);
+        model.set_decode_quantized_lm_head(decode);
+        const char* decode_label = decode_tile8 ? "decode_q4_0_tile8" : "decode_q4_0_col";
+        report.applied.push_back(name + (direct ? "->lm_head.packed_quant+" :
+                                                  "->lm_head.packed_quant_repacked_transpose+") + decode_label);
+        ++report.loaded_tensors;
+        return true;
+    }
     auto q = gguf_quantized_matrix_for_shape(backend, file, name,
                                             model.config.n_embd, model.config.vocab_size);
     model.set_quantized_lm_head(q);

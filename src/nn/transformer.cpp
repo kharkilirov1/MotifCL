@@ -347,6 +347,16 @@ bool q4_0_col_tile8_layout(const Tensor& weight) {
     return weight.valid() && weight.dtype() == DType::Q4_0_COL && weight.quant_scale_axis() == 4;
 }
 
+const Tensor& decode_quantized_weight(const Linear& layer) {
+    return layer.decode_quantized_weight().valid() ? layer.decode_quantized_weight() : layer.quantized_weight();
+}
+
+DType decode_quantized_weight_dtype(const Linear& layer) {
+    return layer.decode_quantized_weight().valid()
+        ? layer.decode_quantized_weight_dtype()
+        : layer.quantized_weight_dtype();
+}
+
 bool can_use_fused_silu_down_q4_0_col(const Tensor& gate, const Tensor& up, const Linear& down) {
     if (!env_enabled("MOTIFCL_ENABLE_FUSED_SILU_DOWN_Q4_0_COL") ||
         env_enabled("MOTIFCL_DISABLE_FUSED_SILU_DOWN_Q4_0_COL") ||
@@ -355,18 +365,19 @@ bool can_use_fused_silu_down_q4_0_col(const Tensor& gate, const Tensor& up, cons
     }
     if (!gate.valid() || !up.valid() || gate.dtype() != DType::F32 || up.dtype() != DType::F32) return false;
     if (gate.ndim() != 2 || up.ndim() != 2 || gate.shape() != up.shape() || gate.shape()[0] != 1) return false;
-    if (!down.quantized_inference_enabled() || down.quantized_weight_dtype() != DType::Q4_0_COL ||
-        !down.quantized_weight().valid() || down.has_bias()) {
+    const Tensor& down_weight = decode_quantized_weight(down);
+    if (!down.quantized_inference_enabled() || decode_quantized_weight_dtype(down) != DType::Q4_0_COL ||
+        !down_weight.valid() || down.has_bias()) {
         return false;
     }
-    if (down.quantized_weight().shape()[0] != gate.shape()[1] ||
-        down.quantized_weight().shape()[1] != down.out_features()) {
+    if (down_weight.shape()[0] != gate.shape()[1] ||
+        down_weight.shape()[1] != down.out_features()) {
         return false;
     }
-    if (gate.backend_ptr() != up.backend_ptr() || gate.backend_ptr() != down.quantized_weight().backend_ptr()) return false;
+    if (gate.backend_ptr() != up.backend_ptr() || gate.backend_ptr() != down_weight.backend_ptr()) return false;
     if (gate.backend().device_info().max_work_group_size < 64) return false;
-    if (!down.quantized_weight().has_quant_scales()) return false;
-    const int axis = down.quantized_weight().quant_scale_axis();
+    if (!down_weight.has_quant_scales()) return false;
+    const int axis = down_weight.quant_scale_axis();
     return axis == 3 || axis == 4;
 }
 
@@ -374,22 +385,23 @@ Tensor fused_silu_down_q4_0_col(const Tensor& gate, const Tensor& up, const Line
     MCL_CHECK(can_use_fused_silu_down_q4_0_col(gate, up, down),
               "fused_silu_down_q4_0_col expects one-token SwiGLU input and Q4_0_COL down weight");
     auto out = Tensor::empty(gate.backend(), {1, down.out_features()}, DType::F32);
-    const bool tile8 = down.quantized_weight().quant_scale_axis() == 4;
+    const Tensor& down_weight = decode_quantized_weight(down);
+    const bool tile8 = down_weight.quant_scale_axis() == 4;
     const char* kernel_name = tile8
         ? "matmul_silu_product_q4_0_tile8_m1_wg64x8_f32"
         : "matmul_silu_product_q4_0_col_m1_wg64x4_f32";
     auto kernel = gate.backend().kernels.get(kernel_name);
     const int n = down.out_features();
     const int kdim = static_cast<int>(gate.shape()[1]);
-    const int block = q4_0_col_block_size(down.quantized_weight());
+    const int block = q4_0_col_block_size(down_weight);
     MCL_CHECK(!tile8 || (kdim % block) == 0,
               "Q4_0_COL tile8 fused SwiGLU down requires K divisible by block size");
     const int blocks_per_col = (kdim + block - 1) / block;
-    auto scales = down.quantized_weight().quant_scales();
+    auto scales = down_weight.quant_scales();
     constexpr std::size_t kLocal = 64;
     kernel.set_arg(0, gate.buffer());
     kernel.set_arg(1, up.buffer());
-    kernel.set_arg(2, down.quantized_weight().buffer());
+    kernel.set_arg(2, down_weight.buffer());
     kernel.set_arg(3, scales.buffer());
     kernel.set_arg(4, out.buffer());
     kernel.set_arg(5, n);
@@ -402,31 +414,33 @@ Tensor fused_silu_down_q4_0_col(const Tensor& gate, const Tensor& up, const Line
         : (static_cast<std::size_t>(n) + 3u) / 4u;
     kernel.launch1d(groups * kLocal, kLocal);
     autograd::record_op(kernel_name,
-                        {gate.id(), up.id(), down.quantized_weight().id(), scales.id()},
+                        {gate.id(), up.id(), down_weight.id(), scales.id()},
                         {out.id()});
     return out;
 }
 
 bool can_use_fused_decode_projection(const Tensor& x, const Linear& layer) {
+    const Tensor& qweight = decode_quantized_weight(layer);
+    const DType qdtype = decode_quantized_weight_dtype(layer);
     return x.valid() &&
            x.dtype() == DType::F32 &&
            x.ndim() == 2 &&
            x.shape()[0] == 1 &&
            layer.quantized_inference_enabled() &&
-           is_direct_decode_quant_dtype(layer.quantized_weight_dtype()) &&
-           layer.quantized_weight().valid() &&
-           layer.quantized_weight().ndim() == 2 &&
-           layer.quantized_weight().shape()[0] == x.shape()[1] &&
-           layer.quantized_weight().shape()[1] == layer.out_features() &&
+           is_direct_decode_quant_dtype(qdtype) &&
+           qweight.valid() &&
+           qweight.ndim() == 2 &&
+           qweight.shape()[0] == x.shape()[1] &&
+           qweight.shape()[1] == layer.out_features() &&
            !layer.has_bias() &&
            (!autograd::is_enabled() || !layer.weight.data.valid()) &&
-           x.backend_ptr() == layer.quantized_weight().backend_ptr();
+           x.backend_ptr() == qweight.backend_ptr();
 }
 
 bool can_use_fused_decode_projection_pair(const Tensor& x, const Linear& a, const Linear& b) {
     return can_use_fused_decode_projection(x, a) &&
            can_use_fused_decode_projection(x, b) &&
-           a.quantized_weight_dtype() == b.quantized_weight_dtype();
+           decode_quantized_weight_dtype(a) == decode_quantized_weight_dtype(b);
 }
 
 bool can_use_fused_decode_projection_triple(const Tensor& x,
@@ -435,7 +449,7 @@ bool can_use_fused_decode_projection_triple(const Tensor& x,
                                             const Linear& c) {
     return can_use_fused_decode_projection_pair(x, a, b) &&
            can_use_fused_decode_projection(x, c) &&
-           a.quantized_weight_dtype() == c.quantized_weight_dtype();
+           decode_quantized_weight_dtype(a) == decode_quantized_weight_dtype(c);
 }
 
 std::pair<Tensor, Tensor> fused_decode_projection_pair(const Tensor& x,
@@ -448,22 +462,25 @@ std::pair<Tensor, Tensor> fused_decode_projection_pair(const Tensor& x,
     const int n0 = a.out_features();
     const int n1 = b.out_features();
     const int in = static_cast<int>(x.shape()[1]);
+    const Tensor& weight_a = decode_quantized_weight(a);
+    const Tensor& weight_b = decode_quantized_weight(b);
+    const DType weight_dtype = decode_quantized_weight_dtype(a);
     constexpr int kLocal = 128;
     const int total = n0 + n1;
     const bool can_wg = in >= kLocal &&
                         x.backend().device_info().max_work_group_size >= static_cast<std::size_t>(kLocal) &&
                         !env_enabled("MOTIFCL_DISABLE_KQUANT_M1_WG");
     const bool use_wg4 = can_wg &&
-                         (a.quantized_weight_dtype() == DType::Q4_0_COL ||
-                          (a.quantized_weight_dtype() == DType::Q4_K &&
+                         (weight_dtype == DType::Q4_0_COL ||
+                          (weight_dtype == DType::Q4_K &&
                            env_enabled("MOTIFCL_ENABLE_KQUANT_PAIR_WG4"))) &&
                          total <= 32768;
     const bool use_wg = !use_wg4 && total <= 32768 && can_wg && env_enabled("MOTIFCL_ENABLE_KQUANT_PAIR_WG");
-    const bool q4_tile8 = a.quantized_weight_dtype() == DType::Q4_0_COL &&
-                          q4_0_col_tile8_layout(a.quantized_weight()) &&
-                          q4_0_col_tile8_layout(b.quantized_weight());
+    const bool q4_tile8 = weight_dtype == DType::Q4_0_COL &&
+                          q4_0_col_tile8_layout(weight_a) &&
+                          q4_0_col_tile8_layout(weight_b);
     const bool use_q4col_wg64x4 = use_wg4 &&
-                                  a.quantized_weight_dtype() == DType::Q4_0_COL &&
+                                  weight_dtype == DType::Q4_0_COL &&
                                   !q4_tile8 &&
                                   q4_0_col_wg64x4_enabled() &&
                                   x.backend().device_info().max_work_group_size >= 64;
@@ -474,29 +491,29 @@ std::pair<Tensor, Tensor> fused_decode_projection_pair(const Tensor& x,
         ? "matmul_f32_q4_0_tile8_m1_2out_wg64x8_f32"
         : (use_q4col_wg64x4
         ? "matmul_f32_q4_0_col_m1_2out_wg64x4_f32"
-        : (use_wg4 ? fused_decode_pair_wg4_kernel_name(a.quantized_weight_dtype())
-                   : fused_decode_pair_kernel_name(a.quantized_weight_dtype(), use_wg)));
+        : (use_wg4 ? fused_decode_pair_wg4_kernel_name(weight_dtype)
+                   : fused_decode_pair_kernel_name(weight_dtype, use_wg)));
     auto k = x.backend().kernels.get(kernel_name);
-    std::vector<int> graph_inputs{x.id(), a.quantized_weight().id(), b.quantized_weight().id()};
-    if (a.quantized_weight_dtype() == DType::Q4_0_COL) {
+    std::vector<int> graph_inputs{x.id(), weight_a.id(), weight_b.id()};
+    if (weight_dtype == DType::Q4_0_COL) {
         MCL_CHECK(use_wg4, "Q4_0_COL fused decode pair requires wg4 path");
-        const int block = q4_0_col_block_size(a.quantized_weight());
-        MCL_CHECK(q4_0_col_block_size(b.quantized_weight()) == block,
+        const int block = q4_0_col_block_size(weight_a);
+        MCL_CHECK(q4_0_col_block_size(weight_b) == block,
                   "Q4_0_COL fused decode pair expects matching block sizes");
-        MCL_CHECK(a.quantized_weight().quant_scale_axis() == b.quantized_weight().quant_scale_axis(),
+        MCL_CHECK(weight_a.quant_scale_axis() == weight_b.quant_scale_axis(),
                   "Q4_0_COL fused decode pair expects matching layouts");
         MCL_CHECK(!q4_tile8 || (in % block) == 0,
                   "Q4_0_COL tile8 fused decode pair requires K divisible by block size");
         const int blocks_per_col = (in + block - 1) / block;
-        auto scales_a = a.quantized_weight().quant_scales();
-        auto scales_b = b.quantized_weight().quant_scales();
+        auto scales_a = weight_a.quant_scales();
+        auto scales_b = weight_b.quant_scales();
         graph_inputs = {x.id(),
-                        a.quantized_weight().id(), scales_a.id(),
-                        b.quantized_weight().id(), scales_b.id()};
+                        weight_a.id(), scales_a.id(),
+                        weight_b.id(), scales_b.id()};
         k.set_arg(0, x.buffer());
-        k.set_arg(1, a.quantized_weight().buffer());
+        k.set_arg(1, weight_a.buffer());
         k.set_arg(2, scales_a.buffer());
-        k.set_arg(3, b.quantized_weight().buffer());
+        k.set_arg(3, weight_b.buffer());
         k.set_arg(4, scales_b.buffer());
         k.set_arg(5, out_a.buffer());
         k.set_arg(6, out_b.buffer());
@@ -512,8 +529,8 @@ std::pair<Tensor, Tensor> fused_decode_projection_pair(const Tensor& x,
         k.launch1d(groups * local, local);
     } else {
         k.set_arg(0, x.buffer());
-        k.set_arg(1, a.quantized_weight().buffer());
-        k.set_arg(2, b.quantized_weight().buffer());
+        k.set_arg(1, weight_a.buffer());
+        k.set_arg(2, weight_b.buffer());
         k.set_arg(3, out_a.buffer());
         k.set_arg(4, out_b.buffer());
         k.set_arg(5, n0);
@@ -546,11 +563,13 @@ bool can_use_fused_decode_projection_pair_rmsnorm(const Tensor& x,
     if (!norm.weight.data.valid() || norm.weight.data.dtype() != DType::F32 || norm.weight.data.ndim() != 1) return false;
     if (norm.weight.data.shape()[0] != x.shape()[1]) return false;
     if (x.backend_ptr() != norm.weight.data.backend_ptr()) return false;
-    if (a.quantized_weight_dtype() != DType::Q4_0_COL) return false;
-    if (!q4_0_col_tile8_layout(a.quantized_weight()) || !q4_0_col_tile8_layout(b.quantized_weight())) return false;
-    const int block = q4_0_col_block_size(a.quantized_weight());
-    if (q4_0_col_block_size(b.quantized_weight()) != block) return false;
-    if (a.quantized_weight().quant_scale_axis() != b.quantized_weight().quant_scale_axis()) return false;
+    const Tensor& weight_a = decode_quantized_weight(a);
+    const Tensor& weight_b = decode_quantized_weight(b);
+    if (decode_quantized_weight_dtype(a) != DType::Q4_0_COL) return false;
+    if (!q4_0_col_tile8_layout(weight_a) || !q4_0_col_tile8_layout(weight_b)) return false;
+    const int block = q4_0_col_block_size(weight_a);
+    if (q4_0_col_block_size(weight_b) != block) return false;
+    if (weight_a.quant_scale_axis() != weight_b.quant_scale_axis()) return false;
     if ((static_cast<int>(x.shape()[1]) % block) != 0) return false;
     return x.backend().device_info().max_work_group_size >= 64;
 }
@@ -567,16 +586,18 @@ std::pair<Tensor, Tensor> fused_decode_projection_pair_rmsnorm(const Tensor& x,
     const int n0 = a.out_features();
     const int n1 = b.out_features();
     const int in = static_cast<int>(x.shape()[1]);
-    const int block = q4_0_col_block_size(a.quantized_weight());
+    const Tensor& weight_a = decode_quantized_weight(a);
+    const Tensor& weight_b = decode_quantized_weight(b);
+    const int block = q4_0_col_block_size(weight_a);
     const int blocks_per_col = (in + block - 1) / block;
-    auto scales_a = a.quantized_weight().quant_scales();
-    auto scales_b = b.quantized_weight().quant_scales();
+    auto scales_a = weight_a.quant_scales();
+    auto scales_b = weight_b.quant_scales();
     constexpr std::size_t kLocal = 64;
     kernel.set_arg(0, x.buffer());
     kernel.set_arg(1, norm.weight.data.buffer());
-    kernel.set_arg(2, a.quantized_weight().buffer());
+    kernel.set_arg(2, weight_a.buffer());
     kernel.set_arg(3, scales_a.buffer());
-    kernel.set_arg(4, b.quantized_weight().buffer());
+    kernel.set_arg(4, weight_b.buffer());
     kernel.set_arg(5, scales_b.buffer());
     kernel.set_arg(6, out_a.buffer());
     kernel.set_arg(7, out_b.buffer());
@@ -591,8 +612,8 @@ std::pair<Tensor, Tensor> fused_decode_projection_pair_rmsnorm(const Tensor& x,
     kernel.launch1d(groups * kLocal, kLocal);
     autograd::record_op("matmul_rmsnorm_f32_q4_0_tile8_m1_2out_wg64x8_f32",
                         {x.id(), norm.weight.data.id(),
-                         a.quantized_weight().id(), scales_a.id(),
-                         b.quantized_weight().id(), scales_b.id()},
+                         weight_a.id(), scales_a.id(),
+                         weight_b.id(), scales_b.id()},
                         {out_a.id(), out_b.id()});
     return {out_a, out_b};
 }
@@ -611,6 +632,10 @@ QKV fused_decode_projection_triple(const Tensor& x,
     const int n1 = k_proj.out_features();
     const int n2 = v.out_features();
     const int in = static_cast<int>(x.shape()[1]);
+    const Tensor& weight_q = decode_quantized_weight(q);
+    const Tensor& weight_k = decode_quantized_weight(k_proj);
+    const Tensor& weight_v = decode_quantized_weight(v);
+    const DType weight_dtype = decode_quantized_weight_dtype(q);
     constexpr int kLocal = 128;
     const int total = n0 + n1 + n2;
     const bool can_wg = total <= 32768 &&
@@ -618,15 +643,15 @@ QKV fused_decode_projection_triple(const Tensor& x,
                         x.backend().device_info().max_work_group_size >= static_cast<std::size_t>(kLocal) &&
                         !env_enabled("MOTIFCL_DISABLE_KQUANT_M1_WG");
     const bool use_wg4 = can_wg && kquant_m1_wg4_enabled() &&
-                         (q.quantized_weight_dtype() == DType::Q4_K ||
-                          q.quantized_weight_dtype() == DType::Q4_0_COL);
+                         (weight_dtype == DType::Q4_K ||
+                          weight_dtype == DType::Q4_0_COL);
     const bool use_wg = can_wg && !use_wg4;
-    const bool q4_tile8 = q.quantized_weight_dtype() == DType::Q4_0_COL &&
-                          q4_0_col_tile8_layout(q.quantized_weight()) &&
-                          q4_0_col_tile8_layout(k_proj.quantized_weight()) &&
-                          q4_0_col_tile8_layout(v.quantized_weight());
+    const bool q4_tile8 = weight_dtype == DType::Q4_0_COL &&
+                          q4_0_col_tile8_layout(weight_q) &&
+                          q4_0_col_tile8_layout(weight_k) &&
+                          q4_0_col_tile8_layout(weight_v);
     const bool use_q4col_wg64x4 = use_wg4 &&
-                                  q.quantized_weight_dtype() == DType::Q4_0_COL &&
+                                  weight_dtype == DType::Q4_0_COL &&
                                   !q4_tile8 &&
                                   q4_0_col_wg64x4_enabled() &&
                                   x.backend().device_info().max_work_group_size >= 64;
@@ -637,38 +662,38 @@ QKV fused_decode_projection_triple(const Tensor& x,
         ? "matmul_f32_q4_0_tile8_m1_3out_wg64x8_f32"
         : (use_q4col_wg64x4
         ? "matmul_f32_q4_0_col_m1_3out_wg64x4_f32"
-        : (use_wg4 ? fused_decode_triple_wg4_kernel_name(q.quantized_weight_dtype())
-                   : fused_decode_triple_kernel_name(q.quantized_weight_dtype(), use_wg)));
+        : (use_wg4 ? fused_decode_triple_wg4_kernel_name(weight_dtype)
+                   : fused_decode_triple_kernel_name(weight_dtype, use_wg)));
     auto kernel = x.backend().kernels.get(kernel_name);
     std::vector<int> graph_inputs{x.id(),
-                                  q.quantized_weight().id(),
-                                  k_proj.quantized_weight().id(),
-                                  v.quantized_weight().id()};
-    if (q.quantized_weight_dtype() == DType::Q4_0_COL) {
+                                  weight_q.id(),
+                                  weight_k.id(),
+                                  weight_v.id()};
+    if (weight_dtype == DType::Q4_0_COL) {
         MCL_CHECK(use_wg4, "Q4_0_COL fused decode triple requires wg4 path");
-        const int block = q4_0_col_block_size(q.quantized_weight());
-        MCL_CHECK(q4_0_col_block_size(k_proj.quantized_weight()) == block &&
-                      q4_0_col_block_size(v.quantized_weight()) == block,
+        const int block = q4_0_col_block_size(weight_q);
+        MCL_CHECK(q4_0_col_block_size(weight_k) == block &&
+                      q4_0_col_block_size(weight_v) == block,
                   "Q4_0_COL fused decode triple expects matching block sizes");
-        MCL_CHECK(q.quantized_weight().quant_scale_axis() == k_proj.quantized_weight().quant_scale_axis() &&
-                      q.quantized_weight().quant_scale_axis() == v.quantized_weight().quant_scale_axis(),
+        MCL_CHECK(weight_q.quant_scale_axis() == weight_k.quant_scale_axis() &&
+                      weight_q.quant_scale_axis() == weight_v.quant_scale_axis(),
                   "Q4_0_COL fused decode triple expects matching layouts");
         MCL_CHECK(!q4_tile8 || (in % block) == 0,
                   "Q4_0_COL tile8 fused decode triple requires K divisible by block size");
         const int blocks_per_col = (in + block - 1) / block;
-        auto scales_q = q.quantized_weight().quant_scales();
-        auto scales_k = k_proj.quantized_weight().quant_scales();
-        auto scales_v = v.quantized_weight().quant_scales();
+        auto scales_q = weight_q.quant_scales();
+        auto scales_k = weight_k.quant_scales();
+        auto scales_v = weight_v.quant_scales();
         graph_inputs = {x.id(),
-                        q.quantized_weight().id(), scales_q.id(),
-                        k_proj.quantized_weight().id(), scales_k.id(),
-                        v.quantized_weight().id(), scales_v.id()};
+                        weight_q.id(), scales_q.id(),
+                        weight_k.id(), scales_k.id(),
+                        weight_v.id(), scales_v.id()};
         kernel.set_arg(0, x.buffer());
-        kernel.set_arg(1, q.quantized_weight().buffer());
+        kernel.set_arg(1, weight_q.buffer());
         kernel.set_arg(2, scales_q.buffer());
-        kernel.set_arg(3, k_proj.quantized_weight().buffer());
+        kernel.set_arg(3, weight_k.buffer());
         kernel.set_arg(4, scales_k.buffer());
-        kernel.set_arg(5, v.quantized_weight().buffer());
+        kernel.set_arg(5, weight_v.buffer());
         kernel.set_arg(6, scales_v.buffer());
         kernel.set_arg(7, out.q.buffer());
         kernel.set_arg(8, out.k.buffer());
@@ -686,9 +711,9 @@ QKV fused_decode_projection_triple(const Tensor& x,
         kernel.launch1d(groups * local, local);
     } else {
         kernel.set_arg(0, x.buffer());
-        kernel.set_arg(1, q.quantized_weight().buffer());
-        kernel.set_arg(2, k_proj.quantized_weight().buffer());
-        kernel.set_arg(3, v.quantized_weight().buffer());
+        kernel.set_arg(1, weight_q.buffer());
+        kernel.set_arg(2, weight_k.buffer());
+        kernel.set_arg(3, weight_v.buffer());
         kernel.set_arg(4, out.q.buffer());
         kernel.set_arg(5, out.k.buffer());
         kernel.set_arg(6, out.v.buffer());
@@ -3019,6 +3044,8 @@ void ModernGPTModel::enable_quantized_inference(DType qdtype) {
     quantized_lm_head_ = qdtype == DType::Q4_0
         ? quantize_q4_symmetric_cols(lm_head.data)
         : quantize_q8_symmetric_cols(lm_head.data);
+    decode_quantized_lm_head_ = Tensor{};
+    decode_quantized_lm_head_dtype_ = DType::F32;
 }
 
 void ModernGPTModel::enable_quantized_inference(const QuantizationPolicy& policy) {
@@ -3034,6 +3061,8 @@ void ModernGPTModel::enable_quantized_inference(const QuantizationPolicy& policy
     quantized_lm_head_ = policy.lm_head_dtype == DType::Q4_0
         ? quantize_q4_symmetric_cols(lm_head.data)
         : quantize_q8_symmetric_cols(lm_head.data);
+    decode_quantized_lm_head_ = Tensor{};
+    decode_quantized_lm_head_dtype_ = DType::F32;
 }
 
 void ModernGPTModel::set_quantized_lm_head(const Tensor& weight) {
@@ -3045,20 +3074,37 @@ void ModernGPTModel::set_quantized_lm_head(const Tensor& weight) {
               "ModernGPTModel quantized lm_head shape mismatch");
     quantized_lm_head_ = weight;
     quantized_weight_dtype_ = weight.dtype();
+    decode_quantized_lm_head_ = Tensor{};
+    decode_quantized_lm_head_dtype_ = DType::F32;
+}
+
+void ModernGPTModel::set_decode_quantized_lm_head(const Tensor& weight) {
+    MCL_CHECK(weight.valid() && (weight.dtype() == DType::Q8_0 || weight.dtype() == DType::Q4_0 ||
+                                 weight.dtype() == DType::Q4_0_COL || weight.dtype() == DType::Q4_K ||
+                                 weight.dtype() == DType::Q5_K || weight.dtype() == DType::Q6_K),
+              "ModernGPTModel decode quantized lm_head must be Q8_0, Q4_0, Q4_0_COL, Q4_K, Q5_K, or Q6_K");
+    MCL_CHECK(weight.ndim() == 2 && weight.shape()[0] == config.n_embd && weight.shape()[1] == config.vocab_size,
+              "ModernGPTModel decode quantized lm_head shape mismatch");
+    decode_quantized_lm_head_ = weight;
+    decode_quantized_lm_head_dtype_ = weight.dtype();
 }
 
 void ModernGPTModel::disable_quantized_inference() {
     for (auto& block : blocks) block->disable_quantized_inference();
     quantized_lm_head_ = Tensor{};
+    decode_quantized_lm_head_ = Tensor{};
     quantized_weight_dtype_ = DType::F32;
+    decode_quantized_lm_head_dtype_ = DType::F32;
 }
 
 Tensor ModernGPTModel::project_logits(const Tensor& h) {
     if (quantized_lm_head_.valid() && (!autograd::is_enabled() || !lm_head.data.valid())) {
-        if ((quantized_weight_dtype_ == DType::Q4_0 || quantized_weight_dtype_ == DType::Q4_0_COL ||
-             is_k_quant_dtype(quantized_weight_dtype_)) &&
+        const Tensor& decode_head = decode_quantized_lm_head_.valid() ? decode_quantized_lm_head_ : quantized_lm_head_;
+        const DType decode_dtype = decode_quantized_lm_head_.valid() ? decode_quantized_lm_head_dtype_ : quantized_weight_dtype_;
+        if ((decode_dtype == DType::Q4_0 || decode_dtype == DType::Q4_0_COL ||
+             is_k_quant_dtype(decode_dtype)) &&
             h.ndim() == 2 && h.shape()[0] == 1) {
-            return matmul(h, quantized_lm_head_);
+            return matmul(h, decode_head);
         }
         auto hq = quantize_q8_symmetric_rows(h);
         return matmul(hq, quantized_lm_head_);
@@ -3266,19 +3312,36 @@ void HybridGPTModel::set_quantized_lm_head(const Tensor& weight) {
               "HybridGPTModel quantized lm_head shape mismatch");
     quantized_lm_head_ = weight;
     quantized_weight_dtype_ = weight.dtype();
+    decode_quantized_lm_head_ = Tensor{};
+    decode_quantized_lm_head_dtype_ = DType::F32;
+}
+
+void HybridGPTModel::set_decode_quantized_lm_head(const Tensor& weight) {
+    MCL_CHECK(weight.valid() && (weight.dtype() == DType::Q8_0 || weight.dtype() == DType::Q4_0 ||
+                                  weight.dtype() == DType::Q4_0_COL || weight.dtype() == DType::Q4_K ||
+                                  weight.dtype() == DType::Q5_K || weight.dtype() == DType::Q6_K),
+              "HybridGPTModel decode quantized lm_head must be Q8_0, Q4_0, Q4_0_COL, Q4_K, Q5_K, or Q6_K");
+    MCL_CHECK(weight.ndim() == 2 && weight.shape()[0] == config.n_embd && weight.shape()[1] == config.vocab_size,
+              "HybridGPTModel decode quantized lm_head shape mismatch");
+    decode_quantized_lm_head_ = weight;
+    decode_quantized_lm_head_dtype_ = weight.dtype();
 }
 
 void HybridGPTModel::disable_quantized_inference() {
     quantized_lm_head_ = Tensor{};
+    decode_quantized_lm_head_ = Tensor{};
     quantized_weight_dtype_ = DType::F32;
+    decode_quantized_lm_head_dtype_ = DType::F32;
 }
 
 Tensor HybridGPTModel::project_logits(const Tensor& h) {
     if (quantized_lm_head_.valid() && (!autograd::is_enabled() || !lm_head.data.valid())) {
-        if ((quantized_weight_dtype_ == DType::Q4_0 || quantized_weight_dtype_ == DType::Q4_0_COL ||
-             is_k_quant_dtype(quantized_weight_dtype_)) &&
+        const Tensor& decode_head = decode_quantized_lm_head_.valid() ? decode_quantized_lm_head_ : quantized_lm_head_;
+        const DType decode_dtype = decode_quantized_lm_head_.valid() ? decode_quantized_lm_head_dtype_ : quantized_weight_dtype_;
+        if ((decode_dtype == DType::Q4_0 || decode_dtype == DType::Q4_0_COL ||
+             is_k_quant_dtype(decode_dtype)) &&
             h.ndim() == 2 && h.shape()[0] == 1) {
-            return matmul(h, quantized_lm_head_);
+            return matmul(h, decode_head);
         }
         auto hq = quantize_q8_symmetric_rows(h);
         return matmul(hq, quantized_lm_head_);
