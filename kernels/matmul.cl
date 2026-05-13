@@ -1398,6 +1398,87 @@ inline float gguf_q6_k_value(__global const uchar* B, int idx) {
     return d * ((float)gguf_i8_from_u8(sc[scale_idx])) * ((float)code);
 }
 
+inline float gguf_q4_k_value_in_block(__global const uchar* B,
+                                      int base,
+                                      int loc,
+                                      float d,
+                                      float dmin) {
+    int sub = loc >> 5;
+    int l = loc & 31;
+    int group = sub >> 1;
+    __global const uchar* scales = B + base + 4;
+    __global const uchar* qs = B + base + 16 + group * 32;
+    int sc = 0;
+    int mn = 0;
+    gguf_k_scale_min(sub, scales, &sc, &mn);
+    int code = (sub & 1) ? (((int)qs[l]) >> 4) : (((int)qs[l]) & 15);
+    return d * ((float)sc) * ((float)code) - dmin * ((float)mn);
+}
+
+inline float2 gguf_q4_k_value_pair(__global const uchar* B, int idx, int valid_second) {
+    int block = idx >> 8;
+    int loc = idx & 255;
+    int base = block * 144;
+    float d = gguf_f16_to_f32(gguf_load_u16_le(B, base));
+    float dmin = gguf_f16_to_f32(gguf_load_u16_le(B, base + 2));
+    float v0 = gguf_q4_k_value_in_block(B, base, loc, d, dmin);
+    float v1 = 0.0f;
+    if (valid_second) {
+        v1 = loc == 255
+            ? gguf_q4_k_value(B, idx + 1)
+            : gguf_q4_k_value_in_block(B, base, loc + 1, d, dmin);
+    }
+    return (float2)(v0, v1);
+}
+
+inline float gguf_q6_k_value_in_block(__global const uchar* B,
+                                      int base,
+                                      int loc,
+                                      float d) {
+    int half_idx = loc >> 7;
+    int l128 = loc & 127;
+    __global const uchar* ql = B + base + half_idx * 64;
+    __global const uchar* qh = B + base + 128 + half_idx * 32;
+    __global const uchar* sc = B + base + 192 + half_idx * 8;
+    int l = 0;
+    int code = 0;
+    int scale_idx = 0;
+    if (l128 < 32) {
+        l = l128;
+        code = ((int)(ql[l] & 0x0fu)) | ((((int)(qh[l] >> 0)) & 0x03) << 4);
+        scale_idx = (l >> 4) + 0;
+    } else if (l128 < 64) {
+        l = l128 - 32;
+        code = ((int)(ql[l + 32] & 0x0fu)) | ((((int)(qh[l] >> 2)) & 0x03) << 4);
+        scale_idx = (l >> 4) + 2;
+    } else if (l128 < 96) {
+        l = l128 - 64;
+        code = ((int)((ql[l] >> 4) & 0x0fu)) | ((((int)(qh[l] >> 4)) & 0x03) << 4);
+        scale_idx = (l >> 4) + 4;
+    } else {
+        l = l128 - 96;
+        code = ((int)((ql[l + 32] >> 4) & 0x0fu)) | ((((int)(qh[l] >> 6)) & 0x03) << 4);
+        scale_idx = (l >> 4) + 6;
+    }
+    code -= 32;
+    return d * ((float)gguf_i8_from_u8(sc[scale_idx])) * ((float)code);
+}
+
+inline float2 gguf_q6_k_value_pair(__global const uchar* B, int idx, int valid_second) {
+    int block = idx >> 8;
+    int loc = idx & 255;
+    int base = block * 210;
+    float d = gguf_f16_to_f32(gguf_load_u16_le(B, base + 208));
+    float v0 = gguf_q6_k_value_in_block(B, base, loc, d);
+    float v1 = 0.0f;
+    if (valid_second) {
+        v1 = loc == 255
+            ? gguf_q6_k_value(B, idx + 1)
+            : gguf_q6_k_value_in_block(B, base, loc + 1, d);
+    }
+    return (float2)(v0, v1);
+}
+
 __kernel void matmul_q8_q4_k_f32(__global const char* A,
                                  __global const uchar* B,
                                  __global float* C,
@@ -1565,7 +1646,7 @@ DEFINE_MATMUL_Q8_QK_ROW8_F32(matmul_q8_q6_k_row8_f32, gguf_q6_k_value)
 
 #undef DEFINE_MATMUL_Q8_QK_ROW8_F32
 
-#define DEFINE_MATMUL_Q8_QK_ROW8X2_F32(KERNEL_NAME, VALUE_FN) \
+#define DEFINE_MATMUL_Q8_QK_ROW8X2_F32(KERNEL_NAME, PAIR_FN) \
 __kernel void KERNEL_NAME(__global const char* A, \
                           __global const uchar* B, \
                           __global float* C, \
@@ -1598,8 +1679,9 @@ __kernel void KERNEL_NAME(__global const char* A, \
     float a40 = 0.0f, a41 = 0.0f, a50 = 0.0f, a51 = 0.0f; \
     float a60 = 0.0f, a61 = 0.0f, a70 = 0.0f, a71 = 0.0f; \
     for (int k = 0; k < K; ++k) { \
-        float b0 = VALUE_FN(B, k * N + col0); \
-        float b1 = vc1 ? VALUE_FN(B, k * N + col1) : 0.0f; \
+        float2 bpair = PAIR_FN(B, k * N + col0, vc1); \
+        float b0 = bpair.x; \
+        float b1 = bpair.y; \
         float x0 = (float)((int)A[r0 * K + k]); \
         a00 += x0 * b0; \
         a01 += x0 * b1; \
@@ -1622,8 +1704,8 @@ __kernel void KERNEL_NAME(__global const char* A, \
     if (vr7) { C[r7 * N + col0] = a70 * rs7; if (vc1) C[r7 * N + col1] = a71 * rs7; } \
 }
 
-DEFINE_MATMUL_Q8_QK_ROW8X2_F32(matmul_q8_q4_k_row8x2_f32, gguf_q4_k_value)
-DEFINE_MATMUL_Q8_QK_ROW8X2_F32(matmul_q8_q6_k_row8x2_f32, gguf_q6_k_value)
+DEFINE_MATMUL_Q8_QK_ROW8X2_F32(matmul_q8_q4_k_row8x2_f32, gguf_q4_k_value_pair)
+DEFINE_MATMUL_Q8_QK_ROW8X2_F32(matmul_q8_q6_k_row8x2_f32, gguf_q6_k_value_pair)
 
 #undef DEFINE_MATMUL_Q8_QK_ROW8X2_F32
 
