@@ -423,7 +423,7 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
         : (use_row8x2
             ? ((b.dtype() == DType::Q4_K && N % 256 == 0 && !disable_q4_k_prefill_row8x2_n256()) ? 19 : 9)
             : (use_row8
-                ? ((N % 256 == 0) ? 18 : 8)
+                ? ((b.dtype() == DType::Q4_K && N % 256 == 0 && !disable_q4_k_prefill_row8x2_n256()) ? 19 : ((N % 256 == 0) ? 18 : 8))
                 : (use_row4
                     ? ((b.dtype() == DType::Q6_K && N % 256 == 0) ? 14 : 4)
                     : ((M > 1 && b.dtype() == DType::Q6_K && mode_a == 1 && !disable_q6_k_prefill_rowscale()) ? 1 : 0))));
