@@ -243,6 +243,8 @@ int main() {
             {"quant_q5_k.weight", {256}, motifcl::gguf::TensorType::Q5_K, {}, quant_q5_k_block()},
             {"quant_q6_k.weight", {256}, motifcl::gguf::TensorType::Q6_K, {}, quant_q6_k_zero_block()},
             {"quant_q4_k_mat.weight", {256, 1}, motifcl::gguf::TensorType::Q4_K, {}, quant_q4_k_block()},
+            {"quant_q4_k_wide.weight", {256, 512}, motifcl::gguf::TensorType::Q4_K, {},
+             repeat_quant_block(quant_q4_k_block(), 512)},
             {"quant_q5_k_mat.weight", {256, 1}, motifcl::gguf::TensorType::Q5_K, {}, quant_q5_k_block()},
             {"quant_q6_k_mat.weight", {256, 1}, motifcl::gguf::TensorType::Q6_K, {}, quant_q6_k_zero_block()},
         };
@@ -281,7 +283,7 @@ int main() {
 
     auto file = motifcl::gguf::File::open(path.string());
     require(file.version() == 3, "GGUF version parse failed");
-    require(file.tensor_count() == 20, "GGUF tensor count parse failed");
+    require(file.tensor_count() == 21, "GGUF tensor count parse failed");
     require(file.metadata_count() == 14, "GGUF metadata count parse failed");
     require(file.alignment() == 32, "GGUF alignment parse failed");
     require(file.metadata_string_or("general.architecture") == "llama", "GGUF string metadata parse failed");
@@ -425,6 +427,11 @@ int main() {
     require(native_q4k.dtype() == motifcl::DType::Q4_K && native_q4k.shape() == motifcl::Shape({256, 1}) &&
                 native_q4k.nbytes() == 144,
             "GGUF Q4_K native packed tensor metadata failed");
+    const auto native_q4k_wide = file.read_tensor_quantized(backend, "quant_q4_k_wide.weight");
+    require(native_q4k_wide.dtype() == motifcl::DType::Q4_K &&
+                native_q4k_wide.shape() == motifcl::Shape({256, 512}) &&
+                native_q4k_wide.nbytes() == 144 * 512,
+            "GGUF Q4_K wide native packed tensor metadata failed");
     const auto native_q5k = file.read_tensor_quantized(backend, "quant_q5_k_mat.weight");
     require(native_q5k.dtype() == motifcl::DType::Q5_K && native_q5k.shape() == motifcl::Shape({256, 1}) &&
                 native_q5k.nbytes() == 176,
@@ -471,6 +478,20 @@ int main() {
                 std::fabs(q6k_prefill_out[2]) < 0.05f &&
                 std::fabs(q6k_prefill_out[3]) < 0.05f,
             "GGUF Q6_K rowscale prefill matmul failed");
+    std::vector<float> wide_rows_ones(32 * 256, 1.0f);
+    auto x32 = motifcl::Tensor::from_cpu(backend, {32, 256}, motifcl::DType::F32, wide_rows_ones.data());
+    auto x32q = motifcl::quantize_q8_symmetric_rows(x32);
+    const auto q4k_wide_prefill_out = motifcl::matmul(x32q, native_q4k_wide).to_vector<float>();
+    require(q4k_wide_prefill_out.size() == 32 * 512,
+            "GGUF Q4_K row8x2 prefill output size failed");
+    for (int r = 0; r < 32; ++r) {
+        const auto base = static_cast<std::size_t>(r * 512);
+        require(std::fabs(q4k_wide_prefill_out[base + 0] - 256.0f) < 0.05f &&
+                    std::fabs(q4k_wide_prefill_out[base + 1] - 256.0f) < 0.05f &&
+                    std::fabs(q4k_wide_prefill_out[base + 32] - 512.0f) < 0.05f &&
+                    std::fabs(q4k_wide_prefill_out[base + 255] - 512.0f) < 0.05f,
+                "GGUF Q4_K row8x2 prefill matmul failed");
+    }
 
     auto model = motifcl::nn::make_hf_transformer_model(backend, cfg);
     auto report = motifcl::nn::load_hf_transformer_gguf_weights(backend, model, path.string(), cfg, true, false);
