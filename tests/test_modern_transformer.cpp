@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -27,6 +28,59 @@ void require_close_vec(const std::vector<float>& a, const std::vector<float>& b,
     for (std::size_t i = 0; i < a.size(); ++i) {
         if (std::fabs(a[i] - b[i]) > tol) std::exit(1);
     }
+}
+
+motifcl::Tensor make_q4_0_tile8_weight(motifcl::Backend& backend,
+                                       int rows,
+                                       int cols,
+                                       const std::vector<float>& values) {
+    constexpr int block = 32;
+    constexpr int tile_cols = 8;
+    if (rows % block != 0 || cols % tile_cols != 0 ||
+        static_cast<int>(values.size()) != rows * cols) {
+        std::exit(1);
+    }
+    const int blocks_per_col = rows / block;
+    std::vector<std::uint8_t> packed(static_cast<std::size_t>(rows * cols + 1) / 2, 0);
+    std::vector<float> scales(static_cast<std::size_t>(cols * blocks_per_col), 1.0f);
+    for (int c0 = 0; c0 < cols; c0 += tile_cols) {
+        const int tile = c0 / tile_cols;
+        for (int kb = 0; kb < blocks_per_col; ++kb) {
+            const int begin = kb * block;
+            for (int tc = 0; tc < tile_cols; ++tc) {
+                const int c = c0 + tc;
+                float max_abs = 0.0f;
+                for (int kk = 0; kk < block; ++kk) {
+                    max_abs = std::max(max_abs, std::fabs(values[(begin + kk) * cols + c]));
+                }
+                scales[static_cast<std::size_t>(tile * blocks_per_col * tile_cols + kb * tile_cols + tc)] =
+                    max_abs > 0.0f ? max_abs / 7.0f : 1.0f;
+            }
+            for (int kk = 0; kk < block; ++kk) {
+                const int r = begin + kk;
+                for (int tc = 0; tc < tile_cols; ++tc) {
+                    const int c = c0 + tc;
+                    const float scale =
+                        scales[static_cast<std::size_t>(tile * blocks_per_col * tile_cols + kb * tile_cols + tc)];
+                    int q = static_cast<int>(std::lrint(values[r * cols + c] / scale));
+                    q = std::max(-7, std::min(7, q));
+                    const auto code = static_cast<std::uint8_t>((q + 8) & 0x0f);
+                    const int pos = tile * blocks_per_col * block * tile_cols + (kb * block + kk) * tile_cols + tc;
+                    if ((pos & 1) == 0) {
+                        packed[static_cast<std::size_t>(pos >> 1)] =
+                            static_cast<std::uint8_t>((packed[static_cast<std::size_t>(pos >> 1)] & 0xf0u) | code);
+                    } else {
+                        packed[static_cast<std::size_t>(pos >> 1)] =
+                            static_cast<std::uint8_t>((packed[static_cast<std::size_t>(pos >> 1)] & 0x0fu) | (code << 4));
+                    }
+                }
+            }
+        }
+    }
+    auto q = motifcl::Tensor::from_cpu(backend, {rows, cols}, motifcl::DType::Q4_0_COL, packed.data());
+    auto s = motifcl::Tensor::from_cpu(backend, {static_cast<int64_t>(scales.size())}, motifcl::DType::F32, scales.data());
+    q._set_quant_scales(s, 4, block);
+    return q;
 }
 
 } // namespace
@@ -231,6 +285,34 @@ int main() {
         cfg.use_swiglu = true;
         cfg.use_qkv_bias = true;
         cfg.learned_position_embeddings = false;
+
+        {
+            constexpr int in = 128;
+            constexpr int hidden = 64;
+            motifcl::nn::ModernMLP mlp(backend, in, hidden, true, false, 0.0f, true);
+            mlp.enable_split_projections(true);
+            std::vector<float> x_host(in);
+            std::vector<float> gate_w(in * hidden);
+            std::vector<float> up_w(in * hidden);
+            std::vector<float> down_w(hidden * in);
+            for (int i = 0; i < in; ++i) x_host[i] = static_cast<float>((i % 13) - 6) * 0.01f;
+            for (int i = 0; i < in * hidden; ++i) {
+                gate_w[i] = static_cast<float>((i % 17) - 8) * 0.007f;
+                up_w[i] = static_cast<float>((i % 19) - 9) * 0.006f;
+            }
+            for (int i = 0; i < hidden * in; ++i) down_w[i] = static_cast<float>((i % 23) - 11) * 0.005f;
+            mlp.gate_proj().set_quantized_weight(make_q4_0_tile8_weight(backend, in, hidden, gate_w));
+            mlp.up_proj().set_quantized_weight(make_q4_0_tile8_weight(backend, in, hidden, up_w));
+            mlp.down_proj.weight.data =
+                motifcl::Tensor::from_cpu(backend, {hidden, in}, motifcl::DType::F32, down_w.data());
+            auto x = motifcl::Tensor::from_cpu(backend, {1, in}, motifcl::DType::F32, x_host.data());
+            motifcl::autograd::NoGradGuard no_grad;
+            set_test_env("MOTIFCL_DISABLE_FUSED_SWIGLU_PRODUCT_PAIR", "1");
+            auto ref = mlp.forward(x).to_vector<float>();
+            set_test_env("MOTIFCL_DISABLE_FUSED_SWIGLU_PRODUCT_PAIR", "");
+            auto fused = mlp.forward(x).to_vector<float>();
+            require_close_vec(fused, ref, 5e-4f);
+        }
 
         {
             motifcl::nn::TransformerConfig ple_cfg = cfg;

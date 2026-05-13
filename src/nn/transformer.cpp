@@ -442,6 +442,54 @@ bool can_use_fused_decode_projection_pair(const Tensor& x, const Linear& a, cons
            decode_quantized_weight_dtype(a) == decode_quantized_weight_dtype(b);
 }
 
+bool can_use_fused_decode_swiglu_product_pair(const Tensor& x, const Linear& gate, const Linear& up) {
+    if (env_enabled("MOTIFCL_DISABLE_FUSED_SWIGLU_PRODUCT_PAIR") || autograd::is_enabled()) return false;
+    if (!can_use_fused_decode_projection_pair(x, gate, up)) return false;
+    if (decode_quantized_weight_dtype(gate) != DType::Q4_0_COL) return false;
+    const Tensor& gate_weight = decode_quantized_weight(gate);
+    const Tensor& up_weight = decode_quantized_weight(up);
+    if (!q4_0_col_tile8_layout(gate_weight) || !q4_0_col_tile8_layout(up_weight)) return false;
+    if (gate.out_features() != up.out_features()) return false;
+    const int block = q4_0_col_block_size(gate_weight);
+    if (q4_0_col_block_size(up_weight) != block) return false;
+    if (gate_weight.quant_scale_axis() != up_weight.quant_scale_axis()) return false;
+    if ((static_cast<int>(x.shape()[1]) % block) != 0) return false;
+    return x.backend().device_info().max_work_group_size >= 64;
+}
+
+Tensor fused_decode_swiglu_product_pair(const Tensor& x, const Linear& gate, const Linear& up) {
+    MCL_CHECK(can_use_fused_decode_swiglu_product_pair(x, gate, up),
+              "fused_decode_swiglu_product_pair expects compatible M=1 F32 input and Q4_0_COL tile8 gate/up weights");
+    auto out = Tensor::empty(x.backend(), {1, gate.out_features()}, DType::F32);
+    const Tensor& gate_weight = decode_quantized_weight(gate);
+    const Tensor& up_weight = decode_quantized_weight(up);
+    const int in = static_cast<int>(x.shape()[1]);
+    const int n = gate.out_features();
+    const int block = q4_0_col_block_size(gate_weight);
+    const int blocks_per_col = (in + block - 1) / block;
+    auto gate_scales = gate_weight.quant_scales();
+    auto up_scales = up_weight.quant_scales();
+    auto kernel = x.backend().kernels.get("matmul_swiglu_product_f32_q4_0_tile8_m1_wg64x8_f32");
+    constexpr std::size_t kLocal = 64;
+    kernel.set_arg(0, x.buffer());
+    kernel.set_arg(1, gate_weight.buffer());
+    kernel.set_arg(2, gate_scales.buffer());
+    kernel.set_arg(3, up_weight.buffer());
+    kernel.set_arg(4, up_scales.buffer());
+    kernel.set_arg(5, out.buffer());
+    kernel.set_arg(6, n);
+    kernel.set_arg(7, in);
+    kernel.set_arg(8, blocks_per_col);
+    kernel.set_arg(9, block);
+    kernel.set_arg_local(10, 16 * kLocal * sizeof(float));
+    const std::size_t groups = (static_cast<std::size_t>(n) + 7u) / 8u;
+    kernel.launch1d(groups * kLocal, kLocal);
+    autograd::record_op("matmul_swiglu_product_f32_q4_0_tile8_m1_wg64x8_f32",
+                        {x.id(), gate_weight.id(), gate_scales.id(), up_weight.id(), up_scales.id()},
+                        {out.id()});
+    return out;
+}
+
 bool can_use_fused_decode_projection_triple(const Tensor& x,
                                             const Linear& a,
                                             const Linear& b,
@@ -1105,6 +1153,12 @@ Tensor ModernMLP::forward(const Tensor& x) {
         up_proj_.quantized_inference_enabled()) {
         Tensor gate;
         Tensor up;
+        if (use_swiglu && dropout_p == 0.0f &&
+            can_use_fused_decode_swiglu_product_pair(x, gate_proj_, up_proj_)) {
+            hidden = fused_decode_swiglu_product_pair(x, gate_proj_, up_proj_);
+            auto out = down_proj.forward(hidden);
+            return out;
+        }
         if (can_use_fused_decode_projection_pair(x, gate_proj_, up_proj_)) {
             auto fused = fused_decode_projection_pair(x, gate_proj_, up_proj_);
             gate = std::move(fused.first);
@@ -1127,6 +1181,18 @@ Tensor ModernMLP::forward(const Tensor& x) {
 
 
 Tensor mlp_forward_rmsnorm_decode(const Tensor& h, RMSNorm& norm, ModernMLP& mlp) {
+    if (mlp.split_projections_enabled() &&
+        mlp.use_swiglu &&
+        mlp.dropout_p == 0.0f &&
+        (mlp.gate_proj().quantized_inference_enabled() || mlp.up_proj().quantized_inference_enabled()) &&
+        !env_enabled("MOTIFCL_DISABLE_FUSED_SWIGLU_PRODUCT_PAIR")) {
+        auto x = norm.forward(h);
+        if (can_use_fused_decode_swiglu_product_pair(x, mlp.gate_proj(), mlp.up_proj())) {
+            auto hidden = fused_decode_swiglu_product_pair(x, mlp.gate_proj(), mlp.up_proj());
+            return mlp.down_proj.forward(hidden);
+        }
+        if (!env_enabled("MOTIFCL_ENABLE_FUSED_RMSNORM_DECODE_PAIR")) return mlp.forward(x);
+    }
     if (mlp.split_projections_enabled() &&
         (mlp.gate_proj().quantized_inference_enabled() || mlp.up_proj().quantized_inference_enabled()) &&
         can_use_fused_decode_projection_pair_rmsnorm(h, norm, mlp.gate_proj(), mlp.up_proj())) {

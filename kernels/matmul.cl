@@ -2481,6 +2481,62 @@ __kernel void matmul_silu_product_q4_0_tile8_m1_wg64x8_f32(__global const float*
     }
 }
 
+__kernel void matmul_swiglu_product_f32_q4_0_tile8_m1_wg64x8_f32(__global const float* A,
+                                                                 __global const uchar* B_gate,
+                                                                 __global const float* S_gate,
+                                                                 __global const uchar* B_up,
+                                                                 __global const float* S_up,
+                                                                 __global float* C,
+                                                                 int N,
+                                                                 int K,
+                                                                 int blocks_per_col,
+                                                                 int block_b,
+                                                                 __local float* scratch) {
+    const int group = get_group_id(0);
+    const int lid = get_local_id(0);
+    const int col0 = group * 8;
+    float gate_acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float up_acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (int k = lid; k < K; k += 64) {
+        const float av = A[k];
+        if (col0 + 7 < N) {
+            q4_0_tile8_accum8(B_gate, S_gate, N, blocks_per_col, block_b, col0, k, av, gate_acc);
+            q4_0_tile8_accum8(B_up, S_up, N, blocks_per_col, block_b, col0, k, av, up_acc);
+        } else {
+            for (int j = 0; j < 8; ++j) {
+                const int col = col0 + j;
+                if (col < N) {
+                    gate_acc[j] += av * ((float)q4_0_tile8_load(B_gate, N, blocks_per_col, block_b, col, k)) *
+                                   q4_0_tile8_scale(S_gate, N, blocks_per_col, block_b, col, k);
+                    up_acc[j] += av * ((float)q4_0_tile8_load(B_up, N, blocks_per_col, block_b, col, k)) *
+                                 q4_0_tile8_scale(S_up, N, blocks_per_col, block_b, col, k);
+                }
+            }
+        }
+    }
+    for (int j = 0; j < 8; ++j) {
+        scratch[j * 64 + lid] = gate_acc[j];
+        scratch[(8 + j) * 64 + lid] = up_acc[j];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = 32; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            for (int j = 0; j < 16; ++j) scratch[j * 64 + lid] += scratch[j * 64 + lid + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (lid == 0) {
+        for (int j = 0; j < 8; ++j) {
+            const int col = col0 + j;
+            if (col < N) {
+                const float g = scratch[j * 64];
+                const float u = scratch[(8 + j) * 64];
+                C[col] = (g * native_recip(1.0f + native_exp(-g))) * u;
+            }
+        }
+    }
+}
+
 __kernel void matmul_f32_q4_0_col_m1_2out_wg4_f32(__global const float* A,
                                                   __global const uchar* B0,
                                                   __global const float* S0,
