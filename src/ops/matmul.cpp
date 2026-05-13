@@ -59,6 +59,16 @@ bool disable_m1_dense_wg() {
     return env && *env && std::string(env) != "0" && std::string(env) != "false" && std::string(env) != "FALSE";
 }
 
+bool enable_m1_dense_wg64x4() {
+    const char* enabled = std::getenv("MOTIFCL_ENABLE_M1_DENSE_WG64X4");
+    const char* env = std::getenv("MOTIFCL_DISABLE_M1_DENSE_WG64X4");
+    const bool requested = enabled && *enabled && std::string(enabled) != "0" &&
+                           std::string(enabled) != "false" && std::string(enabled) != "FALSE";
+    const bool disabled = env && *env && std::string(env) != "0" &&
+                          std::string(env) != "false" && std::string(env) != "FALSE";
+    return requested && !disabled;
+}
+
 bool disable_kquant_m1_wg() {
     const char* env = std::getenv("MOTIFCL_DISABLE_KQUANT_M1_WG");
     return env && *env && std::string(env) != "0" && std::string(env) != "false" && std::string(env) != "FALSE";
@@ -478,27 +488,36 @@ Tensor matmul_f32_q4_0_col_m1(const Tensor& a, const Tensor& b) {
 
 void matmul_f32_m1_out(const Tensor& a, const Tensor& b, Tensor& out, int N, int K) {
     constexpr int kLocal = 128;
+    constexpr int kLocalWg64 = 64;
     const bool can_wg = K >= kLocal &&
                         a.backend().device_info().max_work_group_size >= static_cast<std::size_t>(kLocal);
+    const bool can_wg64x4 = K >= 128 && N >= 128 &&
+                            a.backend().device_info().max_work_group_size >= static_cast<std::size_t>(kLocalWg64);
     // On RX580-class OpenCL, the reduction variant launches N work-groups and
     // is slower than the single-work-item decode kernel for the small/medium
     // dense projections dominating Gemma4 PLE. Keep it opt-in for devices that
     // benefit from parallel K reduction.
-    const bool use_wg = can_wg && force_m1_dense_wg() && !disable_m1_dense_wg();
-    auto k = a.backend().kernels.get(use_wg ? "matmul_f32_m1_wg_f32" : "matmul_f32_m1_f32");
+    const bool disable_wg = disable_m1_dense_wg();
+    const bool use_wg64x4 = can_wg64x4 && enable_m1_dense_wg64x4() && !force_m1_dense_wg() && !disable_wg;
+    const bool use_wg = !use_wg64x4 && can_wg && force_m1_dense_wg() && !disable_wg;
+    const char* kernel_name = use_wg64x4 ? "matmul_f32_m1_wg64x4_f32"
+                            : (use_wg ? "matmul_f32_m1_wg_f32" : "matmul_f32_m1_f32");
+    auto k = a.backend().kernels.get(kernel_name);
     k.set_arg(0, a.buffer());
     k.set_arg(1, b.buffer());
     k.set_arg(2, out.buffer());
     k.set_arg(3, N);
     k.set_arg(4, K);
-    if (use_wg) {
+    if (use_wg64x4) {
+        k.set_arg_local(5, 4 * kLocalWg64 * sizeof(float));
+        k.launch1d(((static_cast<std::size_t>(N) + 3u) / 4u) * kLocalWg64, kLocalWg64);
+    } else if (use_wg) {
         k.set_arg_local(5, kLocal * sizeof(float));
         k.launch1d(static_cast<std::size_t>(N) * kLocal, kLocal);
     } else {
         k.launch1d(round_up(static_cast<std::size_t>(N), static_cast<std::size_t>(128)), 128);
     }
-    autograd::record_op(use_wg ? "matmul_f32_m1_wg_f32" : "matmul_f32_m1_f32",
-                        {a.id(), b.id()}, {out.id()});
+    autograd::record_op(kernel_name, {a.id(), b.id()}, {out.id()});
 }
 
 Tensor matmul_flags(const Tensor& a, const Tensor& b, bool trans_a, bool trans_b) {

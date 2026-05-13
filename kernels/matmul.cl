@@ -141,7 +141,15 @@ __kernel void matmul_f32_m1_f32(__global const float* A,
     int col = get_global_id(0);
     if (col >= N) return;
     float acc = 0.0f;
-    for (int k = 0; k < K; ++k) {
+    int k = 0;
+    for (; k + 3 < K; k += 4) {
+        int base = k * N + col;
+        acc += A[k] * B[base];
+        acc += A[k + 1] * B[base + N];
+        acc += A[k + 2] * B[base + 2 * N];
+        acc += A[k + 3] * B[base + 3 * N];
+    }
+    for (; k < K; ++k) {
         acc += A[k] * B[k * N + col];
     }
     C[col] = acc;
@@ -171,6 +179,59 @@ __kernel void matmul_f32_m1_wg_f32(__global const float* A,
         barrier(CLK_LOCAL_MEM_FENCE);
     }
     if (lid == 0) C[col] = scratch[0];
+}
+
+// RX580/decode variant: one wave64 computes four contiguous output columns.
+// This keeps the launch count unchanged versus matmul_f32_m1_f32, but
+// parallelizes the K reduction without launching one whole work-group per
+// output column. It targets dense M=1 tails such as Gemma4 PLE projection
+// [1, ple_dim] x [ple_dim, hidden].
+__kernel void matmul_f32_m1_wg64x4_f32(__global const float* A,
+                                       __global const float* B,
+                                       __global float* C,
+                                       int N,
+                                       int K,
+                                       __local float* scratch) {
+    int group = get_group_id(0);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int col0 = group * 4;
+    int c0 = col0;
+    int c1 = col0 + 1;
+    int c2 = col0 + 2;
+    int c3 = col0 + 3;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    for (int k = lid; k < K; k += local_size) {
+        float av = A[k];
+        int base = k * N + col0;
+        if (c0 < N) acc0 += av * B[base];
+        if (c1 < N) acc1 += av * B[base + 1];
+        if (c2 < N) acc2 += av * B[base + 2];
+        if (c3 < N) acc3 += av * B[base + 3];
+    }
+    scratch[lid] = acc0;
+    scratch[local_size + lid] = acc1;
+    scratch[2 * local_size + lid] = acc2;
+    scratch[3 * local_size + lid] = acc3;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            scratch[lid] += scratch[lid + stride];
+            scratch[local_size + lid] += scratch[local_size + lid + stride];
+            scratch[2 * local_size + lid] += scratch[2 * local_size + lid + stride];
+            scratch[3 * local_size + lid] += scratch[3 * local_size + lid + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (lid == 0) {
+        if (c0 < N) C[c0] = scratch[0];
+        if (c1 < N) C[c1] = scratch[local_size];
+        if (c2 < N) C[c2] = scratch[2 * local_size];
+        if (c3 < N) C[c3] = scratch[3 * local_size];
+    }
 }
 
 

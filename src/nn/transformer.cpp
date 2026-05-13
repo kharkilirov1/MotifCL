@@ -358,9 +358,7 @@ DType decode_quantized_weight_dtype(const Linear& layer) {
 }
 
 bool can_use_fused_silu_down_q4_0_col(const Tensor& gate, const Tensor& up, const Linear& down) {
-    if (!env_enabled("MOTIFCL_ENABLE_FUSED_SILU_DOWN_Q4_0_COL") ||
-        env_enabled("MOTIFCL_DISABLE_FUSED_SILU_DOWN_Q4_0_COL") ||
-        autograd::is_enabled()) {
+    if (env_enabled("MOTIFCL_DISABLE_FUSED_SILU_DOWN_Q4_0_COL") || autograd::is_enabled()) {
         return false;
     }
     if (!gate.valid() || !up.valid() || gate.dtype() != DType::F32 || up.dtype() != DType::F32) return false;
@@ -378,6 +376,7 @@ bool can_use_fused_silu_down_q4_0_col(const Tensor& gate, const Tensor& up, cons
     if (gate.backend().device_info().max_work_group_size < 64) return false;
     if (!down_weight.has_quant_scales()) return false;
     const int axis = down_weight.quant_scale_axis();
+    if (axis == 3 && !env_enabled("MOTIFCL_ENABLE_FUSED_SILU_DOWN_Q4_0_COL")) return false;
     return axis == 3 || axis == 4;
 }
 

@@ -44,6 +44,21 @@ int main() {
             }
         }
 
+        constexpr int M1K = 256;
+        constexpr int M1N = 257;
+        std::vector<float> m1_a(M1K);
+        std::vector<float> m1_b(M1K * M1N);
+        for (int i = 0; i < M1K; ++i) m1_a[i] = static_cast<float>((i % 17) - 8) * 0.009f;
+        for (int i = 0; i < M1K * M1N; ++i) m1_b[i] = static_cast<float>((i % 23) - 11) * 0.007f;
+        auto M1A = motifcl::Tensor::from_cpu(backend, {1, M1K}, motifcl::DType::F32, m1_a.data());
+        auto M1B = motifcl::Tensor::from_cpu(backend, {M1K, M1N}, motifcl::DType::F32, m1_b.data());
+        auto M1C = motifcl::matmul(M1A, M1B).to_vector<float>();
+        for (int c = 0; c < M1N; ++c) {
+            float expected = 0.0f;
+            for (int k = 0; k < M1K; ++k) expected += m1_a[k] * m1_b[k * M1N + c];
+            if (std::fabs(M1C[c] - expected) > 2e-4f) return 9;
+        }
+
         constexpr int KM = 5;
         constexpr int KK = 512;
         constexpr int KN = 7;
