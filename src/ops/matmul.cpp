@@ -187,6 +187,7 @@ const char* q8_qk_kernel_name(DType dtype, int variant) {
     if (dtype == DType::Q4_K) {
         if (variant == 2) return "matmul_q8_q4_k_row4_kpar_f32";
         if (variant == 9) return "matmul_q8_q4_k_row8x2_f32";
+        if (variant == 18) return "matmul_q8_q4_k_row8_n256_f32";
         if (variant == 8) return "matmul_q8_q4_k_row8_f32";
         return variant == 4 ? "matmul_q8_q4_k_row4_f32" : "matmul_q8_q4_k_f32";
     }
@@ -194,7 +195,9 @@ const char* q8_qk_kernel_name(DType dtype, int variant) {
     if (dtype == DType::Q6_K) {
         if (variant == 2) return "matmul_q8_q6_k_row4_kpar_f32";
         if (variant == 9) return "matmul_q8_q6_k_row8x2_f32";
+        if (variant == 18) return "matmul_q8_q6_k_row8_n256_f32";
         if (variant == 8) return "matmul_q8_q6_k_row8_f32";
+        if (variant == 14) return "matmul_q8_q6_k_row4_n256_f32";
         if (variant == 4) return "matmul_q8_q6_k_row4_f32";
         return variant == 1 ? "matmul_q8_q6_k_rowscale_f32" : "matmul_q8_q6_k_f32";
     }
@@ -413,9 +416,9 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
         : (use_row8x2
             ? 9
             : (use_row8
-                ? 8
+                ? ((N % 256 == 0) ? 18 : 8)
                 : (use_row4
-                    ? 4
+                    ? ((b.dtype() == DType::Q6_K && N % 256 == 0) ? 14 : 4)
                     : ((M > 1 && b.dtype() == DType::Q6_K && mode_a == 1 && !disable_q6_k_prefill_rowscale()) ? 1 : 0))));
     const char* kernel_name = q8_qk_kernel_name(b.dtype(), variant);
     auto k = a.backend().kernels.get(kernel_name);
@@ -434,8 +437,8 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
         const std::size_t rows = (static_cast<std::size_t>(M) + kRowGroup - 1u) / kRowGroup;
         k.set_arg_local(10, kRowGroup * kKparLocal * sizeof(float));
         k.launch2d(static_cast<std::size_t>(N) * kKparLocal, rows, kKparLocal, 1);
-    } else if (variant == 4 || variant == 8 || variant == 9) {
-        const std::size_t row_group = (variant == 8 || variant == 9) ? 8u : 4u;
+    } else if (variant == 4 || variant == 8 || variant == 9 || variant == 14 || variant == 18) {
+        const std::size_t row_group = (variant == 8 || variant == 9 || variant == 18) ? 8u : 4u;
         const std::size_t rows = (static_cast<std::size_t>(M) + row_group - 1u) / row_group;
         const std::size_t cols = variant == 9
             ? (static_cast<std::size_t>(N) + 1u) / 2u
