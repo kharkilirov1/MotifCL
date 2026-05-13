@@ -68,6 +68,7 @@ void usage() {
         << "  --warmup N               warm in-process runs before measuring (default: 1)\n"
         << "  --iters N                measured in-process runs (default: 3)\n"
         << "  --ctx-size N             cap runtime context/cache length below model max context\n"
+        << "  --no-prefill             evaluate prompt token-by-token through decode_step\n"
         << "  --paged-kv               use paged KV cache\n"
         << "  --kv-page-size N         paged KV page size (default: 256)\n"
         << "  --quant none|q8|q4       quantize dense HF Linear/lm_head weights\n"
@@ -125,6 +126,7 @@ Options parse_args(int argc, char** argv) {
         else if (arg == "--warmup") opts.warmup = std::stoi(require_value("--warmup"));
         else if (arg == "--iters") opts.iters = std::stoi(require_value("--iters"));
         else if (arg == "--ctx-size") opts.ctx_size = std::stoi(require_value("--ctx-size"));
+        else if (arg == "--no-prefill") opts.gen.prefill_prompt = false;
         else if (arg == "--paged-kv") opts.gen.use_paged_kv_cache = true;
         else if (arg == "--kv-page-size") opts.gen.kv_page_size = std::stoi(require_value("--kv-page-size"));
         else if (arg == "--cpu-sampling") opts.gen.gpu_greedy_sampling = false;
@@ -193,9 +195,16 @@ BenchResult run_modern_once(motifcl::Backend& backend,
     const auto prompt_start = Clock::now();
     if (gen.use_paged_kv_cache) {
         auto caches = model.create_paged_kv_cache(backend, 1, gen.kv_page_size);
-        auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
-                                               motifcl::DType::I32, tokens.data());
-        logits = model.forward_with_cache_last_logits(input, caches);
+        if (gen.prefill_prompt || tokens.size() == 1) {
+            auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
+                                                   motifcl::DType::I32, tokens.data());
+            logits = model.forward_with_cache_last_logits(input, caches);
+        } else {
+            for (std::int32_t token : tokens) {
+                auto input = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, &token);
+                logits = model.decode_step(input, caches);
+            }
+        }
         backend.finish();
         const auto prompt_end = Clock::now();
         std::mt19937 rng(gen.seed);
@@ -217,9 +226,16 @@ BenchResult run_modern_once(motifcl::Backend& backend,
     }
 
     auto caches = model.create_kv_cache(backend, 1);
-    auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
-                                           motifcl::DType::I32, tokens.data());
-    logits = model.forward_with_cache_last_logits(input, caches);
+    if (gen.prefill_prompt || tokens.size() == 1) {
+        auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
+                                               motifcl::DType::I32, tokens.data());
+        logits = model.forward_with_cache_last_logits(input, caches);
+    } else {
+        for (std::int32_t token : tokens) {
+            auto input = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, &token);
+            logits = model.decode_step(input, caches);
+        }
+    }
     backend.finish();
     const auto prompt_end = Clock::now();
 
@@ -254,9 +270,17 @@ BenchResult run_hybrid_once(motifcl::Backend& backend,
 
     auto cache = model.create_runtime_cache(backend, 1, gen.use_paged_kv_cache, gen.kv_page_size);
     const auto prompt_start = Clock::now();
-    auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
-                                           motifcl::DType::I32, tokens.data());
-    auto logits = model.forward_with_cache_last_logits(input, cache);
+    motifcl::Tensor logits;
+    if (gen.prefill_prompt || tokens.size() == 1) {
+        auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
+                                               motifcl::DType::I32, tokens.data());
+        logits = model.forward_with_cache_last_logits(input, cache);
+    } else {
+        for (std::int32_t token : tokens) {
+            auto input = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, &token);
+            logits = model.decode_step(input, cache);
+        }
+    }
     backend.finish();
     const auto prompt_end = Clock::now();
 
