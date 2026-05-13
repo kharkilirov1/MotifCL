@@ -109,6 +109,12 @@ bool disable_kquant_prefill_row4() {
            std::string(env) != "false" && std::string(env) != "FALSE";
 }
 
+bool disable_kquant_prefill_row8() {
+    const char* env = std::getenv("MOTIFCL_DISABLE_KQUANT_PREFILL_ROW8");
+    return env && *env && std::string(env) != "0" &&
+           std::string(env) != "false" && std::string(env) != "FALSE";
+}
+
 bool disable_q6_k_prefill_rowscale() {
     const char* env = std::getenv("MOTIFCL_DISABLE_KQUANT_PREFILL_Q6_ROWSCALE");
     return env && *env && std::string(env) != "0" &&
@@ -166,9 +172,13 @@ bool is_k_quant_dtype(DType dtype) {
 }
 
 const char* q8_qk_kernel_name(DType dtype, int variant) {
-    if (dtype == DType::Q4_K) return variant == 4 ? "matmul_q8_q4_k_row4_f32" : "matmul_q8_q4_k_f32";
+    if (dtype == DType::Q4_K) {
+        if (variant == 8) return "matmul_q8_q4_k_row8_f32";
+        return variant == 4 ? "matmul_q8_q4_k_row4_f32" : "matmul_q8_q4_k_f32";
+    }
     if (dtype == DType::Q5_K) return "matmul_q8_q5_k_f32";
     if (dtype == DType::Q6_K) {
+        if (variant == 8) return "matmul_q8_q6_k_row8_f32";
         if (variant == 4) return "matmul_q8_q6_k_row4_f32";
         return variant == 1 ? "matmul_q8_q6_k_rowscale_f32" : "matmul_q8_q6_k_f32";
     }
@@ -360,13 +370,21 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
     Tensor scales_a = a.quant_scales();
     int mode_a = scale_mode(a);
     int block_a = static_cast<int>(a.quant_block_size());
+    const bool prefer_row8_shape = (N >= K && M >= 16) || M >= 128;
+    const bool use_row8 =
+        (prefer_row8_shape &&
+         (b.dtype() == DType::Q4_K || b.dtype() == DType::Q6_K) &&
+         mode_a == 1 && !disable_kquant_prefill_row4() && !disable_kquant_prefill_row8());
     const bool use_row4 =
+        (!use_row8 &&
         (((M > 1 && b.dtype() == DType::Q4_K) ||
           (M >= 32 && b.dtype() == DType::Q6_K)) &&
-         mode_a == 1 && !disable_kquant_prefill_row4());
-    const int variant = use_row4
-        ? 4
-        : ((M > 1 && b.dtype() == DType::Q6_K && mode_a == 1 && !disable_q6_k_prefill_rowscale()) ? 1 : 0);
+         mode_a == 1 && !disable_kquant_prefill_row4()));
+    const int variant = use_row8
+        ? 8
+        : (use_row4
+            ? 4
+            : ((M > 1 && b.dtype() == DType::Q6_K && mode_a == 1 && !disable_q6_k_prefill_rowscale()) ? 1 : 0));
     const char* kernel_name = q8_qk_kernel_name(b.dtype(), variant);
     auto k = a.backend().kernels.get(kernel_name);
     k.set_arg(0, a.buffer());
@@ -379,8 +397,9 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
     k.set_arg(7, scales_a.buffer());
     k.set_arg(8, mode_a);
     k.set_arg(9, block_a);
-    if (variant == 4) {
-        const std::size_t rows = (static_cast<std::size_t>(M) + 3u) / 4u;
+    if (variant == 4 || variant == 8) {
+        const std::size_t row_group = (variant == 8) ? 8u : 4u;
+        const std::size_t rows = (static_cast<std::size_t>(M) + row_group - 1u) / row_group;
         k.launch2d(round_up(static_cast<std::size_t>(N), 128), rows, 128, 1);
     } else {
         k.launch2d(round_up(static_cast<std::size_t>(N), 16), round_up(static_cast<std::size_t>(M), 16), 16, 16);
