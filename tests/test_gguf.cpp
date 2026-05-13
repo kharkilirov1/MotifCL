@@ -442,6 +442,10 @@ int main() {
     const auto q4k_decode_out = motifcl::matmul(x, native_q4k).to_vector<float>();
     const auto q5k_decode_out = motifcl::matmul(x, native_q5k).to_vector<float>();
     const auto q6k_decode_out = motifcl::matmul(x, native_q6k).to_vector<float>();
+    std::vector<float> four_rows_ones(4 * 256, 1.0f);
+    auto x4 = motifcl::Tensor::from_cpu(backend, {4, 256}, motifcl::DType::F32, four_rows_ones.data());
+    auto x4q = motifcl::quantize_q8_symmetric_rows(x4);
+    const auto q4k_prefill_out = motifcl::matmul(x4q, native_q4k).to_vector<float>();
     require(q4k_out.size() == 1 && std::fabs(q4k_out[0] - 384.0f) < 0.05f,
             "GGUF Q4_K native packed matmul failed");
     require(q5k_out.size() == 1 && std::fabs(q5k_out[0] - 400.0f) < 0.05f,
@@ -454,6 +458,12 @@ int main() {
             "GGUF Q5_K native packed F32 decode matmul failed");
     require(q6k_decode_out.size() == 1 && std::fabs(q6k_decode_out[0]) < 0.05f,
             "GGUF Q6_K native packed F32 decode matmul failed");
+    require(q4k_prefill_out.size() == 4 &&
+                std::fabs(q4k_prefill_out[0] - 384.0f) < 0.05f &&
+                std::fabs(q4k_prefill_out[1] - 384.0f) < 0.05f &&
+                std::fabs(q4k_prefill_out[2] - 384.0f) < 0.05f &&
+                std::fabs(q4k_prefill_out[3] - 384.0f) < 0.05f,
+            "GGUF Q4_K row4 prefill matmul failed");
 
     auto model = motifcl::nn::make_hf_transformer_model(backend, cfg);
     auto report = motifcl::nn::load_hf_transformer_gguf_weights(backend, model, path.string(), cfg, true, false);

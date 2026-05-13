@@ -1461,6 +1461,58 @@ __kernel void matmul_q8_q6_k_f32(__global const char* A,
     C[row * N + col] = acc;
 }
 
+#define DEFINE_MATMUL_Q8_QK_ROW4_F32(KERNEL_NAME, VALUE_FN) \
+__kernel void KERNEL_NAME(__global const char* A, \
+                          __global const uchar* B, \
+                          __global float* C, \
+                          int M, \
+                          int N, \
+                          int K, \
+                          float scale_a, \
+                          __global const float* scales_a, \
+                          int mode_a, \
+                          int block_a) { \
+    int col = get_global_id(0); \
+    int row0 = get_global_id(1) * 4; \
+    if (col >= N || row0 >= M) return; \
+    int r0 = row0 + 0, r1 = row0 + 1, r2 = row0 + 2, r3 = row0 + 3; \
+    int vr1 = r1 < M, vr2 = r2 < M, vr3 = r3 < M; \
+    float rs0 = (mode_a == 1) ? scales_a[r0] : scale_a; \
+    float rs1 = (mode_a == 1 && vr1) ? scales_a[r1] : scale_a; \
+    float rs2 = (mode_a == 1 && vr2) ? scales_a[r2] : scale_a; \
+    float rs3 = (mode_a == 1 && vr3) ? scales_a[r3] : scale_a; \
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f; \
+    for (int k = 0; k < K; ++k) { \
+        float b = VALUE_FN(B, k * N + col); \
+        float a0 = ((float)((int)A[r0 * K + k])) * \
+                   (mode_a == 1 ? rs0 : quant_matmul_scale(scales_a, scale_a, mode_a, r0, k, K, block_a)); \
+        acc0 += a0 * b; \
+        if (vr1) { \
+            float a1 = ((float)((int)A[r1 * K + k])) * \
+                       (mode_a == 1 ? rs1 : quant_matmul_scale(scales_a, scale_a, mode_a, r1, k, K, block_a)); \
+            acc1 += a1 * b; \
+        } \
+        if (vr2) { \
+            float a2 = ((float)((int)A[r2 * K + k])) * \
+                       (mode_a == 1 ? rs2 : quant_matmul_scale(scales_a, scale_a, mode_a, r2, k, K, block_a)); \
+            acc2 += a2 * b; \
+        } \
+        if (vr3) { \
+            float a3 = ((float)((int)A[r3 * K + k])) * \
+                       (mode_a == 1 ? rs3 : quant_matmul_scale(scales_a, scale_a, mode_a, r3, k, K, block_a)); \
+            acc3 += a3 * b; \
+        } \
+    } \
+    C[r0 * N + col] = acc0; \
+    if (vr1) C[r1 * N + col] = acc1; \
+    if (vr2) C[r2 * N + col] = acc2; \
+    if (vr3) C[r3 * N + col] = acc3; \
+}
+
+DEFINE_MATMUL_Q8_QK_ROW4_F32(matmul_q8_q4_k_row4_f32, gguf_q4_k_value)
+
+#undef DEFINE_MATMUL_Q8_QK_ROW4_F32
+
 __kernel void matmul_f32_q4_k_m1_f32(__global const float* A,
                                      __global const uchar* B,
                                      __global float* C,
