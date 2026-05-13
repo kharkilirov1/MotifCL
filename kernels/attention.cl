@@ -2097,6 +2097,83 @@ __kernel void qk_norm_rope_cache_append_decode_f32(__global const float* q,
     }
 }
 
+// Decode-only fused RoPE(q) + RoPE(k) + KV append for one generated token when
+// the model has no Q/K RMSNorm. This replaces two rope launches plus
+// kv_cache_append with one launch and keeps q in [B, n_head*head_dim].
+__kernel void rope_cache_append_decode_f32(__global const float* q,
+                                           __global const float* k,
+                                           __global const float* v,
+                                           __global float* q_out,
+                                           __global float* cache_k,
+                                           __global float* cache_v,
+                                           int batch,
+                                           int n_head,
+                                           int n_kv_head,
+                                           int head_dim,
+                                           int rotary_dim,
+                                           int token_offset,
+                                           int max_tokens,
+                                           float theta,
+                                           int total) {
+    const int gid = get_global_id(0);
+    if (gid >= total) return;
+    const int q_channels = n_head * head_dim;
+    const int kv_channels = n_kv_head * head_dim;
+    const int span = q_channels + 2 * kv_channels;
+    const int b = gid / span;
+    const int r = gid - b * span;
+    if (b >= batch) return;
+
+    int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
+    rd = min(rd, head_dim);
+    rd = rd - (rd & 1);
+
+    if (r < q_channels) {
+        const int c = r;
+        const int d = c % head_dim;
+        const int head_base = b * q_channels + (c / head_dim) * head_dim;
+        if (d >= rd) {
+            q_out[head_base + d] = q[head_base + d];
+            return;
+        }
+        const int pair_d = d & ~1;
+        const float exponent = (float)pair_d / (float)head_dim;
+        const float angle = (float)token_offset / pow(theta, exponent);
+        const float cs = cos(angle);
+        const float sn = sin(angle);
+        const float even = q[head_base + pair_d];
+        const float odd = q[head_base + pair_d + 1];
+        q_out[head_base + d] = (d == pair_d) ? (even * cs - odd * sn) : (even * sn + odd * cs);
+        return;
+    }
+
+    if (r < q_channels + kv_channels) {
+        const int c = r - q_channels;
+        const int d = c % head_dim;
+        const int src_base = b * kv_channels + (c / head_dim) * head_dim;
+        const int dst_base = (b * max_tokens + token_offset) * kv_channels + (c / head_dim) * head_dim;
+        float value;
+        if (d >= rd) {
+            value = k[src_base + d];
+        } else {
+            const int pair_d = d & ~1;
+            const float exponent = (float)pair_d / (float)head_dim;
+            const float angle = (float)token_offset / pow(theta, exponent);
+            const float cs = cos(angle);
+            const float sn = sin(angle);
+            const float even = k[src_base + pair_d];
+            const float odd = k[src_base + pair_d + 1];
+            value = (d == pair_d) ? (even * cs - odd * sn) : (even * sn + odd * cs);
+        }
+        cache_k[dst_base + d] = value;
+        return;
+    }
+
+    const int c = r - q_channels - kv_channels;
+    const int dst = (b * max_tokens + token_offset) * kv_channels + c;
+    cache_v[dst] = v[b * kv_channels + c];
+}
+
 __kernel void qkv_split_f32(__global const float* packed,
                             __global float* q,
                             __global float* k,

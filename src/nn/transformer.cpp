@@ -1354,7 +1354,8 @@ bool can_use_fused_qk_norm_rope_decode(const Tensor& q,
     }
     if (q_norm.weight.data.shape()[0] != head_dim || k_norm.weight.data.shape()[0] != head_dim) return false;
     int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
-    if (rd > head_dim || (rd & 1)) return false;
+    rd = std::min(rd, head_dim);
+    if (rd & 1) return false;
     if (q.backend_ptr() != k.backend_ptr() ||
         q.backend_ptr() != q_norm.weight.data.backend_ptr() ||
         q.backend_ptr() != k_norm.weight.data.backend_ptr()) {
@@ -1499,6 +1500,99 @@ Tensor fused_qk_norm_rope_cache_append_decode(const Tensor& q,
     return q_out;
 }
 
+bool can_use_fused_rope_cache_append_decode(const Tensor& q,
+                                            const Tensor& k,
+                                            const Tensor& v,
+                                            const Tensor& cache_k,
+                                            const Tensor& cache_v,
+                                            int n_head,
+                                            int n_kv_head,
+                                            int head_dim,
+                                            int64_t batch_size,
+                                            int64_t seq_len,
+                                            int64_t max_seq_len,
+                                            int64_t token_offset,
+                                            bool use_rope,
+                                            int rotary_dim) {
+    if (env_enabled("MOTIFCL_DISABLE_FUSED_ROPE_CACHE_APPEND_DECODE") || autograd::is_enabled()) return false;
+    if (!use_rope || !q.valid() || !k.valid() || !v.valid() || !cache_k.valid() || !cache_v.valid()) return false;
+    if (q.dtype() != DType::F32 || k.dtype() != DType::F32 || v.dtype() != DType::F32 ||
+        cache_k.dtype() != DType::F32 || cache_v.dtype() != DType::F32) {
+        return false;
+    }
+    if (q.ndim() != 2 || k.ndim() != 2 || v.ndim() != 2 || cache_k.ndim() != 2 || cache_v.ndim() != 2) return false;
+    if (batch_size <= 0 || seq_len != 1 || n_head <= 0 || n_kv_head <= 0 ||
+        head_dim <= 0 || max_seq_len <= 0 || token_offset < 0 || token_offset >= max_seq_len) {
+        return false;
+    }
+    if (batch_size > static_cast<int64_t>(std::numeric_limits<int>::max()) ||
+        max_seq_len > static_cast<int64_t>(std::numeric_limits<int>::max()) ||
+        token_offset > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    const int64_t q_channels = static_cast<int64_t>(n_head) * head_dim;
+    const int64_t kv_channels = static_cast<int64_t>(n_kv_head) * head_dim;
+    if (q.shape()[0] != batch_size || q.shape()[1] != q_channels) return false;
+    if (k.shape()[0] != batch_size || k.shape()[1] != kv_channels) return false;
+    if (v.shape() != k.shape()) return false;
+    if (cache_k.shape()[0] != batch_size * max_seq_len || cache_k.shape()[1] != kv_channels) return false;
+    if (cache_v.shape() != cache_k.shape()) return false;
+    int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
+    rd = std::min(rd, head_dim);
+    if (rd & 1) return false;
+    const int64_t total = batch_size * (q_channels + 2 * kv_channels);
+    if (total <= 0 || total > static_cast<int64_t>(std::numeric_limits<int>::max())) return false;
+    return q.backend_ptr() == k.backend_ptr() &&
+           q.backend_ptr() == v.backend_ptr() &&
+           q.backend_ptr() == cache_k.backend_ptr() &&
+           q.backend_ptr() == cache_v.backend_ptr();
+}
+
+Tensor fused_rope_cache_append_decode(const Tensor& q,
+                                      const Tensor& k,
+                                      const Tensor& v,
+                                      Tensor& cache_k,
+                                      Tensor& cache_v,
+                                      int n_head,
+                                      int n_kv_head,
+                                      int head_dim,
+                                      int64_t batch_size,
+                                      int64_t max_seq_len,
+                                      int64_t token_offset,
+                                      float theta,
+                                      int rotary_dim) {
+    MCL_CHECK(can_use_fused_rope_cache_append_decode(q, k, v, cache_k, cache_v, n_head, n_kv_head, head_dim,
+                                                     batch_size, 1, max_seq_len, token_offset, true, rotary_dim),
+              "fused_rope_cache_append_decode expects compatible one-token q/k/v projections and KV cache");
+    auto q_out = Tensor::empty(q.backend(), q.shape(), DType::F32);
+    auto kernel = q.backend().kernels.get("rope_cache_append_decode_f32");
+    const int q_channels = n_head * head_dim;
+    const int kv_channels = n_kv_head * head_dim;
+    const int total = static_cast<int>(batch_size) * (q_channels + 2 * kv_channels);
+    int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
+    kernel.set_arg(0, q.buffer());
+    kernel.set_arg(1, k.buffer());
+    kernel.set_arg(2, v.buffer());
+    kernel.set_arg(3, q_out.buffer());
+    kernel.set_arg(4, cache_k.buffer());
+    kernel.set_arg(5, cache_v.buffer());
+    kernel.set_arg(6, static_cast<int>(batch_size));
+    kernel.set_arg(7, n_head);
+    kernel.set_arg(8, n_kv_head);
+    kernel.set_arg(9, head_dim);
+    kernel.set_arg(10, rd);
+    kernel.set_arg(11, static_cast<int>(token_offset));
+    kernel.set_arg(12, static_cast<int>(max_seq_len));
+    kernel.set_arg(13, theta);
+    kernel.set_arg(14, total);
+    constexpr std::size_t kLocal = 128;
+    kernel.launch1d(round_up(static_cast<std::size_t>(total), kLocal), kLocal);
+    autograd::record_op("rope_cache_append_decode_f32",
+                        {q.id(), k.id(), v.id()},
+                        {q_out.id(), cache_k.id(), cache_v.id()});
+    return q_out;
+}
+
 bool can_use_fused_rmsnorm_residual_add(const Tensor& residual, const Tensor& x, const RMSNorm& norm) {
     if (env_enabled("MOTIFCL_DISABLE_FUSED_RMSNORM_RESIDUAL_ADD") || autograd::is_enabled()) return false;
     if (!residual.valid() || !x.valid() || !norm.weight.data.valid()) return false;
@@ -1629,7 +1723,16 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, KVCache& cache, 
     QKV split = project_qkv(x);
     const int64_t offset = cache.length;
     Tensor q;
-    if (use_qk_norm_ &&
+    if (!use_qk_norm_ &&
+        can_use_fused_rope_cache_append_decode(split.q, split.k, split.v, cache.k, cache.v,
+                                               n_head_, n_kv_head_, head_dim_,
+                                               batch_size, seq_len, cache.max_seq_len, offset,
+                                               use_rope_, rotary_dim_)) {
+        q = fused_rope_cache_append_decode(split.q, split.k, split.v, cache.k, cache.v,
+                                           n_head_, n_kv_head_, head_dim_,
+                                           batch_size, cache.max_seq_len, offset,
+                                           rope_theta_, rotary_dim_);
+    } else if (use_qk_norm_ &&
         can_use_fused_qk_norm_rope_cache_append_decode(split.q, split.k, split.v, q_norm_, k_norm_,
                                                        cache.k, cache.v, n_head_, n_kv_head_, head_dim_,
                                                        batch_size, seq_len, cache.max_seq_len, offset,

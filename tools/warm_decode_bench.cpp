@@ -1,4 +1,5 @@
 #include <motifcl/motifcl.hpp>
+#include <motifcl/autograd/node.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -186,6 +187,7 @@ BenchResult run_modern_once(motifcl::Backend& backend,
     auto tokens = encode_prompt(tokenizer, prompt, gen);
     MCL_CHECK(static_cast<int>(tokens.size()) <= model.config.block_size, "prompt exceeds model block_size");
     gen.seed += seed_offset;
+    motifcl::autograd::NoGradGuard no_grad;
 
     motifcl::Tensor logits;
     const auto prompt_start = Clock::now();
@@ -248,6 +250,7 @@ BenchResult run_hybrid_once(motifcl::Backend& backend,
     auto tokens = encode_prompt(tokenizer, prompt, gen);
     MCL_CHECK(static_cast<int>(tokens.size()) <= model.config.block_size, "prompt exceeds model block_size");
     gen.seed += seed_offset;
+    motifcl::autograd::NoGradGuard no_grad;
 
     auto cache = model.create_runtime_cache(backend, 1, gen.use_paged_kv_cache, gen.kv_page_size);
     const auto prompt_start = Clock::now();

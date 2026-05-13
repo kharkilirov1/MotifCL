@@ -292,6 +292,26 @@ int main() {
         }
 
         {
+            motifcl::nn::ModernSelfAttention attn(backend, cfg);
+            auto x1 = motifcl::Tensor::randn(backend, {1, cfg.n_embd}, 0.02f);
+            auto x2 = motifcl::Tensor::randn(backend, {1, cfg.n_embd}, 0.02f);
+            motifcl::autograd::NoGradGuard no_grad;
+
+            set_test_env("MOTIFCL_DISABLE_FUSED_ROPE_CACHE_APPEND_DECODE", "1");
+            motifcl::nn::KVCache ref_cache(backend, 1, cfg.block_size, cfg.n_kv_head, cfg.n_embd / cfg.n_head);
+            auto ref1 = attn.forward_with_cache(x1, ref_cache, 1, 1).to_vector<float>();
+            auto ref2 = attn.forward_with_cache(x2, ref_cache, 1, 1).to_vector<float>();
+
+            set_test_env("MOTIFCL_DISABLE_FUSED_ROPE_CACHE_APPEND_DECODE", "");
+            motifcl::nn::KVCache fused_cache(backend, 1, cfg.block_size, cfg.n_kv_head, cfg.n_embd / cfg.n_head);
+            auto fused1 = attn.forward_with_cache(x1, fused_cache, 1, 1).to_vector<float>();
+            auto fused2 = attn.forward_with_cache(x2, fused_cache, 1, 1).to_vector<float>();
+
+            require_close_vec(fused1, ref1, 3e-4f);
+            require_close_vec(fused2, ref2, 3e-4f);
+        }
+
+        {
             motifcl::nn::TransformerConfig qk_cfg = cfg;
             qk_cfg.use_qk_norm = true;
             qk_cfg.use_rope = true;
