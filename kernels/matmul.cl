@@ -1495,6 +1495,28 @@ inline float gguf_q4_k_value_n256_base(__global const uchar* B,
     return d * ((float)sc) * ((float)code) - dmin * ((float)mn);
 }
 
+inline float2 gguf_q4_k_value_n256_pair_base(__global const uchar* B,
+                                             int base,
+                                             int sub,
+                                             int l0,
+                                             int group) {
+    __global const uchar* scales = B + base + 4;
+    __global const uchar* qs = B + base + 16 + group * 32;
+    int sc = 0;
+    int mn = 0;
+    gguf_k_scale_min(sub, scales, &sc, &mn);
+    int q0 = (int)qs[l0];
+    int q1 = (int)qs[l0 + 1];
+    int code0 = (sub & 1) ? (q0 >> 4) : (q0 & 15);
+    int code1 = (sub & 1) ? (q1 >> 4) : (q1 & 15);
+    float d = gguf_f16_to_f32(gguf_load_u16_le(B, base));
+    float dmin = gguf_f16_to_f32(gguf_load_u16_le(B, base + 2));
+    float scale = d * ((float)sc);
+    float bias = dmin * ((float)mn);
+    return (float2)(scale * ((float)code0) - bias,
+                    scale * ((float)code1) - bias);
+}
+
 inline float gguf_q6_k_value_n256_base(__global const uchar* B,
                                        int base,
                                        int ql_off,
@@ -1946,6 +1968,69 @@ DEFINE_MATMUL_Q8_QK_ROW8X2_F32(matmul_q8_q4_k_row8x2_f32, gguf_q4_k_value_pair)
 DEFINE_MATMUL_Q8_QK_ROW8X2_F32(matmul_q8_q6_k_row8x2_f32, gguf_q6_k_value_pair)
 
 #undef DEFINE_MATMUL_Q8_QK_ROW8X2_F32
+
+__kernel void matmul_q8_q4_k_row8x2_n256_f32(__global const char* A,
+                                             __global const uchar* B,
+                                             __global float* C,
+                                             int M,
+                                             int N,
+                                             int K,
+                                             float scale_a,
+                                             __global const float* scales_a,
+                                             int mode_a,
+                                             int block_a) {
+    int col0 = get_global_id(0) * 2;
+    int col1 = col0 + 1;
+    int row0 = get_global_id(1) * 8;
+    if (col0 >= N || row0 >= M) return;
+    int r0 = row0 + 0, r1 = row0 + 1, r2 = row0 + 2, r3 = row0 + 3;
+    int r4 = row0 + 4, r5 = row0 + 5, r6 = row0 + 6, r7 = row0 + 7;
+    int vr1 = r1 < M, vr2 = r2 < M, vr3 = r3 < M;
+    int vr4 = r4 < M, vr5 = r5 < M, vr6 = r6 < M, vr7 = r7 < M;
+    float rs0 = scales_a[r0];
+    float rs1 = vr1 ? scales_a[r1] : 0.0f;
+    float rs2 = vr2 ? scales_a[r2] : 0.0f;
+    float rs3 = vr3 ? scales_a[r3] : 0.0f;
+    float rs4 = vr4 ? scales_a[r4] : 0.0f;
+    float rs5 = vr5 ? scales_a[r5] : 0.0f;
+    float rs6 = vr6 ? scales_a[r6] : 0.0f;
+    float rs7 = vr7 ? scales_a[r7] : 0.0f;
+    int loc = col0 & 255;
+    int sub = loc >> 5;
+    int l0 = loc & 31;
+    int group = sub >> 1;
+    int base = (col0 >> 8) * 144;
+    int base_step = (N >> 8) * 144;
+    float a00 = 0.0f, a01 = 0.0f, a10 = 0.0f, a11 = 0.0f;
+    float a20 = 0.0f, a21 = 0.0f, a30 = 0.0f, a31 = 0.0f;
+    float a40 = 0.0f, a41 = 0.0f, a50 = 0.0f, a51 = 0.0f;
+    float a60 = 0.0f, a61 = 0.0f, a70 = 0.0f, a71 = 0.0f;
+    for (int k = 0; k < K; ++k) {
+        float2 bpair = gguf_q4_k_value_n256_pair_base(B, base, sub, l0, group);
+        base += base_step;
+        float b0 = bpair.x;
+        float b1 = bpair.y;
+        float x0 = (float)((int)A[r0 * K + k]);
+        a00 += x0 * b0;
+        a01 += x0 * b1;
+        if (vr1) { float x = (float)((int)A[r1 * K + k]); a10 += x * b0; a11 += x * b1; }
+        if (vr2) { float x = (float)((int)A[r2 * K + k]); a20 += x * b0; a21 += x * b1; }
+        if (vr3) { float x = (float)((int)A[r3 * K + k]); a30 += x * b0; a31 += x * b1; }
+        if (vr4) { float x = (float)((int)A[r4 * K + k]); a40 += x * b0; a41 += x * b1; }
+        if (vr5) { float x = (float)((int)A[r5 * K + k]); a50 += x * b0; a51 += x * b1; }
+        if (vr6) { float x = (float)((int)A[r6 * K + k]); a60 += x * b0; a61 += x * b1; }
+        if (vr7) { float x = (float)((int)A[r7 * K + k]); a70 += x * b0; a71 += x * b1; }
+    }
+    C[r0 * N + col0] = a00 * rs0;
+    C[r0 * N + col1] = a01 * rs0;
+    if (vr1) { C[r1 * N + col0] = a10 * rs1; C[r1 * N + col1] = a11 * rs1; }
+    if (vr2) { C[r2 * N + col0] = a20 * rs2; C[r2 * N + col1] = a21 * rs2; }
+    if (vr3) { C[r3 * N + col0] = a30 * rs3; C[r3 * N + col1] = a31 * rs3; }
+    if (vr4) { C[r4 * N + col0] = a40 * rs4; C[r4 * N + col1] = a41 * rs4; }
+    if (vr5) { C[r5 * N + col0] = a50 * rs5; C[r5 * N + col1] = a51 * rs5; }
+    if (vr6) { C[r6 * N + col0] = a60 * rs6; C[r6 * N + col1] = a61 * rs6; }
+    if (vr7) { C[r7 * N + col0] = a70 * rs7; C[r7 * N + col1] = a71 * rs7; }
+}
 
 #define DEFINE_MATMUL_Q8_QK_ROW4_KPAR_F32(KERNEL_NAME, VALUE_FN) \
 __kernel void KERNEL_NAME(__global const char* A, \

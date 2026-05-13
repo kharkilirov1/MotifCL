@@ -121,6 +121,12 @@ bool disable_kquant_prefill_row8x2() {
            std::string(env) != "false" && std::string(env) != "FALSE";
 }
 
+bool disable_q4_k_prefill_row8x2_n256() {
+    const char* env = std::getenv("MOTIFCL_DISABLE_KQUANT_PREFILL_Q4_ROW8X2_N256");
+    return env && *env && std::string(env) != "0" &&
+           std::string(env) != "false" && std::string(env) != "FALSE";
+}
+
 bool enable_kquant_prefill_kpar() {
     const char* env = std::getenv("MOTIFCL_ENABLE_KQUANT_PREFILL_KPAR");
     return env && *env && std::string(env) != "0" &&
@@ -186,6 +192,7 @@ bool is_k_quant_dtype(DType dtype) {
 const char* q8_qk_kernel_name(DType dtype, int variant) {
     if (dtype == DType::Q4_K) {
         if (variant == 2) return "matmul_q8_q4_k_row4_kpar_f32";
+        if (variant == 19) return "matmul_q8_q4_k_row8x2_n256_f32";
         if (variant == 9) return "matmul_q8_q4_k_row8x2_f32";
         if (variant == 18) return "matmul_q8_q4_k_row8_n256_f32";
         if (variant == 8) return "matmul_q8_q4_k_row8_f32";
@@ -414,7 +421,7 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
     const int variant = use_kpar
         ? 2
         : (use_row8x2
-            ? 9
+            ? ((b.dtype() == DType::Q4_K && N % 256 == 0 && !disable_q4_k_prefill_row8x2_n256()) ? 19 : 9)
             : (use_row8
                 ? ((N % 256 == 0) ? 18 : 8)
                 : (use_row4
@@ -437,10 +444,10 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
         const std::size_t rows = (static_cast<std::size_t>(M) + kRowGroup - 1u) / kRowGroup;
         k.set_arg_local(10, kRowGroup * kKparLocal * sizeof(float));
         k.launch2d(static_cast<std::size_t>(N) * kKparLocal, rows, kKparLocal, 1);
-    } else if (variant == 4 || variant == 8 || variant == 9 || variant == 14 || variant == 18) {
-        const std::size_t row_group = (variant == 8 || variant == 9 || variant == 18) ? 8u : 4u;
+    } else if (variant == 4 || variant == 8 || variant == 9 || variant == 14 || variant == 18 || variant == 19) {
+        const std::size_t row_group = (variant == 8 || variant == 9 || variant == 18 || variant == 19) ? 8u : 4u;
         const std::size_t rows = (static_cast<std::size_t>(M) + row_group - 1u) / row_group;
-        const std::size_t cols = variant == 9
+        const std::size_t cols = (variant == 9 || variant == 19)
             ? (static_cast<std::size_t>(N) + 1u) / 2u
             : static_cast<std::size_t>(N);
         k.launch2d(round_up(cols, 128), rows, 128, 1);
