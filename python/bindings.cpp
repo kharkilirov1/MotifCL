@@ -557,15 +557,45 @@ PYBIND11_MODULE(_motifcl, m) {
         .def(py::init<motifcl::Backend&, const motifcl::nn::TransformerConfig&>(),
              py::arg("backend"), py::arg("config"))
         .def("forward", py::overload_cast<const motifcl::Tensor&>(&motifcl::nn::ModernTransformerBlock::forward))
-        .def("forward", py::overload_cast<const motifcl::Tensor&, int64_t, int64_t>(&motifcl::nn::ModernTransformerBlock::forward),
+        .def("forward", [](motifcl::nn::ModernTransformerBlock& block,
+                           const motifcl::Tensor& x,
+                           int64_t batch_size,
+                           int64_t seq_len) {
+                 return block.forward(x, batch_size, seq_len, nullptr);
+             },
              py::arg("x"), py::arg("batch_size"), py::arg("seq_len"))
-        .def("forward_masked", &motifcl::nn::ModernTransformerBlock::forward_masked,
+        .def("forward_masked", [](motifcl::nn::ModernTransformerBlock& block,
+                                  const motifcl::Tensor& x,
+                                  const motifcl::Tensor& mask,
+                                  int64_t batch_size,
+                                  int64_t seq_len) {
+                 return block.forward_masked(x, mask, batch_size, seq_len, nullptr);
+             },
              py::arg("x"), py::arg("mask"), py::arg("batch_size"), py::arg("seq_len"))
-        .def("forward_with_cache", py::overload_cast<const motifcl::Tensor&, motifcl::nn::KVCache&, int64_t, int64_t>(&motifcl::nn::ModernTransformerBlock::forward_with_cache),
+        .def("forward_with_cache", [](motifcl::nn::ModernTransformerBlock& block,
+                                      const motifcl::Tensor& x,
+                                      motifcl::nn::KVCache& cache,
+                                      int64_t batch_size,
+                                      int64_t seq_len) {
+                 return block.forward_with_cache(x, cache, batch_size, seq_len, nullptr);
+             },
              py::arg("x"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
-        .def("forward_with_paged_cache", py::overload_cast<const motifcl::Tensor&, motifcl::nn::PagedKVCache&, int64_t, int64_t>(&motifcl::nn::ModernTransformerBlock::forward_with_cache),
+        .def("forward_with_paged_cache", [](motifcl::nn::ModernTransformerBlock& block,
+                                            const motifcl::Tensor& x,
+                                            motifcl::nn::PagedKVCache& cache,
+                                            int64_t batch_size,
+                                            int64_t seq_len) {
+                 return block.forward_with_cache(x, cache, batch_size, seq_len, nullptr);
+             },
              py::arg("x"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
-        .def("forward_with_cache_masked", &motifcl::nn::ModernTransformerBlock::forward_with_cache_masked,
+        .def("forward_with_cache_masked", [](motifcl::nn::ModernTransformerBlock& block,
+                                             const motifcl::Tensor& x,
+                                             const motifcl::Tensor& mask,
+                                             motifcl::nn::KVCache& cache,
+                                             int64_t batch_size,
+                                             int64_t seq_len) {
+                 return block.forward_with_cache_masked(x, mask, cache, batch_size, seq_len, nullptr);
+             },
              py::arg("x"), py::arg("mask"), py::arg("cache"), py::arg("batch_size"), py::arg("seq_len"))
         .def("parameters", &motifcl::nn::ModernTransformerBlock::parameters, py::return_value_policy::reference)
         .def("enable_quantized_inference", &motifcl::nn::ModernTransformerBlock::enable_quantized_inference,
@@ -791,6 +821,8 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readwrite("pad_token_id", &motifcl::nn::GenerateOptions::pad_token_id)
         .def_readwrite("add_bos", &motifcl::nn::GenerateOptions::add_bos)
         .def_readwrite("prefill_prompt", &motifcl::nn::GenerateOptions::prefill_prompt)
+        .def_readwrite("adaptive_prefill", &motifcl::nn::GenerateOptions::adaptive_prefill)
+        .def_readwrite("adaptive_prefill_max_tokens", &motifcl::nn::GenerateOptions::adaptive_prefill_max_tokens)
         .def_readwrite("gpu_greedy_sampling", &motifcl::nn::GenerateOptions::gpu_greedy_sampling)
         .def_readwrite("use_paged_kv_cache", &motifcl::nn::GenerateOptions::use_paged_kv_cache)
         .def_readwrite("kv_page_size", &motifcl::nn::GenerateOptions::kv_page_size)

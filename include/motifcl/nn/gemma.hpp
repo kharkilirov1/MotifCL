@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -168,11 +169,17 @@ struct GenerateOptions {
     int pad_token_id = 0;
     bool add_bos = false;
     bool prefill_prompt = true;
+    bool adaptive_prefill = true;
+    int adaptive_prefill_max_tokens = 64;
     bool gpu_greedy_sampling = true;
     bool use_paged_kv_cache = false;
     int kv_page_size = 256;
     std::uint32_t seed = 1234;
 };
+
+bool should_use_streaming_prefill(const ModernGPTModel& model,
+                                  std::size_t prompt_token_count,
+                                  const GenerateOptions& options = {});
 
 std::vector<std::int32_t> generate(Backend& backend,
                                    ModernGPTModel& model,

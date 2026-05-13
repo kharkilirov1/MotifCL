@@ -33,7 +33,12 @@ void usage() {
         << "  --top-p FLOAT            default: 1.0\n"
         << "  --quant none|q8|q4       quantize Linear/lm_head weights for no-grad inference\n"
         << "  --ctx-size N             cap runtime context/cache length below model max context\n"
-        << "  --no-prefill             decode prompt token-by-token instead of one cached prefill\n"
+        << "  --no-prefill             force prompt token-by-token instead of one cached prefill\n"
+        << "  --force-prefill          force one cached [T] prefill and disable adaptive prefill\n"
+        << "  --disable-adaptive-prefill\n"
+        << "                            disable default small GGUF K-quant streaming prefill\n"
+        << "  --adaptive-prefill-max-tokens N\n"
+        << "                            default: 64; env override: MOTIFCL_ADAPTIVE_STREAMING_PREFILL_MAX_TOKENS\n"
         << "  --paged-kv               use paged KV cache for single-prompt generation\n"
         << "  --kv-page-size N         paged KV page size (default: 256)\n"
         << "  --repl                   keep model loaded and read one prompt per stdin line\n"
@@ -149,6 +154,14 @@ int main(int argc, char** argv) {
         else if (arg == "--quant") quant = require_value("--quant");
         else if (arg == "--ctx-size") ctx_size = std::stoi(require_value("--ctx-size"));
         else if (arg == "--no-prefill") options.prefill_prompt = false;
+        else if (arg == "--force-prefill") {
+            options.prefill_prompt = true;
+            options.adaptive_prefill = false;
+        }
+        else if (arg == "--disable-adaptive-prefill") options.adaptive_prefill = false;
+        else if (arg == "--adaptive-prefill-max-tokens") {
+            options.adaptive_prefill_max_tokens = std::stoi(require_value("--adaptive-prefill-max-tokens"));
+        }
         else if (arg == "--paged-kv") options.use_paged_kv_cache = true;
         else if (arg == "--kv-page-size") options.kv_page_size = std::stoi(require_value("--kv-page-size"));
         else if (arg == "--repl") repl = true;
@@ -165,6 +178,11 @@ int main(int argc, char** argv) {
             usage();
             return 2;
         }
+    }
+
+    if (options.max_new_tokens < 0 || options.adaptive_prefill_max_tokens < 0) {
+        std::cerr << "--max-new-tokens and --adaptive-prefill-max-tokens must be >=0\n";
+        return 2;
     }
 
     if (list_architectures) {

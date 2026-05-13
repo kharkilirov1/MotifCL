@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1675,6 +1676,117 @@ Tensor QuantizedLinear::forward(const Tensor& x) {
     return use_bias_ ? add_bias_rows(y, bias_) : y;
 }
 
+bool generation_env_flag_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) return false;
+    const auto normalized = lower_ascii(value);
+    return normalized != "0" && normalized != "false" && normalized != "off" && normalized != "no";
+}
+
+int adaptive_prefill_token_limit(const GenerateOptions& options) {
+    int limit = options.adaptive_prefill_max_tokens;
+    if (const char* value = std::getenv("MOTIFCL_ADAPTIVE_STREAMING_PREFILL_MAX_TOKENS");
+        value && *value) {
+        char* end = nullptr;
+        const long parsed = std::strtol(value, &end, 10);
+        if (end != value) {
+            if (parsed <= 0) return 0;
+            limit = parsed > static_cast<long>(std::numeric_limits<int>::max())
+                ? std::numeric_limits<int>::max()
+                : static_cast<int>(parsed);
+        }
+    }
+    return std::max(0, limit);
+}
+
+bool is_gguf_k_quant_dtype(DType dtype) {
+    return dtype == DType::Q4_K || dtype == DType::Q5_K || dtype == DType::Q6_K;
+}
+
+bool linear_has_fast_k_quant_decode_repack(const Linear& linear) {
+    if (!linear.quantized_inference_enabled() || !is_gguf_k_quant_dtype(linear.quantized_weight_dtype())) {
+        return false;
+    }
+    const auto& decode = linear.decode_quantized_weight();
+    return decode.valid() &&
+           linear.decode_quantized_weight_dtype() == DType::Q4_0_COL &&
+           decode.has_quant_scales() &&
+           decode.quant_scale_axis() == 4;
+}
+
+bool attention_has_fast_k_quant_decode_repack(const ModernSelfAttention& attention) {
+    if (attention.split_projections_enabled()) {
+        return linear_has_fast_k_quant_decode_repack(attention.q_proj()) ||
+               linear_has_fast_k_quant_decode_repack(attention.k_proj()) ||
+               linear_has_fast_k_quant_decode_repack(attention.v_proj()) ||
+               linear_has_fast_k_quant_decode_repack(attention.o_proj());
+    }
+    return linear_has_fast_k_quant_decode_repack(attention.qkv_proj()) ||
+           linear_has_fast_k_quant_decode_repack(attention.o_proj());
+}
+
+bool mlp_has_fast_k_quant_decode_repack(const ModernMLP& mlp) {
+    if (mlp.split_projections_enabled()) {
+        return linear_has_fast_k_quant_decode_repack(mlp.gate_proj()) ||
+               linear_has_fast_k_quant_decode_repack(mlp.up_proj()) ||
+               linear_has_fast_k_quant_decode_repack(mlp.down_proj);
+    }
+    return linear_has_fast_k_quant_decode_repack(mlp.gate_up_proj) ||
+           linear_has_fast_k_quant_decode_repack(mlp.down_proj);
+}
+
+bool modern_model_has_fast_k_quant_decode_repack(const ModernGPTModel& model) {
+    for (const auto& block : model.blocks) {
+        if (!block) continue;
+        if (attention_has_fast_k_quant_decode_repack(block->attention()) ||
+            mlp_has_fast_k_quant_decode_repack(block->mlp())) {
+            return true;
+        }
+        if (const auto* gate = block->per_layer_input_gate();
+            gate && linear_has_fast_k_quant_decode_repack(*gate)) {
+            return true;
+        }
+        if (const auto* projection = block->per_layer_projection();
+            projection && linear_has_fast_k_quant_decode_repack(*projection)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool should_use_streaming_prefill(const ModernGPTModel& model,
+                                  std::size_t prompt_token_count,
+                                  const GenerateOptions& options) {
+    if (!options.prefill_prompt) return true;
+    if (!options.adaptive_prefill) return false;
+    if (generation_env_flag_enabled("MOTIFCL_DISABLE_ADAPTIVE_STREAMING_PREFILL")) return false;
+    if (prompt_token_count <= 1) return false;
+    const int max_tokens = adaptive_prefill_token_limit(options);
+    if (max_tokens <= 0 || prompt_token_count > static_cast<std::size_t>(max_tokens)) return false;
+    return modern_model_has_fast_k_quant_decode_repack(model);
+}
+
+template <typename CacheContainer>
+Tensor prefill_prompt_logits(Backend& backend,
+                             ModernGPTModel& model,
+                             const std::vector<std::int32_t>& tokens,
+                             CacheContainer& caches,
+                             bool stream_prompt) {
+    if (!stream_prompt) {
+        auto input = Tensor::from_cpu(backend,
+                                      {1, static_cast<int64_t>(tokens.size())},
+                                      DType::I32,
+                                      tokens.data());
+        return model.forward_with_cache_last_logits(input, caches);
+    }
+    Tensor logits;
+    for (std::int32_t id : tokens) {
+        auto input = Tensor::from_cpu(backend, {1, 1}, DType::I32, &id);
+        logits = model.decode_step(input, caches);
+    }
+    return logits;
+}
+
 std::vector<std::int32_t> generate(Backend& backend,
                                    ModernGPTModel& model,
                                    const std::vector<std::int32_t>& prompt_tokens,
@@ -1687,24 +1799,15 @@ std::vector<std::int32_t> generate(Backend& backend,
     MCL_CHECK(!tokens.empty(), "generate requires a non-empty prompt or add_bos=true");
     MCL_CHECK(static_cast<int>(tokens.size()) <= model.config.block_size, "prompt exceeds model block_size");
     MCL_CHECK(options.kv_page_size > 0, "GenerateOptions kv_page_size must be positive");
+    MCL_CHECK(options.adaptive_prefill_max_tokens >= 0,
+              "GenerateOptions adaptive_prefill_max_tokens must be non-negative");
     if (options.max_new_tokens == 0) return tokens;
 
+    const bool stream_prompt = should_use_streaming_prefill(model, tokens.size(), options);
     Tensor logits;
     if (options.use_paged_kv_cache) {
         auto caches = model.create_paged_kv_cache(backend, 1, options.kv_page_size);
-        if (options.prefill_prompt) {
-            auto input = Tensor::from_cpu(backend,
-                                          {1, static_cast<int64_t>(tokens.size())},
-                                          DType::I32,
-                                          tokens.data());
-            logits = model.forward_with_cache_last_logits(input, caches);
-        } else {
-            for (std::size_t i = 0; i < tokens.size(); ++i) {
-                std::int32_t id = tokens[i];
-                auto input = Tensor::from_cpu(backend, {1, 1}, DType::I32, &id);
-                logits = model.decode_step(input, caches);
-            }
-        }
+        logits = prefill_prompt_logits(backend, model, tokens, caches, stream_prompt);
 
         std::mt19937 rng(options.seed);
         std::vector<float> cpu_logits;
@@ -1730,19 +1833,7 @@ std::vector<std::int32_t> generate(Backend& backend,
         return tokens;
     } else {
         auto caches = model.create_kv_cache(backend, 1);
-        if (options.prefill_prompt) {
-            auto input = Tensor::from_cpu(backend,
-                                          {1, static_cast<int64_t>(tokens.size())},
-                                          DType::I32,
-                                          tokens.data());
-            logits = model.forward_with_cache_last_logits(input, caches);
-        } else {
-            for (std::size_t i = 0; i < tokens.size(); ++i) {
-                std::int32_t id = tokens[i];
-                auto input = Tensor::from_cpu(backend, {1, 1}, DType::I32, &id);
-                logits = model.decode_step(input, caches);
-            }
-        }
+        logits = prefill_prompt_logits(backend, model, tokens, caches, stream_prompt);
 
         std::mt19937 rng(options.seed);
         std::vector<float> cpu_logits;
@@ -1787,8 +1878,20 @@ std::vector<std::vector<std::int32_t>> generate_batch(
     const std::vector<std::vector<std::int32_t>>& prompt_tokens,
     const GenerateOptions& options) {
     MCL_CHECK(options.max_new_tokens >= 0, "GenerateOptions max_new_tokens must be non-negative");
+    MCL_CHECK(options.adaptive_prefill_max_tokens >= 0,
+              "GenerateOptions adaptive_prefill_max_tokens must be non-negative");
     if (prompt_tokens.empty()) return {};
-    if (!options.prefill_prompt || options.use_paged_kv_cache) {
+    bool stream_prompts = !options.prefill_prompt || options.use_paged_kv_cache;
+    if (!stream_prompts) {
+        for (const auto& prompt : prompt_tokens) {
+            const auto prompt_len = prompt.size() + (options.add_bos ? 1u : 0u);
+            if (should_use_streaming_prefill(model, prompt_len, options)) {
+                stream_prompts = true;
+                break;
+            }
+        }
+    }
+    if (stream_prompts) {
         std::vector<std::vector<std::int32_t>> debug_out;
         debug_out.reserve(prompt_tokens.size());
         for (const auto& prompt : prompt_tokens) debug_out.push_back(generate(backend, model, prompt, options));

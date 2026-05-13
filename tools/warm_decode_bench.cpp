@@ -40,6 +40,7 @@ struct BenchResult {
     double prompt_eval_ms = 0.0;
     double decode_ms = 0.0;
     int generated_tokens = 0;
+    bool streaming_prefill = false;
 
     double decode_tok_s() const {
         return decode_ms > 0.0 ? 1000.0 * static_cast<double>(generated_tokens) / decode_ms : 0.0;
@@ -68,7 +69,12 @@ void usage() {
         << "  --warmup N               warm in-process runs before measuring (default: 1)\n"
         << "  --iters N                measured in-process runs (default: 3)\n"
         << "  --ctx-size N             cap runtime context/cache length below model max context\n"
-        << "  --no-prefill             evaluate prompt token-by-token through decode_step\n"
+        << "  --no-prefill             force prompt token-by-token through decode_step\n"
+        << "  --force-prefill          force one cached [T] prefill and disable adaptive prefill\n"
+        << "  --disable-adaptive-prefill\n"
+        << "                            disable default small GGUF K-quant streaming prefill\n"
+        << "  --adaptive-prefill-max-tokens N\n"
+        << "                            default: 64; env override: MOTIFCL_ADAPTIVE_STREAMING_PREFILL_MAX_TOKENS\n"
         << "  --paged-kv               use paged KV cache\n"
         << "  --kv-page-size N         paged KV page size (default: 256)\n"
         << "  --quant none|q8|q4       quantize dense HF Linear/lm_head weights\n"
@@ -127,6 +133,14 @@ Options parse_args(int argc, char** argv) {
         else if (arg == "--iters") opts.iters = std::stoi(require_value("--iters"));
         else if (arg == "--ctx-size") opts.ctx_size = std::stoi(require_value("--ctx-size"));
         else if (arg == "--no-prefill") opts.gen.prefill_prompt = false;
+        else if (arg == "--force-prefill") {
+            opts.gen.prefill_prompt = true;
+            opts.gen.adaptive_prefill = false;
+        }
+        else if (arg == "--disable-adaptive-prefill") opts.gen.adaptive_prefill = false;
+        else if (arg == "--adaptive-prefill-max-tokens") {
+            opts.gen.adaptive_prefill_max_tokens = std::stoi(require_value("--adaptive-prefill-max-tokens"));
+        }
         else if (arg == "--paged-kv") opts.gen.use_paged_kv_cache = true;
         else if (arg == "--kv-page-size") opts.gen.kv_page_size = std::stoi(require_value("--kv-page-size"));
         else if (arg == "--cpu-sampling") opts.gen.gpu_greedy_sampling = false;
@@ -144,8 +158,10 @@ Options parse_args(int argc, char** argv) {
             std::exit(2);
         }
     }
-    if (opts.warmup < 0 || opts.iters <= 0 || opts.gen.max_new_tokens < 0) {
-        std::cerr << "--warmup must be >=0, --iters >0, --max-new-tokens >=0\n";
+    if (opts.warmup < 0 || opts.iters <= 0 || opts.gen.max_new_tokens < 0 ||
+        opts.gen.adaptive_prefill_max_tokens < 0) {
+        std::cerr << "--warmup must be >=0, --iters >0, --max-new-tokens >=0, "
+                  << "--adaptive-prefill-max-tokens >=0\n";
         std::exit(2);
     }
     if (opts.model_path.empty() && opts.model_dir.empty() && opts.config_path.empty()) {
@@ -193,9 +209,10 @@ BenchResult run_modern_once(motifcl::Backend& backend,
 
     motifcl::Tensor logits;
     const auto prompt_start = Clock::now();
+    const bool stream_prompt = motifcl::nn::should_use_streaming_prefill(model, tokens.size(), gen);
     if (gen.use_paged_kv_cache) {
         auto caches = model.create_paged_kv_cache(backend, 1, gen.kv_page_size);
-        if (gen.prefill_prompt || tokens.size() == 1) {
+        if (!stream_prompt) {
             auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
                                                    motifcl::DType::I32, tokens.data());
             logits = model.forward_with_cache_last_logits(input, caches);
@@ -222,11 +239,11 @@ BenchResult run_modern_once(motifcl::Backend& backend,
         }
         backend.finish();
         const auto decode_end = Clock::now();
-        return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end), generated};
+        return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end), generated, stream_prompt};
     }
 
     auto caches = model.create_kv_cache(backend, 1);
-    if (gen.prefill_prompt || tokens.size() == 1) {
+    if (!stream_prompt) {
         auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
                                                motifcl::DType::I32, tokens.data());
         logits = model.forward_with_cache_last_logits(input, caches);
@@ -254,7 +271,7 @@ BenchResult run_modern_once(motifcl::Backend& backend,
     }
     backend.finish();
     const auto decode_end = Clock::now();
-    return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end), generated};
+    return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end), generated, stream_prompt};
 }
 
 BenchResult run_hybrid_once(motifcl::Backend& backend,
@@ -271,7 +288,8 @@ BenchResult run_hybrid_once(motifcl::Backend& backend,
     auto cache = model.create_runtime_cache(backend, 1, gen.use_paged_kv_cache, gen.kv_page_size);
     const auto prompt_start = Clock::now();
     motifcl::Tensor logits;
-    if (gen.prefill_prompt || tokens.size() == 1) {
+    const bool stream_prompt = !gen.prefill_prompt;
+    if (!stream_prompt) {
         auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
                                                motifcl::DType::I32, tokens.data());
         logits = model.forward_with_cache_last_logits(input, cache);
@@ -299,7 +317,7 @@ BenchResult run_hybrid_once(motifcl::Backend& backend,
     }
     backend.finish();
     const auto decode_end = Clock::now();
-    return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end), generated};
+    return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end), generated, stream_prompt};
 }
 
 template <typename RunFn>
@@ -340,6 +358,7 @@ void run_benchmark_loop(motifcl::Backend& backend,
               << "load_ms=" << load_ms << "\n"
               << "warmup_runs=" << opts.warmup << "\n"
               << "iters=" << opts.iters << "\n"
+              << "prefill_mode=" << (results.front().streaming_prefill ? "streaming" : "full") << "\n"
               << "prompt_eval_ms=" << prompt_avg << "\n"
               << "decode_ms_total=" << decode_total << "\n"
               << "decode_tokens=" << token_total << "\n"
@@ -433,6 +452,7 @@ int main(int argc, char** argv) {
                 auto result = run_hybrid_once(backend, model, tokenizer, line, opts.gen, 0);
                 std::cout << std::fixed << std::setprecision(3)
                           << "load_ms=" << load_ms
+                          << " prefill_mode=" << (result.streaming_prefill ? "streaming" : "full")
                           << " prompt_eval_ms=" << result.prompt_eval_ms
                           << " decode_tokens=" << result.generated_tokens
                           << " decode_tok_s=" << result.decode_tok_s() << "\n" << std::flush;
@@ -486,6 +506,7 @@ int main(int argc, char** argv) {
             auto result = run_modern_once(backend, model, tokenizer, line, opts.gen, 0);
             std::cout << std::fixed << std::setprecision(3)
                       << "load_ms=" << load_ms
+                      << " prefill_mode=" << (result.streaming_prefill ? "streaming" : "full")
                       << " prompt_eval_ms=" << result.prompt_eval_ms
                       << " decode_tokens=" << result.generated_tokens
                       << " decode_tok_s=" << result.decode_tok_s() << "\n" << std::flush;
