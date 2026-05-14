@@ -14,10 +14,14 @@ serving path for benchmarking and app integration.
 On Windows, use the root `motifcl.cmd` launcher instead of manually building and starting the server:
 
 ```powershell
-.\motifcl.cmd
+.\motifcl.cmd install
+motifcl
 ```
 
-That single command:
+`install` writes a `motifcl.cmd` shim into the user PATH (`%USERPROFILE%\.local\bin` by default), so after the
+one-time install the command is just `motifcl`, like `ollama`.
+
+`motifcl` without arguments:
 
 1. finds or builds `motifcl_generate_transformer`;
 2. auto-selects the newest local `.gguf` under `build/models`, `build_kquant_prefill/models`, or `models`;
@@ -27,22 +31,22 @@ That single command:
 Ollama-like terminal generation:
 
 ```powershell
-.\motifcl.cmd run "Привет. Ответь одним предложением."
+motifcl run "Привет. Ответь одним предложением."
 ```
 
 Lifecycle helpers:
 
 ```powershell
-.\motifcl.cmd list
-.\motifcl.cmd status
-.\motifcl.cmd down
+motifcl list
+motifcl status
+motifcl down
 ```
 
 Explicit model/path:
 
 ```powershell
-.\motifcl.cmd up .\build\models\gemma-4-E2B-it-GGUF\gemma-4-E2B-it-Q4_K_M.gguf
-.\motifcl.cmd run gemma "Hello"
+motifcl up .\build\models\gemma-4-E2B-it-GGUF\gemma-4-E2B-it-Q4_K_M.gguf
+motifcl run gemma "Hello"
 ```
 
 The lower-level sections below are still useful when you want to run the HTTP server in the foreground or pass

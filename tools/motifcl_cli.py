@@ -41,6 +41,59 @@ def log(message: str) -> None:
     print(f"[motifcl] {message}", flush=True)
 
 
+def path_entries(value: str | None = None) -> list[str]:
+    raw = os.environ.get("PATH", "") if value is None else value
+    return [x.strip('"') for x in raw.split(os.pathsep) if x]
+
+
+def path_contains(directory: Path, value: str | None = None) -> bool:
+    target = str(directory.resolve()).lower()
+    return any(str(Path(entry).resolve()).lower() == target for entry in path_entries(value))
+
+
+def default_shim_dir() -> Path:
+    return Path.home() / ".local" / "bin"
+
+
+def add_user_path_windows(directory: Path) -> bool:
+    if os.name != "nt":
+        return False
+    import winreg
+
+    key_path = "Environment"
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+        try:
+            current, reg_type = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            current, reg_type = "", winreg.REG_EXPAND_SZ
+        if path_contains(directory, current):
+            return False
+        updated = current + (os.pathsep if current else "") + str(directory)
+        winreg.SetValueEx(key, "Path", 0, reg_type, updated)
+    os.environ["PATH"] = os.environ.get("PATH", "") + (os.pathsep if os.environ.get("PATH") else "") + str(directory)
+    return True
+
+
+def write_shim(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        shim = directory / "motifcl.cmd"
+        shim.write_text(
+            "@echo off\r\n"
+            f'call "{ROOT / "motifcl.cmd"}" %*\r\n',
+            encoding="ascii",
+        )
+    else:
+        shim = directory / "motifcl"
+        shim.write_text(
+            "#!/usr/bin/env sh\n"
+            f'exec "{ROOT / "motifcl.cmd"}" "$@"\n',
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
+    return shim
+
+
 def normalize(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
 
@@ -379,6 +432,36 @@ def command_list(_: argparse.Namespace) -> int:
     return 0
 
 
+def command_install(args: argparse.Namespace) -> int:
+    directory = Path(args.bin_dir).expanduser().resolve()
+    shim = write_shim(directory)
+    path_changed = False
+    if os.name == "nt":
+        path_changed = add_user_path_windows(directory)
+    elif not path_contains(directory):
+        log(f"warning: {directory} is not in PATH; add it to your shell profile")
+    log(f"installed command shim: {shim}")
+    if path_changed:
+        log("added shim directory to user PATH; open a new terminal if this one does not see `motifcl`")
+    elif path_contains(directory):
+        log("shim directory is already in PATH")
+    return 0
+
+
+def command_uninstall(args: argparse.Namespace) -> int:
+    directory = Path(args.bin_dir).expanduser().resolve()
+    removed = False
+    for name in ("motifcl.cmd", "motifcl"):
+        path = directory / name
+        if path.exists():
+            path.unlink()
+            removed = True
+            log(f"removed: {path}")
+    if not removed:
+        log(f"no motifcl shim found in {directory}")
+    return 0
+
+
 def split_run_args(args: argparse.Namespace) -> tuple[str | None, str]:
     if args.model:
         return args.model, args.prompt or " ".join(args.text)
@@ -522,6 +605,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_cmd = sub.add_parser("list", help="list discovered local GGUF models")
     list_cmd.set_defaults(func=command_list)
+
+    install = sub.add_parser("install", help="install `motifcl` into the user PATH")
+    install.add_argument("--bin-dir", type=Path, default=default_shim_dir())
+    install.set_defaults(func=command_install)
+
+    uninstall = sub.add_parser("uninstall", help="remove the installed `motifcl` command shim")
+    uninstall.add_argument("--bin-dir", type=Path, default=default_shim_dir())
+    uninstall.set_defaults(func=command_uninstall)
     return parser
 
 
