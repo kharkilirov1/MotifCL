@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <regex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -42,6 +45,8 @@ void usage() {
         << "  --paged-kv               use paged KV cache for single-prompt generation\n"
         << "  --kv-page-size N         paged KV page size (default: 256)\n"
         << "  --repl                   keep model loaded and read one prompt per stdin line\n"
+        << "  --jsonl-repl             persistent machine REPL: read JSON/plain lines, emit one JSON line\n"
+        << "  --completion-only        print only newly generated text, not prompt+completion\n"
         << "  --cpu-sampling           download logits and sample on CPU instead of GPU sampler\n"
         << "  --profile                print top OpenCL kernel timings for generation\n"
         << "  --seed N                 default: 1234\n"
@@ -97,6 +102,137 @@ motifcl::nn::HFChatMessage parse_chat_message(const std::string& value) {
     return {value.substr(0, colon), value.substr(colon + 1)};
 }
 
+std::string json_escape(const std::string& value) {
+    std::ostringstream out;
+    for (unsigned char c : value) {
+        switch (c) {
+            case '\\': out << "\\\\"; break;
+            case '"': out << "\\\""; break;
+            case '\b': out << "\\b"; break;
+            case '\f': out << "\\f"; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    out << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                        << static_cast<int>(c) << std::dec << std::setfill(' ');
+                } else {
+                    out << static_cast<char>(c);
+                }
+        }
+    }
+    return out.str();
+}
+
+std::string json_unescape(std::string value) {
+    std::string out;
+    out.reserve(value.size());
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        if (value[i] != '\\' || i + 1 >= value.size()) {
+            out.push_back(value[i]);
+            continue;
+        }
+        const char c = value[++i];
+        switch (c) {
+            case '"': out.push_back('"'); break;
+            case '\\': out.push_back('\\'); break;
+            case '/': out.push_back('/'); break;
+            case 'b': out.push_back('\b'); break;
+            case 'f': out.push_back('\f'); break;
+            case 'n': out.push_back('\n'); break;
+            case 'r': out.push_back('\r'); break;
+            case 't': out.push_back('\t'); break;
+            default: out.push_back(c); break;
+        }
+    }
+    return out;
+}
+
+bool json_string_field(const std::string& text, const std::string& key, std::string& out) {
+    const std::regex re("\"" + key + "\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
+    std::smatch match;
+    if (!std::regex_search(text, match, re)) return false;
+    out = json_unescape(match[1].str());
+    return true;
+}
+
+bool json_number_field(const std::string& text, const std::string& key, double& out) {
+    const std::regex re("\"" + key + R"("\s*:\s*(-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?))");
+    std::smatch match;
+    if (!std::regex_search(text, match, re)) return false;
+    out = std::stod(match[1].str());
+    return true;
+}
+
+bool json_bool_field(const std::string& text, const std::string& key, bool& out) {
+    const std::regex re("\"" + key + R"("\s*:\s*(true|false))", std::regex::icase);
+    std::smatch match;
+    if (!std::regex_search(text, match, re)) return false;
+    out = lower_ascii(match[1].str()) == "true";
+    return true;
+}
+
+bool looks_like_json_object(const std::string& text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    return first != std::string::npos && text[first] == '{';
+}
+
+motifcl::nn::GenerateOptions options_from_json_line(const std::string& line,
+                                                    motifcl::nn::GenerateOptions base) {
+    double number = 0.0;
+    bool flag = false;
+    if (json_number_field(line, "max_new_tokens", number) ||
+        json_number_field(line, "num_predict", number)) {
+        base.max_new_tokens = static_cast<int>(number);
+    }
+    if (json_number_field(line, "temperature", number)) base.temperature = static_cast<float>(number);
+    if (json_number_field(line, "top_k", number)) base.top_k = static_cast<int>(number);
+    if (json_number_field(line, "top_p", number)) base.top_p = static_cast<float>(number);
+    if (json_number_field(line, "seed", number)) base.seed = static_cast<std::uint32_t>(number);
+    if (json_bool_field(line, "ignore_eos", flag) && flag) base.eos_token_id = -1;
+    if (json_bool_field(line, "cpu_sampling", flag)) base.gpu_greedy_sampling = !flag;
+    return base;
+}
+
+std::string prompt_from_json_or_plain(const std::string& line) {
+    if (!looks_like_json_object(line)) return line;
+    std::string value;
+    if (json_string_field(line, "prompt", value)) return value;
+    if (json_string_field(line, "input", value)) return value;
+    return {};
+}
+
+std::string id_from_json_or_empty(const std::string& line) {
+    if (!looks_like_json_object(line)) return {};
+    std::string value;
+    json_string_field(line, "id", value);
+    return value;
+}
+
+std::string generate_modern_output(motifcl::Backend& backend,
+                                   motifcl::nn::ModernGPTModel& model,
+                                   const motifcl::nn::HFTokenizer& tokenizer,
+                                   const std::string& prompt,
+                                   motifcl::nn::GenerateOptions options,
+                                   bool completion_only) {
+    if (!completion_only) {
+        return motifcl::nn::generate_hf_text(backend, model, tokenizer, prompt, options);
+    }
+    auto prompt_ids = tokenizer.encode(prompt, options.add_bos, false);
+    auto local_options = options;
+    local_options.add_bos = false;
+    if (local_options.eos_token_id < 0) local_options.eos_token_id = tokenizer.eos_token_id();
+    auto all_ids = motifcl::nn::generate(backend, model, prompt_ids, local_options);
+    const auto begin = std::min(prompt_ids.size(), all_ids.size());
+    std::vector<std::int32_t> generated(all_ids.begin() + static_cast<std::ptrdiff_t>(begin), all_ids.end());
+    return tokenizer.decode(generated, true);
+}
+
+std::string completion_by_prefix_strip(const std::string& prompt, const std::string& text) {
+    return text.rfind(prompt, 0) == 0 ? text.substr(prompt.size()) : text;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -120,6 +256,8 @@ int main(int argc, char** argv) {
     bool add_generation_prompt = true;
     bool profile = false;
     bool repl = false;
+    bool jsonl_repl = false;
+    bool completion_only = false;
     int ctx_size = 0;
     motifcl::nn::GenerateOptions options;
 
@@ -165,6 +303,11 @@ int main(int argc, char** argv) {
         else if (arg == "--paged-kv") options.use_paged_kv_cache = true;
         else if (arg == "--kv-page-size") options.kv_page_size = std::stoi(require_value("--kv-page-size"));
         else if (arg == "--repl") repl = true;
+        else if (arg == "--jsonl-repl") {
+            jsonl_repl = true;
+            repl = true;
+        }
+        else if (arg == "--completion-only") completion_only = true;
         else if (arg == "--cpu-sampling") options.gpu_greedy_sampling = false;
         else if (arg == "--profile") profile = true;
         else if (arg == "--seed") options.seed = static_cast<std::uint32_t>(std::stoul(require_value("--seed")));
@@ -323,18 +466,49 @@ int main(int argc, char** argv) {
             std::cerr << "Applied chat template: " << motifcl::nn::hf_chat_template_name(resolved_template) << "\n";
         }
         if (repl) {
-            std::cerr << "MotifCL persistent REPL ready; one prompt per line, Ctrl+Z/EOF to exit\n";
+            std::cerr << "MotifCL persistent " << (jsonl_repl ? "JSONL " : "")
+                      << "REPL ready; one prompt per line, Ctrl+Z/EOF to exit\n";
             std::string line;
             while (std::getline(std::cin, line)) {
                 if (line.empty()) continue;
-                if (profile) {
-                    backend.profiler.clear();
-                    backend.profiler.set_enabled(true);
+                const std::string request_id = id_from_json_or_empty(line);
+                const std::string runtime_prompt = prompt_from_json_or_plain(line);
+                auto request_options = looks_like_json_object(line)
+                    ? options_from_json_line(line, options)
+                    : options;
+                try {
+                    if (profile) {
+                        backend.profiler.clear();
+                        backend.profiler.set_enabled(true);
+                    }
+                    const auto start = std::chrono::steady_clock::now();
+                    const auto rendered = render_prompt(runtime_prompt, true);
+                    auto text = motifcl::nn::generate_hf_hybrid_text(backend, hybrid_model, tokenizer,
+                                                                      rendered, request_options);
+                    if (completion_only) text = completion_by_prefix_strip(rendered, text);
+                    backend.finish();
+                    const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - start).count();
+                    if (jsonl_repl) {
+                        std::cout << "{\"ok\":true";
+                        if (!request_id.empty()) std::cout << ",\"id\":\"" << json_escape(request_id) << "\"";
+                        std::cout << ",\"response\":\"" << json_escape(text) << "\""
+                                  << ",\"total_ms\":" << std::fixed << std::setprecision(3)
+                                  << (static_cast<double>(elapsed_us) / 1000.0)
+                                  << "}\n" << std::flush;
+                    } else {
+                        std::cout << text << "\n" << std::flush;
+                    }
+                    if (profile) print_profile_summary();
+                } catch (const std::exception& e) {
+                    if (jsonl_repl) {
+                        std::cout << "{\"ok\":false";
+                        if (!request_id.empty()) std::cout << ",\"id\":\"" << json_escape(request_id) << "\"";
+                        std::cout << ",\"error\":\"" << json_escape(e.what()) << "\"}\n" << std::flush;
+                    } else {
+                        std::cerr << "generation failed: " << e.what() << "\n";
+                    }
                 }
-                std::cout << motifcl::nn::generate_hf_hybrid_text(backend, hybrid_model, tokenizer,
-                                                                   render_prompt(line, true), options)
-                          << "\n" << std::flush;
-                if (profile) print_profile_summary();
             }
             return 0;
         }
@@ -343,7 +517,9 @@ int main(int argc, char** argv) {
             backend.profiler.clear();
             backend.profiler.set_enabled(true);
         }
-        std::cout << motifcl::nn::generate_hf_hybrid_text(backend, hybrid_model, tokenizer, final_prompt, options) << "\n";
+        auto text = motifcl::nn::generate_hf_hybrid_text(backend, hybrid_model, tokenizer, final_prompt, options);
+        if (completion_only) text = completion_by_prefix_strip(final_prompt, text);
+        std::cout << text << "\n";
         if (profile) print_profile_summary();
         return 0;
     }
@@ -391,18 +567,48 @@ int main(int argc, char** argv) {
         std::cerr << "Applied chat template: " << motifcl::nn::hf_chat_template_name(resolved_template) << "\n";
     }
     if (repl) {
-        std::cerr << "MotifCL persistent REPL ready; one prompt per line, Ctrl+Z/EOF to exit\n";
+        std::cerr << "MotifCL persistent " << (jsonl_repl ? "JSONL " : "")
+                  << "REPL ready; one prompt per line, Ctrl+Z/EOF to exit\n";
         std::string line;
         while (std::getline(std::cin, line)) {
             if (line.empty()) continue;
-            if (profile) {
-                backend.profiler.clear();
-                backend.profiler.set_enabled(true);
+            const std::string request_id = id_from_json_or_empty(line);
+            const std::string runtime_prompt = prompt_from_json_or_plain(line);
+            auto request_options = looks_like_json_object(line)
+                ? options_from_json_line(line, options)
+                : options;
+            try {
+                if (profile) {
+                    backend.profiler.clear();
+                    backend.profiler.set_enabled(true);
+                }
+                const auto start = std::chrono::steady_clock::now();
+                const auto text = generate_modern_output(backend, model, tokenizer,
+                                                         render_prompt(runtime_prompt, true),
+                                                         request_options, completion_only);
+                backend.finish();
+                const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+                if (jsonl_repl) {
+                    std::cout << "{\"ok\":true";
+                    if (!request_id.empty()) std::cout << ",\"id\":\"" << json_escape(request_id) << "\"";
+                    std::cout << ",\"response\":\"" << json_escape(text) << "\""
+                              << ",\"total_ms\":" << std::fixed << std::setprecision(3)
+                              << (static_cast<double>(elapsed_us) / 1000.0)
+                              << "}\n" << std::flush;
+                } else {
+                    std::cout << text << "\n" << std::flush;
+                }
+                if (profile) print_profile_summary();
+            } catch (const std::exception& e) {
+                if (jsonl_repl) {
+                    std::cout << "{\"ok\":false";
+                    if (!request_id.empty()) std::cout << ",\"id\":\"" << json_escape(request_id) << "\"";
+                    std::cout << ",\"error\":\"" << json_escape(e.what()) << "\"}\n" << std::flush;
+                } else {
+                    std::cerr << "generation failed: " << e.what() << "\n";
+                }
             }
-            std::cout << motifcl::nn::generate_hf_text(backend, model, tokenizer,
-                                                       render_prompt(line, true), options)
-                      << "\n" << std::flush;
-            if (profile) print_profile_summary();
         }
         return 0;
     }
@@ -411,7 +617,7 @@ int main(int argc, char** argv) {
         backend.profiler.clear();
         backend.profiler.set_enabled(true);
     }
-    std::cout << motifcl::nn::generate_hf_text(backend, model, tokenizer, final_prompt, options) << "\n";
+    std::cout << generate_modern_output(backend, model, tokenizer, final_prompt, options, completion_only) << "\n";
     if (profile) print_profile_summary();
     return 0;
 }
