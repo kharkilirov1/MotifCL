@@ -2531,9 +2531,15 @@ __kernel void grouped_query_attention_prefill_wg_f32(__global const float* q,
     for (int idx = lid; idx < valid; idx += local_size) {
         int kt = min_key + idx;
         int k_base = (b * key_stride + kt) * kv_channels + kv_head_offset;
-        float dot = 0.0f;
-        for (int i = 0; i < head_dim; ++i) dot += q[q_base + i] * k[k_base + i];
-        scores[idx] = dot * scale;
+        float acc_dot = 0.0f;
+        int i = 0;
+        for (; i + 3 < head_dim; i += 4) {
+            float4 qv = vload4(0, q + q_base + i);
+            float4 kv = vload4(0, k + k_base + i);
+            acc_dot += dot(qv, kv);
+        }
+        for (; i < head_dim; ++i) acc_dot += q[q_base + i] * k[k_base + i];
+        scores[idx] = acc_dot * scale;
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -2617,9 +2623,15 @@ __kernel void grouped_query_attention_decode_f32(__global const float* q,
         float score = -3.402823466e+38F;
         if (kt >= min_key && kt <= max_key) {
             int k_base = (b * key_stride + kt) * kv_channels + kv_head_offset;
-            float dot = 0.0f;
-            for (int i = 0; i < head_dim; ++i) dot += q[q_base + i] * k[k_base + i];
-            score = dot * scale;
+            float acc_dot = 0.0f;
+            int i = 0;
+            for (; i + 3 < head_dim; i += 4) {
+                float4 qv = vload4(0, q + q_base + i);
+                float4 kv = vload4(0, k + k_base + i);
+                acc_dot += dot(qv, kv);
+            }
+            for (; i < head_dim; ++i) acc_dot += q[q_base + i] * k[k_base + i];
+            score = acc_dot * scale;
         }
         scores[kt] = score;
     }

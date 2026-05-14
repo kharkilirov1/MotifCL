@@ -1545,6 +1545,47 @@ inline float4 gguf_q4_k_value_n256_quad_base(__global const uchar* B,
                     scale * ((float)code3) - bias);
 }
 
+inline float8 gguf_q4_k_value_n256_oct_base(__global const uchar* B,
+                                            int base,
+                                            int sub,
+                                            int l0,
+                                            int group) {
+    __global const uchar* scales = B + base + 4;
+    __global const uchar* qs = B + base + 16 + group * 32;
+    int sc = 0;
+    int mn = 0;
+    gguf_k_scale_min(sub, scales, &sc, &mn);
+    int q0 = (int)qs[l0 + 0];
+    int q1 = (int)qs[l0 + 1];
+    int q2 = (int)qs[l0 + 2];
+    int q3 = (int)qs[l0 + 3];
+    int q4 = (int)qs[l0 + 4];
+    int q5 = (int)qs[l0 + 5];
+    int q6 = (int)qs[l0 + 6];
+    int q7 = (int)qs[l0 + 7];
+    int high = sub & 1;
+    int code0 = high ? (q0 >> 4) : (q0 & 15);
+    int code1 = high ? (q1 >> 4) : (q1 & 15);
+    int code2 = high ? (q2 >> 4) : (q2 & 15);
+    int code3 = high ? (q3 >> 4) : (q3 & 15);
+    int code4 = high ? (q4 >> 4) : (q4 & 15);
+    int code5 = high ? (q5 >> 4) : (q5 & 15);
+    int code6 = high ? (q6 >> 4) : (q6 & 15);
+    int code7 = high ? (q7 >> 4) : (q7 & 15);
+    float d = gguf_f16_to_f32(gguf_load_u16_le(B, base));
+    float dmin = gguf_f16_to_f32(gguf_load_u16_le(B, base + 2));
+    float scale = d * ((float)sc);
+    float bias = dmin * ((float)mn);
+    return (float8)(scale * ((float)code0) - bias,
+                    scale * ((float)code1) - bias,
+                    scale * ((float)code2) - bias,
+                    scale * ((float)code3) - bias,
+                    scale * ((float)code4) - bias,
+                    scale * ((float)code5) - bias,
+                    scale * ((float)code6) - bias,
+                    scale * ((float)code7) - bias);
+}
+
 inline float gguf_q6_k_value_n256_base(__global const uchar* B,
                                        int base,
                                        int ql_off,
@@ -1589,6 +1630,57 @@ inline float4 gguf_q6_k_value_n256_quad_base(__global const uchar* B,
                     scale * ((float)code1),
                     scale * ((float)code2),
                     scale * ((float)code3));
+}
+
+inline float8 gguf_q6_k_value_n256_oct_base(__global const uchar* B,
+                                            int base,
+                                            int ql_off,
+                                            int qh_off,
+                                            int qh_shift,
+                                            int ql_high,
+                                            int scale_off) {
+    int ql0 = (int)B[base + ql_off + 0];
+    int ql1 = (int)B[base + ql_off + 1];
+    int ql2 = (int)B[base + ql_off + 2];
+    int ql3 = (int)B[base + ql_off + 3];
+    int ql4 = (int)B[base + ql_off + 4];
+    int ql5 = (int)B[base + ql_off + 5];
+    int ql6 = (int)B[base + ql_off + 6];
+    int ql7 = (int)B[base + ql_off + 7];
+    int low0 = ql_high ? ((ql0 >> 4) & 0x0f) : (ql0 & 0x0f);
+    int low1 = ql_high ? ((ql1 >> 4) & 0x0f) : (ql1 & 0x0f);
+    int low2 = ql_high ? ((ql2 >> 4) & 0x0f) : (ql2 & 0x0f);
+    int low3 = ql_high ? ((ql3 >> 4) & 0x0f) : (ql3 & 0x0f);
+    int low4 = ql_high ? ((ql4 >> 4) & 0x0f) : (ql4 & 0x0f);
+    int low5 = ql_high ? ((ql5 >> 4) & 0x0f) : (ql5 & 0x0f);
+    int low6 = ql_high ? ((ql6 >> 4) & 0x0f) : (ql6 & 0x0f);
+    int low7 = ql_high ? ((ql7 >> 4) & 0x0f) : (ql7 & 0x0f);
+    int high0 = ((((int)B[base + qh_off + 0]) >> qh_shift) & 0x03) << 4;
+    int high1 = ((((int)B[base + qh_off + 1]) >> qh_shift) & 0x03) << 4;
+    int high2 = ((((int)B[base + qh_off + 2]) >> qh_shift) & 0x03) << 4;
+    int high3 = ((((int)B[base + qh_off + 3]) >> qh_shift) & 0x03) << 4;
+    int high4 = ((((int)B[base + qh_off + 4]) >> qh_shift) & 0x03) << 4;
+    int high5 = ((((int)B[base + qh_off + 5]) >> qh_shift) & 0x03) << 4;
+    int high6 = ((((int)B[base + qh_off + 6]) >> qh_shift) & 0x03) << 4;
+    int high7 = ((((int)B[base + qh_off + 7]) >> qh_shift) & 0x03) << 4;
+    int code0 = (low0 | high0) - 32;
+    int code1 = (low1 | high1) - 32;
+    int code2 = (low2 | high2) - 32;
+    int code3 = (low3 | high3) - 32;
+    int code4 = (low4 | high4) - 32;
+    int code5 = (low5 | high5) - 32;
+    int code6 = (low6 | high6) - 32;
+    int code7 = (low7 | high7) - 32;
+    float scale = gguf_f16_to_f32(gguf_load_u16_le(B, base + 208)) *
+                  ((float)gguf_i8_from_u8(B[base + scale_off]));
+    return (float8)(scale * ((float)code0),
+                    scale * ((float)code1),
+                    scale * ((float)code2),
+                    scale * ((float)code3),
+                    scale * ((float)code4),
+                    scale * ((float)code5),
+                    scale * ((float)code6),
+                    scale * ((float)code7));
 }
 
 __kernel void matmul_q8_q4_k_f32(__global const char* A,
@@ -1945,6 +2037,115 @@ __kernel void matmul_q8_q6_k_row4x4_n256_lsa_f32(__global const char* A,
     if (vr1) { C[r1 * N + col0] = a10 * rs1; C[r1 * N + col1] = a11 * rs1; C[r1 * N + col2] = a12 * rs1; C[r1 * N + col3] = a13 * rs1; }
     if (vr2) { C[r2 * N + col0] = a20 * rs2; C[r2 * N + col1] = a21 * rs2; C[r2 * N + col2] = a22 * rs2; C[r2 * N + col3] = a23 * rs2; }
     if (vr3) { C[r3 * N + col0] = a30 * rs3; C[r3 * N + col1] = a31 * rs3; C[r3 * N + col2] = a32 * rs3; C[r3 * N + col3] = a33 * rs3; }
+}
+
+__kernel void matmul_q8_q6_k_row4x8_n256_lsa_f32(__global const char* A,
+                                                 __global const uchar* B,
+                                                 __global float* C,
+                                                 int M,
+                                                 int N,
+                                                 int K,
+                                                 float scale_a,
+                                                 __global const float* scales_a,
+                                                 int mode_a,
+                                                 int block_a,
+                                                 __local char* a_tile) {
+    int col0 = get_global_id(0) * 8;
+    int row0 = get_group_id(1) * 4;
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int active = col0 < N && row0 < M;
+    int r0 = row0 + 0, r1 = row0 + 1, r2 = row0 + 2, r3 = row0 + 3;
+    int vr1 = r1 < M, vr2 = r2 < M, vr3 = r3 < M;
+    float rs0 = row0 < M ? scales_a[r0] : 0.0f;
+    float rs1 = vr1 ? scales_a[r1] : 0.0f;
+    float rs2 = vr2 ? scales_a[r2] : 0.0f;
+    float rs3 = vr3 ? scales_a[r3] : 0.0f;
+    int loc = col0 & 255;
+    int half_idx = loc >> 7;
+    int l128 = loc & 127;
+    int l = 0;
+    int ql_high = 0;
+    int qh_shift = 0;
+    int scale_idx = 0;
+    if (l128 < 32) {
+        l = l128;
+        ql_high = 0;
+        qh_shift = 0;
+        scale_idx = (l >> 4) + 0;
+    } else if (l128 < 64) {
+        l = l128 - 32;
+        ql_high = 0;
+        qh_shift = 2;
+        scale_idx = (l >> 4) + 2;
+    } else if (l128 < 96) {
+        l = l128 - 64;
+        ql_high = 1;
+        qh_shift = 4;
+        scale_idx = (l >> 4) + 4;
+    } else {
+        l = l128 - 96;
+        ql_high = 1;
+        qh_shift = 6;
+        scale_idx = (l >> 4) + 6;
+    }
+    int ql_off = half_idx * 64 + l + ((qh_shift == 2 || qh_shift == 6) ? 32 : 0);
+    int qh_off = 128 + half_idx * 32 + l;
+    int scale_off = 192 + half_idx * 8 + scale_idx;
+    int base0 = (col0 >> 8) * 210;
+    int base_step = (N >> 8) * 210;
+    float8 a0 = (float8)(0.0f);
+    float8 a1 = (float8)(0.0f);
+    float8 a2 = (float8)(0.0f);
+    float8 a3 = (float8)(0.0f);
+    for (int k0 = 0; k0 < K; k0 += 64) {
+        int kspan = K - k0;
+        if (kspan > 64) kspan = 64;
+        int entries = 4 * kspan;
+        for (int i = lid; i < entries; i += local_size) {
+            int rr = i / kspan;
+            int kk = i - rr * kspan;
+            int row = row0 + rr;
+            a_tile[i] = row < M ? A[row * K + k0 + kk] : (char)0;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (active) {
+            int base = base0 + k0 * base_step;
+            for (int kk = 0; kk < kspan; ++kk) {
+                float8 bq = gguf_q6_k_value_n256_oct_base(B, base, ql_off, qh_off, qh_shift, ql_high, scale_off);
+                base += base_step;
+                float x0 = (float)((int)a_tile[kk]);
+                a0 += x0 * bq;
+                if (vr1) { float x = (float)((int)a_tile[kspan + kk]); a1 += x * bq; }
+                if (vr2) { float x = (float)((int)a_tile[2 * kspan + kk]); a2 += x * bq; }
+                if (vr3) { float x = (float)((int)a_tile[3 * kspan + kk]); a3 += x * bq; }
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (!active) return;
+    C[r0 * N + col0 + 0] = a0.s0 * rs0; C[r0 * N + col0 + 1] = a0.s1 * rs0;
+    C[r0 * N + col0 + 2] = a0.s2 * rs0; C[r0 * N + col0 + 3] = a0.s3 * rs0;
+    C[r0 * N + col0 + 4] = a0.s4 * rs0; C[r0 * N + col0 + 5] = a0.s5 * rs0;
+    C[r0 * N + col0 + 6] = a0.s6 * rs0; C[r0 * N + col0 + 7] = a0.s7 * rs0;
+    if (vr1) {
+        C[r1 * N + col0 + 0] = a1.s0 * rs1; C[r1 * N + col0 + 1] = a1.s1 * rs1;
+        C[r1 * N + col0 + 2] = a1.s2 * rs1; C[r1 * N + col0 + 3] = a1.s3 * rs1;
+        C[r1 * N + col0 + 4] = a1.s4 * rs1; C[r1 * N + col0 + 5] = a1.s5 * rs1;
+        C[r1 * N + col0 + 6] = a1.s6 * rs1; C[r1 * N + col0 + 7] = a1.s7 * rs1;
+    }
+    if (vr2) {
+        C[r2 * N + col0 + 0] = a2.s0 * rs2; C[r2 * N + col0 + 1] = a2.s1 * rs2;
+        C[r2 * N + col0 + 2] = a2.s2 * rs2; C[r2 * N + col0 + 3] = a2.s3 * rs2;
+        C[r2 * N + col0 + 4] = a2.s4 * rs2; C[r2 * N + col0 + 5] = a2.s5 * rs2;
+        C[r2 * N + col0 + 6] = a2.s6 * rs2; C[r2 * N + col0 + 7] = a2.s7 * rs2;
+    }
+    if (vr3) {
+        C[r3 * N + col0 + 0] = a3.s0 * rs3; C[r3 * N + col0 + 1] = a3.s1 * rs3;
+        C[r3 * N + col0 + 2] = a3.s2 * rs3; C[r3 * N + col0 + 3] = a3.s3 * rs3;
+        C[r3 * N + col0 + 4] = a3.s4 * rs3; C[r3 * N + col0 + 5] = a3.s5 * rs3;
+        C[r3 * N + col0 + 6] = a3.s6 * rs3; C[r3 * N + col0 + 7] = a3.s7 * rs3;
+    }
 }
 
 #define DEFINE_MATMUL_Q8_QK_ROW8_F32(KERNEL_NAME, VALUE_FN) \
@@ -2387,6 +2588,174 @@ __kernel void matmul_q8_q4_k_row4x4_n256_lsa_f32(__global const char* A,
     if (vr1) { C[r1 * N + col0] = a10 * rs1; C[r1 * N + col1] = a11 * rs1; C[r1 * N + col2] = a12 * rs1; C[r1 * N + col3] = a13 * rs1; }
     if (vr2) { C[r2 * N + col0] = a20 * rs2; C[r2 * N + col1] = a21 * rs2; C[r2 * N + col2] = a22 * rs2; C[r2 * N + col3] = a23 * rs2; }
     if (vr3) { C[r3 * N + col0] = a30 * rs3; C[r3 * N + col1] = a31 * rs3; C[r3 * N + col2] = a32 * rs3; C[r3 * N + col3] = a33 * rs3; }
+}
+
+__kernel void matmul_q8_q4_k_row4x8_n256_lsa_f32(__global const char* A,
+                                                 __global const uchar* B,
+                                                 __global float* C,
+                                                 int M,
+                                                 int N,
+                                                 int K,
+                                                 float scale_a,
+                                                 __global const float* scales_a,
+                                                 int mode_a,
+                                                 int block_a,
+                                                 __local char* a_tile) {
+    int col0 = get_global_id(0) * 8;
+    int row0 = get_group_id(1) * 4;
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int active = col0 < N && row0 < M;
+    int r0 = row0 + 0, r1 = row0 + 1, r2 = row0 + 2, r3 = row0 + 3;
+    int vr1 = r1 < M, vr2 = r2 < M, vr3 = r3 < M;
+    float rs0 = row0 < M ? scales_a[r0] : 0.0f;
+    float rs1 = vr1 ? scales_a[r1] : 0.0f;
+    float rs2 = vr2 ? scales_a[r2] : 0.0f;
+    float rs3 = vr3 ? scales_a[r3] : 0.0f;
+    int loc = col0 & 255;
+    int sub = loc >> 5;
+    int l0 = loc & 31;
+    int group = sub >> 1;
+    int base0 = (col0 >> 8) * 144;
+    int base_step = (N >> 8) * 144;
+    float8 a0 = (float8)(0.0f);
+    float8 a1 = (float8)(0.0f);
+    float8 a2 = (float8)(0.0f);
+    float8 a3 = (float8)(0.0f);
+    for (int k0 = 0; k0 < K; k0 += 64) {
+        int kspan = K - k0;
+        if (kspan > 64) kspan = 64;
+        int entries = 4 * kspan;
+        for (int i = lid; i < entries; i += local_size) {
+            int rr = i / kspan;
+            int kk = i - rr * kspan;
+            int row = row0 + rr;
+            a_tile[i] = row < M ? A[row * K + k0 + kk] : (char)0;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (active) {
+            int base = base0 + k0 * base_step;
+            for (int kk = 0; kk < kspan; ++kk) {
+                float8 bq = gguf_q4_k_value_n256_oct_base(B, base, sub, l0, group);
+                base += base_step;
+                float x0 = (float)((int)a_tile[kk]);
+                a0 += x0 * bq;
+                if (vr1) { float x = (float)((int)a_tile[kspan + kk]); a1 += x * bq; }
+                if (vr2) { float x = (float)((int)a_tile[2 * kspan + kk]); a2 += x * bq; }
+                if (vr3) { float x = (float)((int)a_tile[3 * kspan + kk]); a3 += x * bq; }
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (!active) return;
+    C[r0 * N + col0 + 0] = a0.s0 * rs0;
+    C[r0 * N + col0 + 1] = a0.s1 * rs0;
+    C[r0 * N + col0 + 2] = a0.s2 * rs0;
+    C[r0 * N + col0 + 3] = a0.s3 * rs0;
+    C[r0 * N + col0 + 4] = a0.s4 * rs0;
+    C[r0 * N + col0 + 5] = a0.s5 * rs0;
+    C[r0 * N + col0 + 6] = a0.s6 * rs0;
+    C[r0 * N + col0 + 7] = a0.s7 * rs0;
+    if (vr1) {
+        C[r1 * N + col0 + 0] = a1.s0 * rs1; C[r1 * N + col0 + 1] = a1.s1 * rs1;
+        C[r1 * N + col0 + 2] = a1.s2 * rs1; C[r1 * N + col0 + 3] = a1.s3 * rs1;
+        C[r1 * N + col0 + 4] = a1.s4 * rs1; C[r1 * N + col0 + 5] = a1.s5 * rs1;
+        C[r1 * N + col0 + 6] = a1.s6 * rs1; C[r1 * N + col0 + 7] = a1.s7 * rs1;
+    }
+    if (vr2) {
+        C[r2 * N + col0 + 0] = a2.s0 * rs2; C[r2 * N + col0 + 1] = a2.s1 * rs2;
+        C[r2 * N + col0 + 2] = a2.s2 * rs2; C[r2 * N + col0 + 3] = a2.s3 * rs2;
+        C[r2 * N + col0 + 4] = a2.s4 * rs2; C[r2 * N + col0 + 5] = a2.s5 * rs2;
+        C[r2 * N + col0 + 6] = a2.s6 * rs2; C[r2 * N + col0 + 7] = a2.s7 * rs2;
+    }
+    if (vr3) {
+        C[r3 * N + col0 + 0] = a3.s0 * rs3; C[r3 * N + col0 + 1] = a3.s1 * rs3;
+        C[r3 * N + col0 + 2] = a3.s2 * rs3; C[r3 * N + col0 + 3] = a3.s3 * rs3;
+        C[r3 * N + col0 + 4] = a3.s4 * rs3; C[r3 * N + col0 + 5] = a3.s5 * rs3;
+        C[r3 * N + col0 + 6] = a3.s6 * rs3; C[r3 * N + col0 + 7] = a3.s7 * rs3;
+    }
+}
+
+__kernel void matmul_q8_q4_k_row8x4_n256_lsa_f32(__global const char* A,
+                                                 __global const uchar* B,
+                                                 __global float* C,
+                                                 int M,
+                                                 int N,
+                                                 int K,
+                                                 float scale_a,
+                                                 __global const float* scales_a,
+                                                 int mode_a,
+                                                 int block_a,
+                                                 __local char* a_tile) {
+    int col0 = get_global_id(0) * 4;
+    int row0 = get_group_id(1) * 8;
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int active = col0 < N && row0 < M;
+    int r0 = row0 + 0, r1 = row0 + 1, r2 = row0 + 2, r3 = row0 + 3;
+    int r4 = row0 + 4, r5 = row0 + 5, r6 = row0 + 6, r7 = row0 + 7;
+    int vr1 = r1 < M, vr2 = r2 < M, vr3 = r3 < M;
+    int vr4 = r4 < M, vr5 = r5 < M, vr6 = r6 < M, vr7 = r7 < M;
+    float rs0 = row0 < M ? scales_a[r0] : 0.0f;
+    float rs1 = vr1 ? scales_a[r1] : 0.0f;
+    float rs2 = vr2 ? scales_a[r2] : 0.0f;
+    float rs3 = vr3 ? scales_a[r3] : 0.0f;
+    float rs4 = vr4 ? scales_a[r4] : 0.0f;
+    float rs5 = vr5 ? scales_a[r5] : 0.0f;
+    float rs6 = vr6 ? scales_a[r6] : 0.0f;
+    float rs7 = vr7 ? scales_a[r7] : 0.0f;
+    int loc = col0 & 255;
+    int sub = loc >> 5;
+    int l0 = loc & 31;
+    int group = sub >> 1;
+    int base0 = (col0 >> 8) * 144;
+    int base_step = (N >> 8) * 144;
+    float4 a0 = (float4)(0.0f);
+    float4 a1 = (float4)(0.0f);
+    float4 a2 = (float4)(0.0f);
+    float4 a3 = (float4)(0.0f);
+    float4 a4 = (float4)(0.0f);
+    float4 a5 = (float4)(0.0f);
+    float4 a6 = (float4)(0.0f);
+    float4 a7 = (float4)(0.0f);
+    for (int k0 = 0; k0 < K; k0 += 64) {
+        int kspan = K - k0;
+        if (kspan > 64) kspan = 64;
+        int entries = 8 * kspan;
+        for (int i = lid; i < entries; i += local_size) {
+            int rr = i / kspan;
+            int kk = i - rr * kspan;
+            int row = row0 + rr;
+            a_tile[i] = row < M ? A[row * K + k0 + kk] : (char)0;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (active) {
+            int base = base0 + k0 * base_step;
+            for (int kk = 0; kk < kspan; ++kk) {
+                float4 bq = gguf_q4_k_value_n256_quad_base(B, base, sub, l0, group);
+                base += base_step;
+                float x0 = (float)((int)a_tile[kk]);
+                a0 += x0 * bq;
+                if (vr1) { float x = (float)((int)a_tile[kspan + kk]); a1 += x * bq; }
+                if (vr2) { float x = (float)((int)a_tile[2 * kspan + kk]); a2 += x * bq; }
+                if (vr3) { float x = (float)((int)a_tile[3 * kspan + kk]); a3 += x * bq; }
+                if (vr4) { float x = (float)((int)a_tile[4 * kspan + kk]); a4 += x * bq; }
+                if (vr5) { float x = (float)((int)a_tile[5 * kspan + kk]); a5 += x * bq; }
+                if (vr6) { float x = (float)((int)a_tile[6 * kspan + kk]); a6 += x * bq; }
+                if (vr7) { float x = (float)((int)a_tile[7 * kspan + kk]); a7 += x * bq; }
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (!active) return;
+    C[r0 * N + col0 + 0] = a0.s0 * rs0; C[r0 * N + col0 + 1] = a0.s1 * rs0; C[r0 * N + col0 + 2] = a0.s2 * rs0; C[r0 * N + col0 + 3] = a0.s3 * rs0;
+    if (vr1) { C[r1 * N + col0 + 0] = a1.s0 * rs1; C[r1 * N + col0 + 1] = a1.s1 * rs1; C[r1 * N + col0 + 2] = a1.s2 * rs1; C[r1 * N + col0 + 3] = a1.s3 * rs1; }
+    if (vr2) { C[r2 * N + col0 + 0] = a2.s0 * rs2; C[r2 * N + col0 + 1] = a2.s1 * rs2; C[r2 * N + col0 + 2] = a2.s2 * rs2; C[r2 * N + col0 + 3] = a2.s3 * rs2; }
+    if (vr3) { C[r3 * N + col0 + 0] = a3.s0 * rs3; C[r3 * N + col0 + 1] = a3.s1 * rs3; C[r3 * N + col0 + 2] = a3.s2 * rs3; C[r3 * N + col0 + 3] = a3.s3 * rs3; }
+    if (vr4) { C[r4 * N + col0 + 0] = a4.s0 * rs4; C[r4 * N + col0 + 1] = a4.s1 * rs4; C[r4 * N + col0 + 2] = a4.s2 * rs4; C[r4 * N + col0 + 3] = a4.s3 * rs4; }
+    if (vr5) { C[r5 * N + col0 + 0] = a5.s0 * rs5; C[r5 * N + col0 + 1] = a5.s1 * rs5; C[r5 * N + col0 + 2] = a5.s2 * rs5; C[r5 * N + col0 + 3] = a5.s3 * rs5; }
+    if (vr6) { C[r6 * N + col0 + 0] = a6.s0 * rs6; C[r6 * N + col0 + 1] = a6.s1 * rs6; C[r6 * N + col0 + 2] = a6.s2 * rs6; C[r6 * N + col0 + 3] = a6.s3 * rs6; }
+    if (vr7) { C[r7 * N + col0 + 0] = a7.s0 * rs7; C[r7 * N + col0 + 1] = a7.s1 * rs7; C[r7 * N + col0 + 2] = a7.s2 * rs7; C[r7 * N + col0 + 3] = a7.s3 * rs7; }
 }
 
 #define DEFINE_MATMUL_Q8_QK_ROW4_KPAR_F32(KERNEL_NAME, VALUE_FN) \

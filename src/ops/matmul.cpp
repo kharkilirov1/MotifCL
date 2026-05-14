@@ -139,6 +139,18 @@ bool disable_q4_k_prefill_row4x4_n256_lsa() {
            std::string(env) != "false" && std::string(env) != "FALSE";
 }
 
+bool disable_q4_k_prefill_row4x8_n256_lsa() {
+    const char* env = std::getenv("MOTIFCL_DISABLE_KQUANT_PREFILL_Q4_ROW4X8_N256_LSA");
+    return env && *env && std::string(env) != "0" &&
+           std::string(env) != "false" && std::string(env) != "FALSE";
+}
+
+bool disable_q4_k_prefill_row8x4_n256_lsa() {
+    const char* env = std::getenv("MOTIFCL_DISABLE_KQUANT_PREFILL_Q4_ROW8X4_N256_LSA");
+    return env && *env && std::string(env) != "0" &&
+           std::string(env) != "false" && std::string(env) != "FALSE";
+}
+
 bool disable_q6_k_prefill_row4x4_n256() {
     const char* env = std::getenv("MOTIFCL_DISABLE_KQUANT_PREFILL_Q6_ROW4X4_N256");
     return env && *env && std::string(env) != "0" &&
@@ -147,6 +159,12 @@ bool disable_q6_k_prefill_row4x4_n256() {
 
 bool disable_q6_k_prefill_row4x4_n256_lsa() {
     const char* env = std::getenv("MOTIFCL_DISABLE_KQUANT_PREFILL_Q6_ROW4X4_N256_LSA");
+    return env && *env && std::string(env) != "0" &&
+           std::string(env) != "false" && std::string(env) != "FALSE";
+}
+
+bool disable_q6_k_prefill_row4x8_n256_lsa() {
+    const char* env = std::getenv("MOTIFCL_DISABLE_KQUANT_PREFILL_Q6_ROW4X8_N256_LSA");
     return env && *env && std::string(env) != "0" &&
            std::string(env) != "false" && std::string(env) != "FALSE";
 }
@@ -216,6 +234,8 @@ bool is_k_quant_dtype(DType dtype) {
 const char* q8_qk_kernel_name(DType dtype, int variant) {
     if (dtype == DType::Q4_K) {
         if (variant == 2) return "matmul_q8_q4_k_row4_kpar_f32";
+        if (variant == 61) return "matmul_q8_q4_k_row8x4_n256_lsa_f32";
+        if (variant == 60) return "matmul_q8_q4_k_row4x8_n256_lsa_f32";
         if (variant == 59) return "matmul_q8_q4_k_row4x4_n256_lsa_f32";
         if (variant == 49) return "matmul_q8_q4_k_row4x4_n256_f32";
         if (variant == 19) return "matmul_q8_q4_k_row8x2_n256_f32";
@@ -227,6 +247,7 @@ const char* q8_qk_kernel_name(DType dtype, int variant) {
     if (dtype == DType::Q5_K) return "matmul_q8_q5_k_f32";
     if (dtype == DType::Q6_K) {
         if (variant == 2) return "matmul_q8_q6_k_row4_kpar_f32";
+        if (variant == 80) return "matmul_q8_q6_k_row4x8_n256_lsa_f32";
         if (variant == 79) return "matmul_q8_q6_k_row4x4_n256_lsa_f32";
         if (variant == 69) return "matmul_q8_q6_k_row4x4_n256_f32";
         if (variant == 9) return "matmul_q8_q6_k_row8x2_f32";
@@ -452,30 +473,50 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
     const bool use_q4_row4x4_n256_lsa =
         (use_q4_row4x4_n256 && K >= 512 &&
          !disable_q4_k_prefill_row4x4_n256_lsa());
+    const bool use_q4_row4x8_n256_lsa =
+        (use_q4_row4x4_n256_lsa && M >= 64 &&
+         !disable_q4_k_prefill_row4x8_n256_lsa());
+    const bool use_q4_row8x4_n256_lsa =
+        (use_q4_row4x4_n256_lsa && M >= 64 &&
+         !disable_q4_k_prefill_row8x4_n256_lsa());
     const bool use_q6_row4x4_n256 =
         (b.dtype() == DType::Q6_K && N % 256 == 0 &&
          !disable_q6_k_prefill_row4x4_n256());
     const bool use_q6_row4x4_n256_lsa =
         (use_q6_row4x4_n256 && K >= 512 &&
          !disable_q6_k_prefill_row4x4_n256_lsa());
+    const bool use_q6_row4x8_n256_lsa =
+        (use_q6_row4x4_n256_lsa && M >= 64 &&
+         !disable_q6_k_prefill_row4x8_n256_lsa());
     int variant = 0;
     if (use_kpar) {
         variant = 2;
     } else if (use_row8x2) {
-        if (use_q4_row4x4_n256_lsa) variant = 59;
+        if (use_q4_row8x4_n256_lsa) variant = 61;
+        else if (use_q4_row4x8_n256_lsa) variant = 60;
+        else if (use_q4_row4x4_n256_lsa) variant = 59;
         else if (use_q4_row4x4_n256) variant = 49;
+        else if (use_q6_row4x8_n256_lsa) variant = 80;
+        else if (use_q6_row4x4_n256_lsa) variant = 79;
+        else if (use_q6_row4x4_n256) variant = 69;
         else if (b.dtype() == DType::Q4_K && N % 256 == 0 && !disable_q4_k_prefill_row8x2_n256()) variant = 19;
         else variant = 9;
     } else if (use_row8) {
-        if (use_q4_row4x4_n256_lsa) variant = 59;
+        if (use_q4_row8x4_n256_lsa) variant = 61;
+        else if (use_q4_row4x8_n256_lsa) variant = 60;
+        else if (use_q4_row4x4_n256_lsa) variant = 59;
         else if (use_q4_row4x4_n256) variant = 49;
+        else if (use_q6_row4x8_n256_lsa) variant = 80;
         else if (use_q6_row4x4_n256_lsa) variant = 79;
         else if (use_q6_row4x4_n256) variant = 69;
         else if (b.dtype() == DType::Q4_K && N % 256 == 0 && !disable_q4_k_prefill_row8x2_n256()) variant = 19;
         else variant = (N % 256 == 0) ? 18 : 8;
     } else if (use_row4) {
-        if (use_q4_row4x4_n256_lsa && M >= 64) variant = 59;
+        if (use_q4_row8x4_n256_lsa) variant = 61;
+        else if (use_q4_row4x8_n256_lsa) variant = 60;
+        else if (use_q4_row4x4_n256_lsa && M >= 64) variant = 59;
         else if (use_q4_row4x4_n256 && M >= 64) variant = 49;
+        else if (use_q6_row4x8_n256_lsa) variant = 80;
         else if (use_q6_row4x4_n256_lsa && M >= 64) variant = 79;
         else if (use_q6_row4x4_n256 && M >= 64) variant = 69;
         else variant = (b.dtype() == DType::Q6_K && N % 256 == 0) ? 14 : 4;
@@ -499,13 +540,15 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
         const std::size_t rows = (static_cast<std::size_t>(M) + kRowGroup - 1u) / kRowGroup;
         k.set_arg_local(10, kRowGroup * kKparLocal * sizeof(float));
         k.launch2d(static_cast<std::size_t>(N) * kKparLocal, rows, kKparLocal, 1);
-    } else if (variant == 59 || variant == 79) {
+    } else if (variant == 59 || variant == 60 || variant == 61 || variant == 79 || variant == 80) {
         const std::size_t kLocal =
-            (variant == 59 && a.backend().device_info().max_work_group_size >= 256u) ? 256u : 128u;
-        constexpr std::size_t kRowGroup = 4;
+            ((variant == 59 || variant == 60 || variant == 61) && a.backend().device_info().max_work_group_size >= 256u) ? 256u : 128u;
+        const std::size_t kRowGroup = (variant == 61) ? 8u : 4u;
         constexpr std::size_t kTileK = 64;
         const std::size_t rows = (static_cast<std::size_t>(M) + kRowGroup - 1u) / kRowGroup;
-        const std::size_t cols = (static_cast<std::size_t>(N) + 3u) / 4u;
+        const std::size_t cols = (variant == 60 || variant == 80)
+            ? (static_cast<std::size_t>(N) + 7u) / 8u
+            : (static_cast<std::size_t>(N) + 3u) / 4u;
         k.set_arg_local(10, kRowGroup * kTileK * sizeof(char));
         k.launch2d(round_up(cols, kLocal), rows, kLocal, 1);
     } else if (variant == 4 || variant == 8 || variant == 9 || variant == 14 || variant == 18 || variant == 19 || variant == 49 || variant == 69) {
