@@ -1560,6 +1560,37 @@ inline float gguf_q6_k_value_n256_base(__global const uchar* B,
     return d * ((float)gguf_i8_from_u8(B[base + scale_off])) * ((float)code);
 }
 
+inline float4 gguf_q6_k_value_n256_quad_base(__global const uchar* B,
+                                             int base,
+                                             int ql_off,
+                                             int qh_off,
+                                             int qh_shift,
+                                             int ql_high,
+                                             int scale_off) {
+    int ql0 = (int)B[base + ql_off + 0];
+    int ql1 = (int)B[base + ql_off + 1];
+    int ql2 = (int)B[base + ql_off + 2];
+    int ql3 = (int)B[base + ql_off + 3];
+    int low0 = ql_high ? ((ql0 >> 4) & 0x0f) : (ql0 & 0x0f);
+    int low1 = ql_high ? ((ql1 >> 4) & 0x0f) : (ql1 & 0x0f);
+    int low2 = ql_high ? ((ql2 >> 4) & 0x0f) : (ql2 & 0x0f);
+    int low3 = ql_high ? ((ql3 >> 4) & 0x0f) : (ql3 & 0x0f);
+    int high0 = ((((int)B[base + qh_off + 0]) >> qh_shift) & 0x03) << 4;
+    int high1 = ((((int)B[base + qh_off + 1]) >> qh_shift) & 0x03) << 4;
+    int high2 = ((((int)B[base + qh_off + 2]) >> qh_shift) & 0x03) << 4;
+    int high3 = ((((int)B[base + qh_off + 3]) >> qh_shift) & 0x03) << 4;
+    int code0 = (low0 | high0) - 32;
+    int code1 = (low1 | high1) - 32;
+    int code2 = (low2 | high2) - 32;
+    int code3 = (low3 | high3) - 32;
+    float scale = gguf_f16_to_f32(gguf_load_u16_le(B, base + 208)) *
+                  ((float)gguf_i8_from_u8(B[base + scale_off]));
+    return (float4)(scale * ((float)code0),
+                    scale * ((float)code1),
+                    scale * ((float)code2),
+                    scale * ((float)code3));
+}
+
 __kernel void matmul_q8_q4_k_f32(__global const char* A,
                                  __global const uchar* B,
                                  __global float* C,
@@ -1738,6 +1769,84 @@ __kernel void matmul_q8_q6_k_row4_n256_f32(__global const char* A,
     if (vr1) C[r1 * N + col] = acc1 * rs1;
     if (vr2) C[r2 * N + col] = acc2 * rs2;
     if (vr3) C[r3 * N + col] = acc3 * rs3;
+}
+
+__kernel void matmul_q8_q6_k_row4x4_n256_f32(__global const char* A,
+                                             __global const uchar* B,
+                                             __global float* C,
+                                             int M,
+                                             int N,
+                                             int K,
+                                             float scale_a,
+                                             __global const float* scales_a,
+                                             int mode_a,
+                                             int block_a) {
+    int col0 = get_global_id(0) * 4;
+    int col1 = col0 + 1;
+    int col2 = col0 + 2;
+    int col3 = col0 + 3;
+    int row0 = get_global_id(1) * 4;
+    if (col0 >= N || row0 >= M) return;
+    int r0 = row0 + 0, r1 = row0 + 1, r2 = row0 + 2, r3 = row0 + 3;
+    int vr1 = r1 < M, vr2 = r2 < M, vr3 = r3 < M;
+    float rs0 = scales_a[r0];
+    float rs1 = vr1 ? scales_a[r1] : 0.0f;
+    float rs2 = vr2 ? scales_a[r2] : 0.0f;
+    float rs3 = vr3 ? scales_a[r3] : 0.0f;
+    int loc = col0 & 255;
+    int half_idx = loc >> 7;
+    int l128 = loc & 127;
+    int l = 0;
+    int ql_high = 0;
+    int qh_shift = 0;
+    int scale_idx = 0;
+    if (l128 < 32) {
+        l = l128;
+        ql_high = 0;
+        qh_shift = 0;
+        scale_idx = (l >> 4) + 0;
+    } else if (l128 < 64) {
+        l = l128 - 32;
+        ql_high = 0;
+        qh_shift = 2;
+        scale_idx = (l >> 4) + 2;
+    } else if (l128 < 96) {
+        l = l128 - 64;
+        ql_high = 1;
+        qh_shift = 4;
+        scale_idx = (l >> 4) + 4;
+    } else {
+        l = l128 - 96;
+        ql_high = 1;
+        qh_shift = 6;
+        scale_idx = (l >> 4) + 6;
+    }
+    int ql_off = half_idx * 64 + l + ((qh_shift == 2 || qh_shift == 6) ? 32 : 0);
+    int qh_off = 128 + half_idx * 32 + l;
+    int scale_off = 192 + half_idx * 8 + scale_idx;
+    int base = (col0 >> 8) * 210;
+    int base_step = (N >> 8) * 210;
+    float a00 = 0.0f, a01 = 0.0f, a02 = 0.0f, a03 = 0.0f;
+    float a10 = 0.0f, a11 = 0.0f, a12 = 0.0f, a13 = 0.0f;
+    float a20 = 0.0f, a21 = 0.0f, a22 = 0.0f, a23 = 0.0f;
+    float a30 = 0.0f, a31 = 0.0f, a32 = 0.0f, a33 = 0.0f;
+    for (int k = 0; k < K; ++k) {
+        float4 bq = gguf_q6_k_value_n256_quad_base(B, base, ql_off, qh_off, qh_shift, ql_high, scale_off);
+        base += base_step;
+        float b0 = bq.x, b1 = bq.y, b2 = bq.z, b3 = bq.w;
+        float x0 = (float)((int)A[r0 * K + k]);
+        a00 += x0 * b0; a01 += x0 * b1; a02 += x0 * b2; a03 += x0 * b3;
+        if (vr1) { float x = (float)((int)A[r1 * K + k]); a10 += x * b0; a11 += x * b1; a12 += x * b2; a13 += x * b3; }
+        if (vr2) { float x = (float)((int)A[r2 * K + k]); a20 += x * b0; a21 += x * b1; a22 += x * b2; a23 += x * b3; }
+        if (vr3) { float x = (float)((int)A[r3 * K + k]); a30 += x * b0; a31 += x * b1; a32 += x * b2; a33 += x * b3; }
+    }
+    C[r0 * N + col0] = a00 * rs0;
+    C[r0 * N + col1] = a01 * rs0;
+    C[r0 * N + col2] = a02 * rs0;
+    C[r0 * N + col3] = a03 * rs0;
+    if (vr1) { C[r1 * N + col0] = a10 * rs1; C[r1 * N + col1] = a11 * rs1; C[r1 * N + col2] = a12 * rs1; C[r1 * N + col3] = a13 * rs1; }
+    if (vr2) { C[r2 * N + col0] = a20 * rs2; C[r2 * N + col1] = a21 * rs2; C[r2 * N + col2] = a22 * rs2; C[r2 * N + col3] = a23 * rs2; }
+    if (vr3) { C[r3 * N + col0] = a30 * rs3; C[r3 * N + col1] = a31 * rs3; C[r3 * N + col2] = a32 * rs3; C[r3 * N + col3] = a33 * rs3; }
 }
 
 #define DEFINE_MATMUL_Q8_QK_ROW8_F32(KERNEL_NAME, VALUE_FN) \
