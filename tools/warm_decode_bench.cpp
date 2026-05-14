@@ -30,6 +30,7 @@ struct Options {
     bool random_init = false;
     bool repl = false;
     bool profile = false;
+    bool reuse_prompt_cache = false;
     int ctx_size = 0;
     int warmup = 1;
     int iters = 3;
@@ -42,6 +43,7 @@ struct BenchResult {
     int prompt_tokens = 0;
     int generated_tokens = 0;
     bool streaming_prefill = false;
+    bool cached_prompt = false;
 
     double decode_tok_s() const {
         return decode_ms > 0.0 ? 1000.0 * static_cast<double>(generated_tokens) / decode_ms : 0.0;
@@ -78,6 +80,7 @@ void usage() {
         << "                            default: 24; env override: MOTIFCL_ADAPTIVE_STREAMING_PREFILL_MAX_TOKENS\n"
         << "  --paged-kv               use paged KV cache\n"
         << "  --kv-page-size N         paged KV page size (default: 256)\n"
+        << "  --reuse-prompt-cache     build prompt KV once, then benchmark decode from the cached prefix\n"
         << "  --quant none|q8|q4       quantize dense HF Linear/lm_head weights\n"
         << "  --cpu-sampling           download logits and sample on CPU (default: GPU sampler)\n"
         << "  --seed N                 default: 1234\n"
@@ -144,6 +147,7 @@ Options parse_args(int argc, char** argv) {
         }
         else if (arg == "--paged-kv") opts.gen.use_paged_kv_cache = true;
         else if (arg == "--kv-page-size") opts.gen.kv_page_size = std::stoi(require_value("--kv-page-size"));
+        else if (arg == "--reuse-prompt-cache") opts.reuse_prompt_cache = true;
         else if (arg == "--cpu-sampling") opts.gen.gpu_greedy_sampling = false;
         else if (arg == "--seed") opts.gen.seed = static_cast<std::uint32_t>(std::stoul(require_value("--seed")));
         else if (arg == "--repl") opts.repl = true;
@@ -277,6 +281,82 @@ BenchResult run_modern_once(motifcl::Backend& backend,
             static_cast<int>(tokens.size() - generated), generated, stream_prompt};
 }
 
+struct ModernPromptCache {
+    std::vector<std::int32_t> prompt_tokens;
+    std::vector<motifcl::nn::KVCache> caches;
+    motifcl::Tensor logits;
+    double build_ms = 0.0;
+    bool streaming_prefill = false;
+};
+
+ModernPromptCache build_modern_prompt_cache(motifcl::Backend& backend,
+                                            motifcl::nn::ModernGPTModel& model,
+                                            const motifcl::nn::HFTokenizer& tokenizer,
+                                            const std::string& prompt,
+                                            motifcl::nn::GenerateOptions gen) {
+    MCL_CHECK(!gen.use_paged_kv_cache, "--reuse-prompt-cache currently supports the regular KV cache path");
+    auto tokens = encode_prompt(tokenizer, prompt, gen);
+    MCL_CHECK(static_cast<int>(tokens.size()) <= model.config.block_size, "prompt exceeds model block_size");
+    motifcl::autograd::NoGradGuard no_grad;
+
+    ModernPromptCache cache;
+    cache.prompt_tokens = tokens;
+    cache.caches = model.create_kv_cache(backend, 1);
+    cache.streaming_prefill = motifcl::nn::should_use_streaming_prefill(model, tokens.size(), gen);
+
+    const auto start = Clock::now();
+    if (!cache.streaming_prefill) {
+        auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
+                                               motifcl::DType::I32, tokens.data());
+        cache.logits = model.forward_with_cache_last_logits(input, cache.caches);
+    } else {
+        for (std::int32_t token : tokens) {
+            auto input = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, &token);
+            cache.logits = model.decode_step(input, cache.caches);
+        }
+    }
+    backend.finish();
+    cache.build_ms = elapsed_ms(start, Clock::now());
+    return cache;
+}
+
+BenchResult run_modern_from_prompt_cache(motifcl::Backend& backend,
+                                         motifcl::nn::ModernGPTModel& model,
+                                         ModernPromptCache& prompt_cache,
+                                         motifcl::nn::GenerateOptions gen,
+                                         std::uint32_t seed_offset) {
+    auto tokens = prompt_cache.prompt_tokens;
+    MCL_CHECK(!tokens.empty(), "cached prompt is empty");
+    gen.seed += seed_offset;
+    motifcl::autograd::NoGradGuard no_grad;
+
+    for (auto& cache : prompt_cache.caches) {
+        cache.length = static_cast<int64_t>(prompt_cache.prompt_tokens.size());
+    }
+    motifcl::Tensor logits = prompt_cache.logits;
+    std::mt19937 rng(gen.seed);
+    int generated = 0;
+    const auto decode_start = Clock::now();
+    for (int step = 0; step < gen.max_new_tokens; ++step) {
+        MCL_CHECK(static_cast<int>(tokens.size()) < model.config.block_size, "decode reached model block_size");
+        const auto next = choose_next(logits, gen, rng);
+        tokens.push_back(next);
+        ++generated;
+        if (gen.eos_token_id >= 0 && next == gen.eos_token_id) break;
+        if (step + 1 >= gen.max_new_tokens) break;
+        auto input_next = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, &next);
+        logits = model.decode_step(input_next, prompt_cache.caches);
+    }
+    backend.finish();
+    const auto decode_end = Clock::now();
+    return {0.0,
+            elapsed_ms(decode_start, decode_end),
+            static_cast<int>(prompt_cache.prompt_tokens.size()),
+            generated,
+            prompt_cache.streaming_prefill,
+            true};
+}
+
 BenchResult run_hybrid_once(motifcl::Backend& backend,
                             motifcl::nn::HybridGPTModel& model,
                             const motifcl::nn::HFTokenizer& tokenizer,
@@ -328,7 +408,8 @@ template <typename RunFn>
 void run_benchmark_loop(motifcl::Backend& backend,
                         const Options& opts,
                         RunFn&& run_once,
-                        double load_ms) {
+                        double load_ms,
+                        double prompt_cache_build_ms = 0.0) {
     for (int i = 0; i < opts.warmup; ++i) {
         (void)run_once(opts.prompt, static_cast<std::uint32_t>(i));
     }
@@ -364,7 +445,14 @@ void run_benchmark_loop(motifcl::Backend& backend,
               << "load_ms=" << load_ms << "\n"
               << "warmup_runs=" << opts.warmup << "\n"
               << "iters=" << opts.iters << "\n"
-              << "prefill_mode=" << (results.front().streaming_prefill ? "streaming" : "full") << "\n"
+              << "prefill_mode="
+              << (results.front().cached_prompt ? "cached"
+                                                 : (results.front().streaming_prefill ? "streaming" : "full"))
+              << "\n";
+    if (prompt_cache_build_ms > 0.0) {
+        std::cout << "prompt_cache_build_ms=" << prompt_cache_build_ms << "\n";
+    }
+    std::cout << std::fixed << std::setprecision(3)
               << "prompt_tokens=" << (prompt_token_total / static_cast<int>(results.size())) << "\n"
               << "prompt_eval_ms=" << prompt_avg << "\n"
               << "decode_ms_total=" << decode_total << "\n"
@@ -430,6 +518,10 @@ int main(int argc, char** argv) {
     }
 
     if (hybrid_runnable) {
+        if (opts.reuse_prompt_cache) {
+            std::cerr << "--reuse-prompt-cache is currently implemented for ModernGPTModel only\n";
+            return 2;
+        }
         if (!opts.gguf_path.empty()) {
             std::cerr << "hybrid runner currently loads HF safetensors; GGUF hybrid loading is not enabled\n";
             return 2;
@@ -505,6 +597,21 @@ int main(int argc, char** argv) {
         : motifcl::nn::load_hf_tokenizer(opts.tokenizer_path, cfg);
     backend.finish();
     const double load_ms = elapsed_ms(load_start, Clock::now());
+
+    if (opts.reuse_prompt_cache) {
+        if (opts.repl) {
+            std::cerr << "--reuse-prompt-cache is benchmark-mode only; omit --repl\n";
+            return 2;
+        }
+        auto prompt_cache = build_modern_prompt_cache(backend, model, tokenizer, opts.prompt, opts.gen);
+        run_benchmark_loop(backend, opts,
+                           [&](const std::string&, std::uint32_t seed_offset) {
+                               return run_modern_from_prompt_cache(backend, model, prompt_cache, opts.gen, seed_offset);
+                           },
+                           load_ms,
+                           prompt_cache.build_ms);
+        return 0;
+    }
 
     if (opts.repl) {
         std::cerr << "MotifCL warm benchmark REPL ready; one prompt per line\n";
