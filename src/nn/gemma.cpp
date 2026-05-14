@@ -296,6 +296,53 @@ std::string bpe_pair_key(const std::string& left, const std::string& right) {
     return key;
 }
 
+bool parse_bpe_merge_item(const std::string& item, std::string& left, std::string& right) {
+    const auto split = item.find(' ');
+    if (split == std::string::npos) return false;
+    left = item.substr(0, split);
+    right = item.substr(split + 1);
+    return !left.empty() && !right.empty();
+}
+
+void add_bpe_merge(std::unordered_map<std::string, int>& ranks,
+                   const std::string& left,
+                   const std::string& right) {
+    if (left.empty() || right.empty()) return;
+    const auto key = bpe_pair_key(left, right);
+    if (ranks.find(key) == ranks.end()) {
+        ranks[key] = static_cast<int>(ranks.size());
+    }
+}
+
+void add_bpe_merges(std::unordered_map<std::string, int>& ranks,
+                    const std::vector<std::string>& merges) {
+    std::vector<std::string> pairless;
+    pairless.reserve(merges.size());
+    for (const auto& item : merges) {
+        std::string left;
+        std::string right;
+        if (parse_bpe_merge_item(item, left, right)) {
+            add_bpe_merge(ranks, left, right);
+        } else {
+            pairless.push_back(item);
+        }
+    }
+    if (ranks.empty() && pairless.size() >= 2) {
+        for (std::size_t i = 0; i + 1 < pairless.size(); i += 2) {
+            add_bpe_merge(ranks, pairless[i], pairless[i + 1]);
+        }
+    }
+}
+
+bool looks_like_control_token(const std::string& token) {
+    if (token.size() < 3) return false;
+    if (token.front() == '<' && token.back() == '>') return true;
+    if (token.front() == '[' && token.back() == ']') return true;
+    return token.find("<|") != std::string::npos ||
+           token.find("|>") != std::string::npos ||
+           token.find("<unused") != std::string::npos;
+}
+
 std::vector<std::string> utf8_pieces(const std::string& text) {
     std::vector<std::string> out;
     for (std::size_t i = 0; i < text.size();) {
@@ -1079,6 +1126,7 @@ ModernGPTModel make_gemma_model(Backend& backend, const GemmaConfig& cfg) {
         block->norm2().eps = cfg.rms_norm_eps;
         block->attention().q_norm().eps = cfg.rms_norm_eps;
         block->attention().k_norm().eps = cfg.rms_norm_eps;
+        block->attention().v_norm().eps = cfg.rms_norm_eps;
         block->post_attention_norm().eps = cfg.rms_norm_eps;
         block->post_ffw_norm().eps = cfg.rms_norm_eps;
     }
@@ -1320,12 +1368,17 @@ GemmaWeightLoadReport load_gemma_hf_weights(Backend& backend,
         if (!gate_name.empty() && !up_name.empty()) {
             MCL_CHECK(shape_is(archive.info(gate_name), {mlp_hidden, hidden}), "gate_proj shape mismatch: " + gate_name);
             MCL_CHECK(shape_is(archive.info(up_name), {mlp_hidden, hidden}), "up_proj shape mismatch: " + up_name);
-            std::vector<float> packed(static_cast<std::size_t>(hidden * mlp_hidden * 2));
-            pack_transposed_projection(packed, mlp_hidden * 2, 0, archive.f32(gate_name), mlp_hidden, hidden);
-            pack_transposed_projection(packed, mlp_hidden * 2, mlp_hidden, archive.f32(up_name), mlp_hidden, hidden);
-            assign_parameter(block.mlp().gate_up_proj.weight, tensor_from_f32(backend, {hidden, mlp_hidden * 2}, packed), trainable);
-            report.applied.push_back(gate_name + "+" + up_name + "->gate_up_proj.weight");
-            report.loaded_tensors += 2;
+            if (block.mlp().split_projections_enabled()) {
+                apply_transposed({gate_name}, block.mlp().gate_proj().weight);
+                apply_transposed({up_name}, block.mlp().up_proj().weight);
+            } else {
+                std::vector<float> packed(static_cast<std::size_t>(hidden * mlp_hidden * 2));
+                pack_transposed_projection(packed, mlp_hidden * 2, 0, archive.f32(gate_name), mlp_hidden, hidden);
+                pack_transposed_projection(packed, mlp_hidden * 2, mlp_hidden, archive.f32(up_name), mlp_hidden, hidden);
+                assign_parameter(block.mlp().gate_up_proj.weight, tensor_from_f32(backend, {hidden, mlp_hidden * 2}, packed), trainable);
+                report.applied.push_back(gate_name + "+" + up_name + "->gate_up_proj.weight");
+                report.loaded_tensors += 2;
+            }
         }
     }
 
@@ -1344,7 +1397,9 @@ GemmaTokenizer GemmaTokenizer::byte_fallback(int vocab_size, int bos_token_id, i
 GemmaTokenizer GemmaTokenizer::from_tokens(const std::vector<std::string>& tokens,
                                            int bos_token_id,
                                            int eos_token_id,
-                                           const std::string& tokenizer_model_type) {
+                                           const std::string& tokenizer_model_type,
+                                           const std::vector<std::string>& bpe_merges,
+                                           bool add_space_prefix) {
     if (tokens.empty()) return byte_fallback(256, bos_token_id, eos_token_id);
     GemmaTokenizer tok;
     tok.byte_fallback_ = false;
@@ -1359,16 +1414,23 @@ GemmaTokenizer GemmaTokenizer::from_tokens(const std::vector<std::string>& token
         if (tokens[i].find("\xE2\x96\x81") != std::string::npos) tok.sentencepiece_style_ = true;
     }
     const auto model_type = lower_ascii(tok.tokenizer_model_type_);
+    if (!bpe_merges.empty()) {
+        add_bpe_merges(tok.bpe_merge_rank_, bpe_merges);
+        if (model_type.find("bpe") == std::string::npos) tok.tokenizer_model_type_ = "BPE";
+    }
     if (model_type.find("unigram") != std::string::npos ||
         model_type.find("sentencepiece") != std::string::npos) {
         tok.sentencepiece_style_ = true;
     }
     if (tok.sentencepiece_style_) {
-        tok.sp_add_dummy_prefix_ = true;
-        tok.sp_remove_extra_whitespaces_ = true;
+        const bool sentencepiece_model = model_type.find("unigram") != std::string::npos ||
+                                         model_type.find("sentencepiece") != std::string::npos;
+        tok.sp_add_dummy_prefix_ = sentencepiece_model ? add_space_prefix : false;
+        tok.sp_remove_extra_whitespaces_ = sentencepiece_model;
         tok.sp_escape_whitespaces_ = true;
-        tok.sp_normalizer_name_ = "nmt_nfkc";
+        tok.sp_normalizer_name_ = sentencepiece_model ? "nmt_nfkc" : "replace_space";
     }
+    tok.refresh_special_tokens();
     return tok;
 }
 
@@ -1405,6 +1467,7 @@ GemmaTokenizer GemmaTokenizer::load_vocab(const std::string& path, int bos_token
             for (std::size_t i = 0; i < sp.pieces.size(); ++i) {
                 add_token(sp.pieces[i], static_cast<std::int32_t>(i));
             }
+            tok.refresh_special_tokens();
             return tok;
         }
     }
@@ -1500,43 +1563,22 @@ GemmaTokenizer GemmaTokenizer::load_vocab(const std::string& path, int bos_token
         }
     }
 
-    auto add_merge = [&](const std::string& left, const std::string& right) {
-        if (left.empty() || right.empty()) return;
-        const auto key = bpe_pair_key(left, right);
-        if (tok.bpe_merge_rank_.find(key) == tok.bpe_merge_rank_.end()) {
-            tok.bpe_merge_rank_[key] = static_cast<int>(tok.bpe_merge_rank_.size());
-        }
-    };
     const std::string merges_array = extract_json_array_for_key(text, "merges");
     if (!merges_array.empty()) {
-        std::vector<std::string> pairless;
-        for (const auto& item : json_strings_in(merges_array)) {
-            std::istringstream ls(item);
-            std::string left;
-            std::string right;
-            if (ls >> left >> right) {
-                add_merge(left, right);
-            } else {
-                pairless.push_back(item);
-            }
-        }
-        if (tok.bpe_merge_rank_.empty() && pairless.size() >= 2) {
-            for (std::size_t i = 0; i + 1 < pairless.size(); i += 2) add_merge(pairless[i], pairless[i + 1]);
-        }
+        add_bpe_merges(tok.bpe_merge_rank_, json_strings_in(merges_array));
     }
     if (tok.bpe_merge_rank_.empty()) {
         const auto merges_path = std::filesystem::path(path).parent_path() / "merges.txt";
         if (std::filesystem::exists(merges_path)) {
+            std::vector<std::string> merge_lines;
             std::istringstream in(read_text_file(merges_path.string()));
             std::string line;
             while (std::getline(in, line)) {
                 line = trim(line);
                 if (line.empty() || line[0] == '#') continue;
-                std::istringstream ls(line);
-                std::string left;
-                std::string right;
-                if (ls >> left >> right) add_merge(left, right);
+                merge_lines.push_back(line);
             }
+            add_bpe_merges(tok.bpe_merge_rank_, merge_lines);
         }
     }
 
@@ -1548,8 +1590,48 @@ GemmaTokenizer GemmaTokenizer::load_vocab(const std::string& path, int bos_token
     if (!tok.bpe_merge_rank_.empty() && model_type.find("bpe") == std::string::npos) {
         tok.tokenizer_model_type_ = "BPE";
     }
+    if (tok.sentencepiece_style_) {
+        const bool sentencepiece_model = model_type.find("unigram") != std::string::npos ||
+                                         model_type.find("sentencepiece") != std::string::npos;
+        const bool tokenizer_json_space_replace =
+            text.find("\"normalizer\"") != std::string::npos &&
+            text.find("\"Replace\"") != std::string::npos &&
+            text.find("\xE2\x96\x81") != std::string::npos;
+        if (!sentencepiece_model && (!tok.bpe_merge_rank_.empty() || tokenizer_json_space_replace)) {
+            tok.sp_add_dummy_prefix_ = false;
+            tok.sp_remove_extra_whitespaces_ = false;
+            tok.sp_escape_whitespaces_ = true;
+            tok.sp_normalizer_name_ = "replace_space";
+        }
+    }
     if (tok.token_to_id_.empty()) return byte_fallback(256, bos_token_id, eos_token_id);
+    tok.refresh_special_tokens();
     return tok;
+}
+
+void GemmaTokenizer::refresh_special_tokens() {
+    special_tokens_.clear();
+    special_token_ids_.clear();
+    for (const auto& kv : token_to_id_) {
+        if (!looks_like_control_token(kv.first)) continue;
+        special_tokens_.push_back(kv);
+        special_token_ids_.insert(kv.second);
+    }
+    std::sort(special_tokens_.begin(), special_tokens_.end(),
+              [](const auto& a, const auto& b) {
+                  if (a.first.size() != b.first.size()) return a.first.size() > b.first.size();
+                  return a.first < b.first;
+              });
+}
+
+std::pair<std::int32_t, std::size_t> GemmaTokenizer::match_special_token(const std::string& text,
+                                                                          std::size_t pos) const {
+    for (const auto& kv : special_tokens_) {
+        const auto& token = kv.first;
+        if (token.empty() || pos + token.size() > text.size()) continue;
+        if (text.compare(pos, token.size(), token) == 0) return {kv.second, token.size()};
+    }
+    return {-1, 0};
 }
 
 std::vector<std::int32_t> GemmaTokenizer::encode(const std::string& text, bool add_bos, bool add_eos) const {
@@ -1594,8 +1676,13 @@ std::vector<std::int32_t> GemmaTokenizer::encode(const std::string& text, bool a
                                                       sp_escape_whitespaces_);
         }
 
-        if (!bpe_merge_rank_.empty()) {
-            auto pieces = utf8_pieces(normalized);
+        auto emit_segment = [&](const std::string& segment) {
+            if (segment.empty()) return;
+            if (bpe_merge_rank_.empty()) {
+                push_longest_match(segment);
+                return;
+            }
+            auto pieces = utf8_pieces(segment);
             while (pieces.size() > 1) {
                 int best_rank = std::numeric_limits<int>::max();
                 std::size_t best_pos = pieces.size();
@@ -1615,9 +1702,21 @@ std::vector<std::int32_t> GemmaTokenizer::encode(const std::string& text, bool a
                 if (it != token_to_id_.end()) ids.push_back(it->second);
                 else push_longest_match(piece);
             }
-        } else {
-            push_longest_match(normalized);
+        };
+
+        std::size_t segment_start = 0;
+        for (std::size_t pos = 0; pos < normalized.size();) {
+            const auto special = match_special_token(normalized, pos);
+            if (special.first >= 0) {
+                emit_segment(normalized.substr(segment_start, pos - segment_start));
+                ids.push_back(special.first);
+                pos += special.second;
+                segment_start = pos;
+            } else {
+                ++pos;
+            }
         }
+        emit_segment(normalized.substr(segment_start));
     }
     if (add_eos && eos_token_id_ >= 0) ids.push_back(eos_token_id_);
     return ids;
@@ -1626,7 +1725,8 @@ std::vector<std::int32_t> GemmaTokenizer::encode(const std::string& text, bool a
 std::string GemmaTokenizer::decode(const std::vector<std::int32_t>& ids, bool skip_special) const {
     std::string out;
     for (auto id : ids) {
-        if (skip_special && (id == bos_token_id_ || id == eos_token_id_)) continue;
+        if (skip_special && (id == bos_token_id_ || id == eos_token_id_ ||
+                             special_token_ids_.find(id) != special_token_ids_.end())) continue;
         if (byte_fallback_) {
             if (id >= 0 && id <= 255) out.push_back(static_cast<char>(id));
         } else {

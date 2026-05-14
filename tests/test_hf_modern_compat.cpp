@@ -93,6 +93,7 @@ int main() {
   "num_hidden_layers": 4,
   "num_attention_heads": 4,
   "num_key_value_heads": 2,
+  "hidden_activation": "gelu_pytorch_tanh",
   "rms_norm_eps": 0.000001,
   "rope_theta": 10000.0,
   "sliding_window": 3,
@@ -109,6 +110,10 @@ int main() {
             "Gemma4 architecture auto-detect failed");
     require(gemma4_cfg.transformer.sliding_window == 3 && !gemma4_cfg.per_layer_inputs,
             "Gemma4 text-core config features missing");
+    require(!gemma4_cfg.transformer.use_swiglu && gemma4_cfg.transformer.split_mlp_projections,
+            "Gemma4 must route through GeGLU split MLP, not SwiGLU packed MLP");
+    require(gemma4_cfg.transformer.rope_split_half,
+            "Gemma4 must use HF split-half RoPE layout");
     auto gemma4_spec = motifcl::nn::modern_model_spec_from_config(gemma4_cfg);
     require(motifcl::nn::modern_model_spec_runnable_by_modern_gpt(gemma4_spec),
             "Gemma4 dense text-core spec should be ModernGPTModel-runnable");
@@ -206,6 +211,13 @@ int main() {
                                                          motifcl::nn::HFChatTemplateKind::Auto, true);
     require(llama_chat.find("<|start_header_id|>user") != std::string::npos,
             "HF Llama3 template failed");
+    auto gemma4_chat = motifcl::nn::apply_hf_chat_template(
+        {{"user", " привет "}},
+        motifcl::nn::HFArchitecture::Gemma4,
+        motifcl::nn::HFChatTemplateKind::Gemma,
+        true);
+    require(gemma4_chat == "<bos><|turn>user\nпривет<turn|>\n<|turn>model\n",
+            "Gemma4 chat template control tokens failed");
     {
         std::ofstream out(dir / "tokenizer_config.json");
         out << R"json({"chat_template":"{% for message in messages %}<start_of_turn>{{ message['role'] }}\n{{ message['content'] }}<end_of_turn>{% endfor %}"})json";
@@ -246,6 +258,12 @@ int main() {
     require(gemma4_model.blocks[0]->attention_window() == 3 &&
                 gemma4_model.blocks[3]->attention_window() == 0,
             "Gemma4 per-layer local/global attention windows failed");
+    require(gemma4_model.blocks[0]->attention().rope_split_half_enabled() &&
+                gemma4_model.blocks[3]->attention().rope_split_half_enabled(),
+            "Gemma4 runtime split-half RoPE wiring failed");
+    require(!gemma4_model.blocks[0]->mlp().use_swiglu &&
+                gemma4_model.blocks[0]->mlp().split_projections_enabled(),
+            "Gemma4 runtime MLP activation wiring failed");
     std::vector<int32_t> gemma4_token_values{65, 66, 67, 68};
     auto gemma4_tokens = motifcl::Tensor::from_cpu(backend, {1, 4}, motifcl::DType::I32, gemma4_token_values.data());
     auto gemma4_logits = gemma4_model.forward(gemma4_tokens);
@@ -266,6 +284,35 @@ int main() {
     auto sp_fullwidth = sp_tokenizer.encode("\xEF\xBC\x9F", false, false);
     require(sp_fullwidth == std::vector<int32_t>({4}),
             "SentencePiece NFKC-lite fullwidth normalizer failed");
+    std::vector<std::string> gemma4_vocab(10629);
+    for (std::size_t i = 0; i < gemma4_vocab.size(); ++i) {
+        gemma4_vocab[i] = "<unused_test_" + std::to_string(i) + ">";
+    }
+    const std::string p = "\xD0\xBF";
+    const std::string r = "\xD1\x80";
+    const std::string i_cyr = "\xD0\xB8";
+    const std::string v = "\xD0\xB2";
+    const std::string e = "\xD0\xB5";
+    const std::string t = "\xD1\x82";
+    gemma4_vocab[2] = "<bos>";
+    gemma4_vocab[105] = "<|turn>";
+    gemma4_vocab[106] = "<turn|>";
+    gemma4_vocab[107] = "\n";
+    gemma4_vocab[2364] = "user";
+    gemma4_vocab[4368] = "model";
+    gemma4_vocab[8362] = v + e + t;
+    gemma4_vocab[10628] = p + r + i_cyr;
+    auto gemma4_tokenizer = motifcl::nn::GemmaTokenizer::from_tokens(
+        gemma4_vocab,
+        2,
+        106,
+        "gemma4",
+        {"u s", "us e", "use r", "m o", "mo d", "mod e", "mode l",
+         p + " " + r, p + r + " " + i_cyr, v + " " + e, v + e + " " + t},
+        false);
+    auto gemma4_ids = gemma4_tokenizer.encode("<bos><|turn>user\nпривет<turn|>\n<|turn>model\n", false, false);
+    require(gemma4_ids == std::vector<int32_t>({2, 105, 2364, 107, 10628, 8362, 106, 107, 105, 4368, 107}),
+            "Gemma4 BPE/control-token encoding failed");
     motifcl::nn::GenerateOptions opts;
     opts.max_new_tokens = 0;
     require(motifcl::nn::generate_hf_text(backend, model, tokenizer, "AB", opts) == "AB",

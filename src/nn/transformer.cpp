@@ -168,6 +168,18 @@ TransformerConfig normalize_config(TransformerConfig cfg) {
         : *std::max_element(cfg.layer_head_dims.begin(), cfg.layer_head_dims.end());
     MCL_CHECK(cfg.rotary_dim <= max_head_dim && cfg.rotary_dim % 2 == 0,
               "TransformerConfig rotary_dim must be even and <= head_dim/max(layer_head_dims)");
+    if (!cfg.layer_rotary_dims.empty()) {
+        MCL_CHECK(static_cast<int>(cfg.layer_rotary_dims.size()) == cfg.n_layer,
+                  "TransformerConfig layer_rotary_dims must match n_layer");
+        for (int i = 0; i < cfg.n_layer; ++i) {
+            const int head_dim = cfg.layer_head_dims.empty()
+                ? cfg.head_dim
+                : cfg.layer_head_dims[static_cast<std::size_t>(i)];
+            const int rotary_dim = cfg.layer_rotary_dims[static_cast<std::size_t>(i)];
+            MCL_CHECK(rotary_dim > 0 && rotary_dim <= head_dim && rotary_dim % 2 == 0,
+                      "TransformerConfig layer_rotary_dims entries must be even and <= layer head_dim");
+        }
+    }
     if (cfg.mlp_hidden <= 0) cfg.mlp_hidden = cfg.use_swiglu ? (cfg.n_embd * 8 / 3) : (cfg.n_embd * 4);
     if (!cfg.layer_mlp_hiddens.empty()) {
         MCL_CHECK(static_cast<int>(cfg.layer_mlp_hiddens.size()) == cfg.n_layer,
@@ -183,10 +195,23 @@ TransformerConfig normalize_config(TransformerConfig cfg) {
             MCL_CHECK(value > 0.0f, "TransformerConfig layer_rope_thetas entries must be positive");
         }
     }
+    if (!cfg.layer_rope_split_half.empty()) {
+        MCL_CHECK(static_cast<int>(cfg.layer_rope_split_half.size()) == cfg.n_layer,
+                  "TransformerConfig layer_rope_split_half must match n_layer");
+    }
     MCL_CHECK(cfg.dropout >= 0.0f && cfg.dropout < 1.0f, "TransformerConfig dropout must be in [0, 1)");
     MCL_CHECK(cfg.rms_norm_eps > 0.0f, "TransformerConfig rms_norm_eps must be positive");
+    MCL_CHECK(cfg.attention_scale >= 0.0f, "TransformerConfig attention_scale must be non-negative");
     MCL_CHECK(cfg.sliding_window >= 0, "TransformerConfig sliding_window must be non-negative");
     MCL_CHECK(cfg.embedding_scale > 0.0f, "TransformerConfig embedding_scale must be positive");
+    if (!cfg.layer_kv_shared_sources.empty()) {
+        MCL_CHECK(static_cast<int>(cfg.layer_kv_shared_sources.size()) == cfg.n_layer,
+                  "TransformerConfig layer_kv_shared_sources must match n_layer");
+        for (int i = 0; i < cfg.n_layer; ++i) {
+            const int source = cfg.layer_kv_shared_sources[static_cast<std::size_t>(i)];
+            MCL_CHECK(source < i, "TransformerConfig layer_kv_shared_sources entries must point to earlier layers");
+        }
+    }
     if (cfg.use_per_layer_inputs) {
         MCL_CHECK(cfg.per_layer_input_dim > 0, "TransformerConfig per_layer_input_dim must be positive when PLE is enabled");
         if (cfg.per_layer_input_vocab_size <= 0) cfg.per_layer_input_vocab_size = cfg.vocab_size;
@@ -1348,7 +1373,8 @@ ModernSelfAttention::ModernSelfAttention(Backend& backend, const TransformerConf
               normalize_config(raw_config).use_qkv_bias,
               normalize_config(raw_config).skip_weight_init),
       q_norm_(backend, normalize_config(raw_config).head_dim, normalize_config(raw_config).rms_norm_eps),
-      k_norm_(backend, normalize_config(raw_config).head_dim, normalize_config(raw_config).rms_norm_eps) {
+      k_norm_(backend, normalize_config(raw_config).head_dim, normalize_config(raw_config).rms_norm_eps),
+      v_norm_(backend, normalize_config(raw_config).head_dim, normalize_config(raw_config).rms_norm_eps) {
     const auto cfg = normalize_config(raw_config);
     n_embd_ = cfg.n_embd;
     n_head_ = cfg.n_head;
@@ -1357,12 +1383,15 @@ ModernSelfAttention::ModernSelfAttention(Backend& backend, const TransformerConf
     q_dim_ = cfg.n_head * head_dim_;
     kv_dim_ = cfg.n_kv_head * head_dim_;
     use_rope_ = cfg.use_rope;
+    rope_split_half_ = cfg.rope_split_half;
     rope_theta_ = cfg.rope_theta;
+    attention_scale_ = cfg.attention_scale;
     rotary_dim_ = cfg.rotary_dim;
     dropout_p_ = cfg.dropout;
     attention_window_ = cfg.sliding_window;
     use_split_projections_ = cfg.split_qkv_projections;
     use_qk_norm_ = cfg.use_qk_norm;
+    use_v_norm_ = cfg.use_v_norm;
 }
 
 QKV ModernSelfAttention::project_qkv(const Tensor& x) {
@@ -1379,6 +1408,23 @@ QKV ModernSelfAttention::project_qkv(const Tensor& x) {
     return motifcl::qkv_split(packed, q_dim_, kv_dim_);
 }
 
+Tensor ModernSelfAttention::apply_rope(const Tensor& x, int n_head, int64_t batch_size,
+                                       int64_t seq_len, int64_t token_offset) const {
+    if (!use_rope_) return x;
+    return rope_split_half_
+        ? motifcl::rope_split_half(x, n_head, batch_size, seq_len, rope_theta_, rotary_dim_, token_offset)
+        : motifcl::rope(x, n_head, batch_size, seq_len, rope_theta_, rotary_dim_, token_offset);
+}
+
+Tensor ModernSelfAttention::apply_rope_positions(const Tensor& x, const Tensor& positions,
+                                                 int n_head, int64_t batch_size,
+                                                 int64_t seq_len) const {
+    if (!use_rope_) return x;
+    return rope_split_half_
+        ? motifcl::rope_positions_split_half(x, positions, n_head, batch_size, seq_len, rope_theta_, rotary_dim_)
+        : motifcl::rope_positions(x, positions, n_head, batch_size, seq_len, rope_theta_, rotary_dim_);
+}
+
 void apply_qk_norm_if_enabled(ModernSelfAttention& self, Tensor& q, Tensor& k) {
     if (!self.qk_norm_enabled()) return;
     const auto rows = q.shape()[0];
@@ -1386,6 +1432,20 @@ void apply_qk_norm_if_enabled(ModernSelfAttention& self, Tensor& q, Tensor& k) {
     const auto k_shape = k.shape();
     q = self.q_norm().forward(q.view({rows * self.n_head(), self.head_dim()})).view(q_shape);
     k = self.k_norm().forward(k.view({rows * self.n_kv_head(), self.head_dim()})).view(k_shape);
+}
+
+void apply_q_norm_if_enabled(ModernSelfAttention& self, Tensor& q) {
+    if (!self.qk_norm_enabled()) return;
+    const auto rows = q.shape()[0];
+    const auto q_shape = q.shape();
+    q = self.q_norm().forward(q.view({rows * self.n_head(), self.head_dim()})).view(q_shape);
+}
+
+void apply_v_norm_if_enabled(ModernSelfAttention& self, Tensor& v) {
+    if (!self.v_norm_enabled()) return;
+    const auto rows = v.shape()[0];
+    const auto v_shape = v.shape();
+    v = self.v_norm().forward(v.view({rows * self.n_kv_head(), self.head_dim()})).view(v_shape);
 }
 
 bool can_use_fused_qk_norm_rope_decode(const Tensor& q,
@@ -1734,9 +1794,10 @@ Tensor ModernSelfAttention::forward(const Tensor& x) {
 Tensor ModernSelfAttention::forward(const Tensor& x, int64_t batch_size, int64_t seq_len, bool causal) {
     MCL_CHECK(x.ndim() == 2 && x.shape()[1] == n_embd_, "ModernSelfAttention expects [B*T, n_embd]");
     QKV split = project_qkv(x);
+    apply_v_norm_if_enabled(*this, split.v);
     Tensor q;
     Tensor k;
-    if (use_qk_norm_ &&
+    if (use_qk_norm_ && !rope_split_half_ &&
         can_use_fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
                                           head_dim_, batch_size, seq_len, use_rope_, rotary_dim_)) {
         auto fused = fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
@@ -1745,13 +1806,14 @@ Tensor ModernSelfAttention::forward(const Tensor& x, int64_t batch_size, int64_t
         k = std::move(fused.second);
     } else {
         apply_qk_norm_if_enabled(*this, split.q, split.k);
-        q = use_rope_ ? motifcl::rope(split.q, n_head_, batch_size, seq_len, rope_theta_, rotary_dim_, 0) : split.q;
-        k = use_rope_ ? motifcl::rope(split.k, n_kv_head_, batch_size, seq_len, rope_theta_, rotary_dim_, 0) : split.k;
+        q = apply_rope(split.q, n_head_, batch_size, seq_len, 0);
+        k = apply_rope(split.k, n_kv_head_, batch_size, seq_len, 0);
     }
     auto context = attention_window_ > 0
         ? motifcl::grouped_query_attention_windowed(q, k, split.v, n_head_, n_kv_head_, attention_window_,
-                                                    causal, batch_size, seq_len, seq_len, 0)
-        : motifcl::grouped_query_attention(q, k, split.v, n_head_, n_kv_head_, causal, batch_size, seq_len, seq_len, 0);
+                                                    causal, batch_size, seq_len, seq_len, 0, attention_scale_)
+        : motifcl::grouped_query_attention(q, k, split.v, n_head_, n_kv_head_, causal, batch_size, seq_len, seq_len, 0,
+                                           attention_scale_);
     auto out = o_proj_.forward(context);
     return dropout_p_ > 0.0f ? motifcl::dropout(out, dropout_p_, true) : out;
 }
@@ -1759,9 +1821,10 @@ Tensor ModernSelfAttention::forward(const Tensor& x, int64_t batch_size, int64_t
 Tensor ModernSelfAttention::forward_masked(const Tensor& x, const Tensor& mask, int64_t batch_size, int64_t seq_len, bool causal) {
     MCL_CHECK(x.ndim() == 2 && x.shape()[1] == n_embd_, "ModernSelfAttention expects [B*T, n_embd]");
     QKV split = project_qkv(x);
+    apply_v_norm_if_enabled(*this, split.v);
     Tensor q;
     Tensor k;
-    if (use_qk_norm_ &&
+    if (use_qk_norm_ && !rope_split_half_ &&
         can_use_fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
                                           head_dim_, batch_size, seq_len, use_rope_, rotary_dim_)) {
         auto fused = fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
@@ -1770,11 +1833,12 @@ Tensor ModernSelfAttention::forward_masked(const Tensor& x, const Tensor& mask, 
         k = std::move(fused.second);
     } else {
         apply_qk_norm_if_enabled(*this, split.q, split.k);
-        q = use_rope_ ? motifcl::rope(split.q, n_head_, batch_size, seq_len, rope_theta_, rotary_dim_, 0) : split.q;
-        k = use_rope_ ? motifcl::rope(split.k, n_kv_head_, batch_size, seq_len, rope_theta_, rotary_dim_, 0) : split.k;
+        q = apply_rope(split.q, n_head_, batch_size, seq_len, 0);
+        k = apply_rope(split.k, n_kv_head_, batch_size, seq_len, 0);
     }
     auto context = motifcl::grouped_query_attention_masked(q, k, split.v, mask, n_head_, n_kv_head_,
-                                                           causal, batch_size, seq_len, seq_len, 0, false);
+                                                           causal, batch_size, seq_len, seq_len, 0, false,
+                                                           attention_scale_);
     auto out = o_proj_.forward(context);
     return dropout_p_ > 0.0f ? motifcl::dropout(out, dropout_p_, true) : out;
 }
@@ -1784,9 +1848,10 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, KVCache& cache, 
     MCL_CHECK(batch_size == cache.batch_size && n_kv_head_ == cache.n_kv_head && head_dim_ == cache.head_dim, "ModernSelfAttention cache shape mismatch");
     MCL_CHECK(cache.length + seq_len <= cache.max_seq_len, "ModernSelfAttention KV cache capacity exceeded");
     QKV split = project_qkv(x);
+    apply_v_norm_if_enabled(*this, split.v);
     const int64_t offset = cache.length;
     Tensor q;
-    if (!use_qk_norm_ &&
+    if (!use_v_norm_ && !use_qk_norm_ && !rope_split_half_ &&
         can_use_fused_rope_cache_append_decode(split.q, split.k, split.v, cache.k, cache.v,
                                                n_head_, n_kv_head_, head_dim_,
                                                batch_size, seq_len, cache.max_seq_len, offset,
@@ -1795,7 +1860,7 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, KVCache& cache, 
                                            n_head_, n_kv_head_, head_dim_,
                                            batch_size, cache.max_seq_len, offset,
                                            rope_theta_, rotary_dim_);
-    } else if (use_qk_norm_ &&
+    } else if (!use_v_norm_ && use_qk_norm_ && !rope_split_half_ &&
         can_use_fused_qk_norm_rope_cache_append_decode(split.q, split.k, split.v, q_norm_, k_norm_,
                                                        cache.k, cache.v, n_head_, n_kv_head_, head_dim_,
                                                        batch_size, seq_len, cache.max_seq_len, offset,
@@ -1806,7 +1871,7 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, KVCache& cache, 
                                                    rope_theta_, rotary_dim_);
     } else {
         Tensor k_new;
-        if (use_qk_norm_ &&
+        if (use_qk_norm_ && !rope_split_half_ &&
             can_use_fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
                                               head_dim_, batch_size, seq_len, use_rope_, rotary_dim_)) {
             auto fused = fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
@@ -1815,8 +1880,8 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, KVCache& cache, 
             k_new = std::move(fused.second);
         } else {
             apply_qk_norm_if_enabled(*this, split.q, split.k);
-            q = use_rope_ ? motifcl::rope(split.q, n_head_, batch_size, seq_len, rope_theta_, rotary_dim_, offset) : split.q;
-            k_new = use_rope_ ? motifcl::rope(split.k, n_kv_head_, batch_size, seq_len, rope_theta_, rotary_dim_, offset) : split.k;
+            q = apply_rope(split.q, n_head_, batch_size, seq_len, offset);
+            k_new = apply_rope(split.k, n_kv_head_, batch_size, seq_len, offset);
         }
         motifcl::kv_cache_append(k_new, split.v, cache.k, cache.v, batch_size, seq_len, cache.max_seq_len, offset);
     }
@@ -1824,9 +1889,32 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, KVCache& cache, 
     const int64_t key_len = cache.length;
     auto context = attention_window_ > 0
         ? motifcl::grouped_query_attention_windowed(q, cache.k, cache.v, n_head_, n_kv_head_, attention_window_, true,
-                                                    batch_size, seq_len, key_len, offset)
+                                                    batch_size, seq_len, key_len, offset, attention_scale_)
         : motifcl::grouped_query_attention(q, cache.k, cache.v, n_head_, n_kv_head_, true,
-                                           batch_size, seq_len, key_len, offset);
+                                           batch_size, seq_len, key_len, offset, attention_scale_);
+    return o_proj_.forward(context);
+}
+
+Tensor ModernSelfAttention::forward_with_shared_kv_cache(const Tensor& x,
+                                                         const KVCache& shared_cache,
+                                                         int64_t batch_size,
+                                                         int64_t seq_len) {
+    MCL_CHECK(shared_cache.k.valid() && shared_cache.v.valid(), "ModernSelfAttention shared cache is not initialized");
+    MCL_CHECK(batch_size == shared_cache.batch_size && n_kv_head_ == shared_cache.n_kv_head &&
+                  head_dim_ == shared_cache.head_dim,
+              "ModernSelfAttention shared cache shape mismatch");
+    MCL_CHECK(shared_cache.length >= seq_len, "ModernSelfAttention shared cache is shorter than current query");
+    QKV split = project_qkv(x);
+    Tensor q = split.q;
+    apply_q_norm_if_enabled(*this, q);
+    const int64_t offset = shared_cache.length - seq_len;
+    q = apply_rope(q, n_head_, batch_size, seq_len, offset);
+    auto context = attention_window_ > 0
+        ? motifcl::grouped_query_attention_windowed(q, shared_cache.k, shared_cache.v, n_head_, n_kv_head_,
+                                                    attention_window_, true, batch_size, seq_len,
+                                                    shared_cache.length, offset, attention_scale_)
+        : motifcl::grouped_query_attention(q, shared_cache.k, shared_cache.v, n_head_, n_kv_head_, true,
+                                           batch_size, seq_len, shared_cache.length, offset, attention_scale_);
     return o_proj_.forward(context);
 }
 
@@ -1835,10 +1923,11 @@ Tensor ModernSelfAttention::forward_with_cache_masked(const Tensor& x, const Ten
     MCL_CHECK(batch_size == cache.batch_size && n_kv_head_ == cache.n_kv_head && head_dim_ == cache.head_dim, "ModernSelfAttention cache shape mismatch");
     MCL_CHECK(cache.length + seq_len <= cache.max_seq_len, "ModernSelfAttention KV cache capacity exceeded");
     QKV split = project_qkv(x);
+    apply_v_norm_if_enabled(*this, split.v);
     const int64_t offset = cache.length;
     Tensor q;
     Tensor k_new;
-    if (use_qk_norm_ &&
+    if (use_qk_norm_ && !rope_split_half_ &&
         can_use_fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
                                           head_dim_, batch_size, seq_len, use_rope_, rotary_dim_)) {
         auto fused = fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
@@ -1847,13 +1936,14 @@ Tensor ModernSelfAttention::forward_with_cache_masked(const Tensor& x, const Ten
         k_new = std::move(fused.second);
     } else {
         apply_qk_norm_if_enabled(*this, split.q, split.k);
-        q = use_rope_ ? motifcl::rope(split.q, n_head_, batch_size, seq_len, rope_theta_, rotary_dim_, offset) : split.q;
-        k_new = use_rope_ ? motifcl::rope(split.k, n_kv_head_, batch_size, seq_len, rope_theta_, rotary_dim_, offset) : split.k;
+        q = apply_rope(split.q, n_head_, batch_size, seq_len, offset);
+        k_new = apply_rope(split.k, n_kv_head_, batch_size, seq_len, offset);
     }
     motifcl::kv_cache_append(k_new, split.v, cache.k, cache.v, batch_size, seq_len, cache.max_seq_len, offset);
     cache.length += seq_len;
     auto context = motifcl::grouped_query_attention_masked(q, cache.k, cache.v, mask, n_head_, n_kv_head_, true,
-                                                           batch_size, seq_len, cache.max_seq_len, offset, false);
+                                                           batch_size, seq_len, cache.max_seq_len, offset, false,
+                                                           attention_scale_);
     return o_proj_.forward(context);
 }
 
@@ -1864,13 +1954,15 @@ Tensor ModernSelfAttention::forward_with_cache_positions_masked(const Tensor& x,
     MCL_CHECK(batch_size == cache.batch_size && n_kv_head_ == cache.n_kv_head && head_dim_ == cache.head_dim, "ModernSelfAttention cache shape mismatch");
     MCL_CHECK(cache_length_after >= cache.length && cache_length_after <= cache.max_seq_len, "ModernSelfAttention positioned KV cache length out of range");
     QKV split = project_qkv(x);
+    apply_v_norm_if_enabled(*this, split.v);
     apply_qk_norm_if_enabled(*this, split.q, split.k);
-    auto q = use_rope_ ? motifcl::rope_positions(split.q, positions, n_head_, batch_size, seq_len, rope_theta_, rotary_dim_) : split.q;
-    auto k_new = use_rope_ ? motifcl::rope_positions(split.k, positions, n_kv_head_, batch_size, seq_len, rope_theta_, rotary_dim_) : split.k;
+    auto q = apply_rope_positions(split.q, positions, n_head_, batch_size, seq_len);
+    auto k_new = apply_rope_positions(split.k, positions, n_kv_head_, batch_size, seq_len);
     motifcl::kv_cache_append_positions(k_new, split.v, positions, cache.k, cache.v, batch_size, seq_len, cache.max_seq_len);
     cache.length = cache_length_after;
     auto context = motifcl::grouped_query_attention_masked(q, cache.k, cache.v, mask, n_head_, n_kv_head_, causal,
-                                                           batch_size, seq_len, cache.max_seq_len, 0, false);
+                                                           batch_size, seq_len, cache.max_seq_len, 0, false,
+                                                           attention_scale_);
     return o_proj_.forward(context);
 }
 
@@ -1881,10 +1973,11 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, PagedKVCache& ca
               "ModernSelfAttention paged cache shape mismatch");
     MCL_CHECK(seq_len > 0 && seq_len <= cache.max_seq_len, "ModernSelfAttention invalid paged cache sequence length");
     QKV split = project_qkv(x);
+    apply_v_norm_if_enabled(*this, split.v);
     const int64_t query_abs_start = cache.tokens_seen;
     Tensor q;
     Tensor k_new;
-    if (use_qk_norm_ &&
+    if (use_qk_norm_ && !rope_split_half_ &&
         can_use_fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
                                           head_dim_, batch_size, seq_len, use_rope_, rotary_dim_)) {
         auto fused = fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
@@ -1893,8 +1986,8 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, PagedKVCache& ca
         k_new = std::move(fused.second);
     } else {
         apply_qk_norm_if_enabled(*this, split.q, split.k);
-        q = use_rope_ ? motifcl::rope(split.q, n_head_, batch_size, seq_len, rope_theta_, rotary_dim_, query_abs_start) : split.q;
-        k_new = use_rope_ ? motifcl::rope(split.k, n_kv_head_, batch_size, seq_len, rope_theta_, rotary_dim_, query_abs_start) : split.k;
+        q = apply_rope(split.q, n_head_, batch_size, seq_len, query_abs_start);
+        k_new = apply_rope(split.k, n_kv_head_, batch_size, seq_len, query_abs_start);
     }
     motifcl::paged_kv_cache_append(k_new, split.v, cache.page_table, cache.k_pages, cache.v_pages,
                                    batch_size, seq_len, cache.page_size, cache.page_count, query_abs_start);
@@ -1906,7 +1999,7 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, PagedKVCache& ca
                                                           n_head_, n_kv_head_, attention_window_, true,
                                                           batch_size, seq_len, key_len,
                                                           query_abs_start, key_abs_start,
-                                                          cache.page_size, cache.page_count);
+                                                          cache.page_size, cache.page_count, attention_scale_);
     return o_proj_.forward(context);
 }
 
@@ -1928,6 +2021,10 @@ std::vector<Parameter*> ModernSelfAttention::parameters() {
         result.insert(result.end(), qp.begin(), qp.end());
         auto kp = k_norm_.parameters();
         result.insert(result.end(), kp.begin(), kp.end());
+    }
+    if (use_v_norm_) {
+        auto vp = v_norm_.parameters();
+        result.insert(result.end(), vp.begin(), vp.end());
     }
     return result;
 }
@@ -2176,6 +2273,20 @@ Tensor ModernTransformerBlock::forward_masked(const Tensor& x, const Tensor& mas
 Tensor ModernTransformerBlock::forward_with_cache(const Tensor& x, KVCache& cache, int64_t batch_size, int64_t seq_len,
                                                   const Tensor* per_layer_input) {
     auto attn_out = attn_.forward_with_cache(norm1_.forward(x), cache, batch_size, seq_len);
+    auto h = apply_attention_residual(x, attn_out);
+    h = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
+        ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
+        : apply_ffn_residual(h, mlp_forward_rmsnorm_decode(h, norm2_, mlp_));
+    h = apply_per_layer_input(h, per_layer_input);
+    return apply_layer_output_scale(h);
+}
+
+Tensor ModernTransformerBlock::forward_with_shared_kv_cache(const Tensor& x,
+                                                            const KVCache& shared_cache,
+                                                            int64_t batch_size,
+                                                            int64_t seq_len,
+                                                            const Tensor* per_layer_input) {
+    auto attn_out = attn_.forward_with_shared_kv_cache(norm1_.forward(x), shared_cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
     h = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
         ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
@@ -2774,11 +2885,17 @@ ModernGPTModel::ModernGPTModel(Backend& backend, const TransformerConfig& raw_co
                 layer_config.rotary_dim = layer_config.head_dim;
             }
         }
+        if (!config.layer_rotary_dims.empty()) {
+            layer_config.rotary_dim = config.layer_rotary_dims[static_cast<std::size_t>(i)];
+        }
         if (!config.layer_mlp_hiddens.empty()) {
             layer_config.mlp_hidden = config.layer_mlp_hiddens[static_cast<std::size_t>(i)];
         }
         if (!config.layer_rope_thetas.empty()) {
             layer_config.rope_theta = config.layer_rope_thetas[static_cast<std::size_t>(i)];
+        }
+        if (!config.layer_rope_split_half.empty()) {
+            layer_config.rope_split_half = config.layer_rope_split_half[static_cast<std::size_t>(i)];
         }
         blocks.push_back(std::make_shared<ModernTransformerBlock>(backend, layer_config));
     }
@@ -2902,12 +3019,29 @@ Tensor ModernGPTModel::forward_with_cache(const Tensor& token_ids, std::vector<K
     Tensor h = input_embeddings(token_ids, B, T);
     Tensor per_layer_inputs = config.use_per_layer_inputs ? compute_per_layer_inputs(token_ids, h, B, T) : Tensor{};
     for (std::size_t i = 0; i < blocks.size(); ++i) {
-        h = config.use_per_layer_inputs
-            ? blocks[i]->forward_with_cache_packed_per_layer_input(h, *caches[i], B, T,
-                                                                   &per_layer_inputs,
-                                                                   static_cast<int>(i),
-                                                                   B * T)
-            : blocks[i]->forward_with_cache(h, *caches[i], B, T, nullptr);
+        const int shared_source =
+            !config.layer_kv_shared_sources.empty()
+                ? config.layer_kv_shared_sources[static_cast<std::size_t>(i)]
+                : -1;
+        if (shared_source >= 0) {
+            Tensor layer_input = config.use_per_layer_inputs
+                ? per_layer_input_slice(per_layer_inputs, static_cast<int>(i), B * T)
+                : Tensor{};
+            h = blocks[i]->forward_with_shared_kv_cache(
+                h,
+                *caches[static_cast<std::size_t>(shared_source)],
+                B,
+                T,
+                config.use_per_layer_inputs ? &layer_input : nullptr);
+            caches[i]->length = caches[static_cast<std::size_t>(shared_source)]->length;
+        } else {
+            h = config.use_per_layer_inputs
+                ? blocks[i]->forward_with_cache_packed_per_layer_input(h, *caches[i], B, T,
+                                                                       &per_layer_inputs,
+                                                                       static_cast<int>(i),
+                                                                       B * T)
+                : blocks[i]->forward_with_cache(h, *caches[i], B, T, nullptr);
+        }
     }
     h = final_norm.forward(h);
     Tensor logits = project_logits(h);
@@ -2942,12 +3076,29 @@ Tensor ModernGPTModel::forward_with_cache_last_logits(const Tensor& token_ids, s
     Tensor h = input_embeddings(token_ids, B, T);
     Tensor per_layer_inputs = config.use_per_layer_inputs ? compute_per_layer_inputs(token_ids, h, B, T) : Tensor{};
     for (std::size_t i = 0; i < blocks.size(); ++i) {
-        h = config.use_per_layer_inputs
-            ? blocks[i]->forward_with_cache_packed_per_layer_input(h, *caches[i], B, T,
-                                                                   &per_layer_inputs,
-                                                                   static_cast<int>(i),
-                                                                   B * T)
-            : blocks[i]->forward_with_cache(h, *caches[i], B, T, nullptr);
+        const int shared_source =
+            !config.layer_kv_shared_sources.empty()
+                ? config.layer_kv_shared_sources[static_cast<std::size_t>(i)]
+                : -1;
+        if (shared_source >= 0) {
+            Tensor layer_input = config.use_per_layer_inputs
+                ? per_layer_input_slice(per_layer_inputs, static_cast<int>(i), B * T)
+                : Tensor{};
+            h = blocks[i]->forward_with_shared_kv_cache(
+                h,
+                *caches[static_cast<std::size_t>(shared_source)],
+                B,
+                T,
+                config.use_per_layer_inputs ? &layer_input : nullptr);
+            caches[i]->length = caches[static_cast<std::size_t>(shared_source)]->length;
+        } else {
+            h = config.use_per_layer_inputs
+                ? blocks[i]->forward_with_cache_packed_per_layer_input(h, *caches[i], B, T,
+                                                                       &per_layer_inputs,
+                                                                       static_cast<int>(i),
+                                                                       B * T)
+                : blocks[i]->forward_with_cache(h, *caches[i], B, T, nullptr);
+        }
     }
     h = final_norm.forward(h);
     return project_logits(last_sequence_hidden_rows(h, B, T, config.n_embd));
@@ -3056,12 +3207,29 @@ void ModernGPTModel::prefill_cache_only(const Tensor& token_ids, std::vector<KVC
     Tensor h = input_embeddings(token_ids, B, T);
     Tensor per_layer_inputs = config.use_per_layer_inputs ? compute_per_layer_inputs(token_ids, h, B, T) : Tensor{};
     for (std::size_t i = 0; i < blocks.size(); ++i) {
-        h = config.use_per_layer_inputs
-            ? blocks[i]->forward_with_cache_packed_per_layer_input(h, *caches[i], B, T,
-                                                                   &per_layer_inputs,
-                                                                   static_cast<int>(i),
-                                                                   B * T)
-            : blocks[i]->forward_with_cache(h, *caches[i], B, T, nullptr);
+        const int shared_source =
+            !config.layer_kv_shared_sources.empty()
+                ? config.layer_kv_shared_sources[static_cast<std::size_t>(i)]
+                : -1;
+        if (shared_source >= 0) {
+            Tensor layer_input = config.use_per_layer_inputs
+                ? per_layer_input_slice(per_layer_inputs, static_cast<int>(i), B * T)
+                : Tensor{};
+            h = blocks[i]->forward_with_shared_kv_cache(
+                h,
+                *caches[static_cast<std::size_t>(shared_source)],
+                B,
+                T,
+                config.use_per_layer_inputs ? &layer_input : nullptr);
+            caches[i]->length = caches[static_cast<std::size_t>(shared_source)]->length;
+        } else {
+            h = config.use_per_layer_inputs
+                ? blocks[i]->forward_with_cache_packed_per_layer_input(h, *caches[i], B, T,
+                                                                       &per_layer_inputs,
+                                                                       static_cast<int>(i),
+                                                                       B * T)
+                : blocks[i]->forward_with_cache(h, *caches[i], B, T, nullptr);
+        }
     }
 }
 

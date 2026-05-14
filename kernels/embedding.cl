@@ -99,7 +99,10 @@ __kernel void embedding_gather_transposed_q4_k_i32(__global const uchar* weight,
     int token = gid / embed_dim;
     int d = gid - token * embed_dim;
     int idx = indices[token];
-    out[gid] = (idx >= 0 && idx < vocab_size) ? embedding_q4_k_value(weight, d * vocab_size + idx) : 0.0f;
+    // GGUF tensors store dimensions in ggml order: dim[0] is the contiguous
+    // axis.  token_embd.weight has dims [embed_dim, vocab], so one token row is
+    // laid out contiguously as token * embed_dim + d.
+    out[gid] = (idx >= 0 && idx < vocab_size) ? embedding_q4_k_value(weight, idx * embed_dim + d) : 0.0f;
 }
 
 __kernel void embedding_gather_transposed_q5_k_i32(__global const uchar* weight,
@@ -113,7 +116,9 @@ __kernel void embedding_gather_transposed_q5_k_i32(__global const uchar* weight,
     int token = gid / embed_dim;
     int d = gid - token * embed_dim;
     int idx = indices[token];
-    out[gid] = (idx >= 0 && idx < vocab_size) ? embedding_q5_k_value(weight, d * vocab_size + idx) : 0.0f;
+    // GGUF [embed_dim, vocab] memory order is token-major for embedding
+    // gathers, not d-major.
+    out[gid] = (idx >= 0 && idx < vocab_size) ? embedding_q5_k_value(weight, idx * embed_dim + d) : 0.0f;
 }
 
 __kernel void embedding_per_layer_slice_f32(__global const float* packed,

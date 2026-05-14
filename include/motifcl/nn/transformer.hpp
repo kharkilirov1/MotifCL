@@ -66,19 +66,25 @@ struct TransformerConfig {
     bool causal = true;
     bool learned_position_embeddings = false;
     float rope_theta = 10000.0f;
+    float attention_scale = 0.0f; // <=0 means use the standard 1/sqrt(head_dim)
     int rotary_dim = 0;
+    bool rope_split_half = false;
     int sliding_window = 0;
     float embedding_scale = 1.0f;
     int per_layer_input_dim = 0;
     int per_layer_input_vocab_size = 0;
     bool use_per_layer_inputs = false;
     std::vector<int> layer_head_dims;
+    std::vector<int> layer_rotary_dims;
     std::vector<int> layer_mlp_hiddens;
     std::vector<float> layer_rope_thetas;
+    std::vector<bool> layer_rope_split_half;
+    std::vector<int> layer_kv_shared_sources;
     bool split_qkv_projections = false;
     bool split_mlp_projections = false;
     bool skip_weight_init = false;
     bool use_qk_norm = false;
+    bool use_v_norm = false;
     bool use_post_attention_norm = false;
     bool use_post_ffw_norm = false;
     bool use_layer_output_scale = false;
@@ -211,6 +217,8 @@ public:
     Tensor forward(const Tensor& x, int64_t batch_size, int64_t seq_len, bool causal = true);
     Tensor forward_masked(const Tensor& x, const Tensor& mask, int64_t batch_size, int64_t seq_len, bool causal = true);
     Tensor forward_with_cache(const Tensor& x, KVCache& cache, int64_t batch_size, int64_t seq_len);
+    Tensor forward_with_shared_kv_cache(const Tensor& x, const KVCache& shared_cache,
+                                        int64_t batch_size, int64_t seq_len);
     Tensor forward_with_cache_masked(const Tensor& x, const Tensor& mask, KVCache& cache, int64_t batch_size, int64_t seq_len);
     Tensor forward_with_cache_positions_masked(const Tensor& x, const Tensor& positions, const Tensor& mask,
                                                KVCache& cache, int64_t batch_size, int64_t seq_len,
@@ -224,6 +232,8 @@ public:
     int attention_window() const { return attention_window_; }
     void set_attention_window(int window);
     bool qk_norm_enabled() const { return use_qk_norm_; }
+    bool v_norm_enabled() const { return use_v_norm_; }
+    bool rope_split_half_enabled() const { return rope_split_half_; }
     void enable_split_projections(bool enabled = true) { use_split_projections_ = enabled; }
     bool split_projections_enabled() const { return use_split_projections_; }
     Linear& qkv_proj() { return qkv_proj_; }
@@ -240,6 +250,8 @@ public:
     const RMSNorm& q_norm() const { return q_norm_; }
     RMSNorm& k_norm() { return k_norm_; }
     const RMSNorm& k_norm() const { return k_norm_; }
+    RMSNorm& v_norm() { return v_norm_; }
+    const RMSNorm& v_norm() const { return v_norm_; }
     void enable_quantized_inference(DType qdtype = DType::Q4_0);
     void disable_quantized_inference();
     bool quantized_inference_enabled() const;
@@ -253,7 +265,12 @@ private:
     Linear o_proj_;
     RMSNorm q_norm_;
     RMSNorm k_norm_;
+    RMSNorm v_norm_;
     QKV project_qkv(const Tensor& x);
+    Tensor apply_rope(const Tensor& x, int n_head, int64_t batch_size, int64_t seq_len,
+                      int64_t token_offset) const;
+    Tensor apply_rope_positions(const Tensor& x, const Tensor& positions, int n_head,
+                                int64_t batch_size, int64_t seq_len) const;
     int n_embd_ = 0;
     int n_head_ = 0;
     int n_kv_head_ = 0;
@@ -261,12 +278,15 @@ private:
     int q_dim_ = 0;
     int kv_dim_ = 0;
     bool use_rope_ = true;
+    bool rope_split_half_ = false;
     float rope_theta_ = 10000.0f;
+    float attention_scale_ = 0.0f;
     int rotary_dim_ = 0;
     float dropout_p_ = 0.0f;
     int attention_window_ = 0;
     bool use_split_projections_ = false;
     bool use_qk_norm_ = false;
+    bool use_v_norm_ = false;
 };
 
 class GatedAttentionLayer : public Module {
@@ -357,6 +377,9 @@ public:
                           const Tensor* per_layer_input = nullptr);
     Tensor forward_with_cache(const Tensor& x, KVCache& cache, int64_t batch_size, int64_t seq_len,
                               const Tensor* per_layer_input = nullptr);
+    Tensor forward_with_shared_kv_cache(const Tensor& x, const KVCache& shared_cache,
+                                        int64_t batch_size, int64_t seq_len,
+                                        const Tensor* per_layer_input = nullptr);
     Tensor forward_with_cache_packed_per_layer_input(const Tensor& x, KVCache& cache, int64_t batch_size, int64_t seq_len,
                                                      const Tensor* packed_per_layer_input,
                                                      int layer_index,

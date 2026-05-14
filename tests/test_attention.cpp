@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <vector>
 #include <motifcl/motifcl.hpp>
@@ -178,6 +179,48 @@ int main() {
         auto ref = reference_attention(q, k, v, B, T, C, H, true);
         for (std::size_t i = 0; i < Y.size(); ++i) {
             if (std::fabs(Y[i] - ref[i]) > 1e-4f) return 1;
+        }
+
+        {
+            constexpr int RB = 1;
+            constexpr int RT = 2;
+            constexpr int RH = 1;
+            constexpr int RHD = 8;
+            constexpr int RC = RH * RHD;
+            constexpr int rotary_dim = 4;
+            constexpr int offset = 1;
+            const float theta = 10000.0f;
+            std::vector<float> rx(RB * RT * RC);
+            for (std::size_t i = 0; i < rx.size(); ++i) rx[i] = 0.1f * static_cast<float>(i + 1);
+            std::vector<float> ref_rope = rx;
+            const int half = RHD / 2;
+            const int rotate_pairs = rotary_dim / 2;
+            for (int t = 0; t < RT; ++t) {
+                const int base = t * RC;
+                for (int pair = 0; pair < rotate_pairs; ++pair) {
+                    const float exponent = static_cast<float>(2 * pair) / static_cast<float>(RHD);
+                    const float angle = static_cast<float>(offset + t) / std::pow(theta, exponent);
+                    const float cs = std::cos(angle);
+                    const float sn = std::sin(angle);
+                    const float first = rx[base + pair];
+                    const float second = rx[base + half + pair];
+                    ref_rope[base + pair] = first * cs - second * sn;
+                    ref_rope[base + half + pair] = second * cs + first * sn;
+                }
+            }
+            auto RX = motifcl::Tensor::from_cpu(backend, {RB * RT, RC}, motifcl::DType::F32, rx.data());
+            auto rope_y = motifcl::rope_split_half(RX, RH, RB, RT, theta, rotary_dim, offset).to_vector<float>();
+            for (std::size_t i = 0; i < rope_y.size(); ++i) {
+                if (std::fabs(rope_y[i] - ref_rope[i]) > 1e-5f) return 1;
+            }
+
+            std::vector<std::int32_t> pos = {1, 2};
+            auto POS = motifcl::Tensor::from_cpu(backend, {RB, RT}, motifcl::DType::I32, pos.data());
+            auto rope_pos_y = motifcl::rope_positions_split_half(RX, POS, RH, RB, RT, theta, rotary_dim)
+                                  .to_vector<float>();
+            for (std::size_t i = 0; i < rope_pos_y.size(); ++i) {
+                if (std::fabs(rope_pos_y[i] - ref_rope[i]) > 1e-5f) return 1;
+            }
         }
 
         {

@@ -41,6 +41,13 @@ std::string lower_ascii(std::string value) {
     return value;
 }
 
+std::string trim_ascii(std::string value) {
+    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+    while (!value.empty() && is_space(static_cast<unsigned char>(value.front()))) value.erase(value.begin());
+    while (!value.empty() && is_space(static_cast<unsigned char>(value.back()))) value.pop_back();
+    return value;
+}
+
 std::string json_unescape(std::string value) {
     std::string out;
     out.reserve(value.size());
@@ -204,6 +211,78 @@ bool architecture_uses_llama_like_weights(HFArchitecture architecture) {
            architecture == HFArchitecture::Llama ||
            architecture == HFArchitecture::Mistral ||
            architecture == HFArchitecture::Qwen2;
+}
+
+bool architecture_is_gemma_family(HFArchitecture architecture, const std::string& architecture_name = {}) {
+    const auto name = lower_ascii(architecture_name);
+    return architecture == HFArchitecture::Gemma ||
+           architecture == HFArchitecture::Gemma2 ||
+           architecture == HFArchitecture::Gemma3 ||
+           architecture == HFArchitecture::Gemma4 ||
+           name.find("gemma") != std::string::npos;
+}
+
+void configure_mlp_activation(TransformerConfig& cfg,
+                              const std::string& hidden_activation,
+                              HFArchitecture architecture,
+                              const std::string& architecture_name = {}) {
+    const auto act = lower_ascii(hidden_activation);
+    bool use_swiglu = true;
+    if (act.find("gelu") != std::string::npos || act.find("geglu") != std::string::npos) {
+        use_swiglu = false;
+    } else if (act.find("silu") != std::string::npos ||
+               act.find("swiglu") != std::string::npos ||
+               act.find("swi_glu") != std::string::npos) {
+        use_swiglu = true;
+    } else if (architecture_is_gemma_family(architecture, architecture_name)) {
+        // HF/GGUF Gemma-family checkpoints use GeGLU/GELU-tanh MLPs.  Running
+        // them through the LLaMA/Qwen SwiGLU path makes logits look random.
+        use_swiglu = false;
+    }
+    cfg.use_swiglu = use_swiglu;
+    if (!use_swiglu) cfg.split_mlp_projections = true;
+}
+
+void configure_gemma4_attention_semantics(TransformerConfig& cfg,
+                                          HFArchitecture architecture,
+                                          const std::string& architecture_name = {}) {
+    if (!architecture_is_gemma_family(architecture, architecture_name)) return;
+    if (!(architecture == HFArchitecture::Gemma4 ||
+          lower_ascii(architecture_name).find("gemma4") != std::string::npos)) {
+        return;
+    }
+    // Gemma4 normalizes values with an unscaled RMSNorm and uses attention
+    // logits without the standard 1/sqrt(head_dim) factor.
+    cfg.use_v_norm = true;
+    cfg.attention_scale = 1.0f;
+}
+
+void configure_kv_shared_sources(TransformerConfig& cfg,
+                                 const std::vector<std::string>& layer_types,
+                                 int shared_layers) {
+    cfg.layer_kv_shared_sources.clear();
+    if (shared_layers <= 0 || cfg.n_layer <= 0) return;
+    const int first_shared = cfg.n_layer - shared_layers;
+    if (first_shared <= 0 || first_shared >= cfg.n_layer) return;
+    cfg.layer_kv_shared_sources.assign(static_cast<std::size_t>(cfg.n_layer), -1);
+    auto type_for = [&](int layer) {
+        if (layer >= 0 && layer < static_cast<int>(layer_types.size())) {
+            return lower_ascii(layer_types[static_cast<std::size_t>(layer)]);
+        }
+        return std::string{};
+    };
+    for (int layer = first_shared; layer < cfg.n_layer; ++layer) {
+        const auto type = type_for(layer);
+        int source = -1;
+        for (int candidate = first_shared - 1; candidate >= 0; --candidate) {
+            if (type.empty() || type_for(candidate) == type) {
+                source = candidate;
+                break;
+            }
+        }
+        if (source < 0) source = first_shared - 1;
+        cfg.layer_kv_shared_sources[static_cast<std::size_t>(layer)] = source;
+    }
 }
 
 HFWeightName map_qwen35_weight_name(const std::string& hf_name) {
@@ -376,6 +455,11 @@ std::vector<std::string> metadata_string_array_or_empty(const gguf::File& file, 
     out.reserve(value.as_array().size());
     for (const auto& scalar : value.as_array()) out.push_back(scalar.as_string());
     return out;
+}
+
+bool metadata_bool_or(const gguf::File& file, const std::string& key, bool fallback) {
+    if (!file.has_metadata(key)) return fallback;
+    return file.metadata(key).as_scalar().as_bool();
 }
 
 std::vector<float> gguf_tensor_f32(const gguf::File& file, const std::string& name) {
@@ -990,15 +1074,24 @@ std::string first_existing(const SafeTensorsArchiveLite& archive,
 }
 
 bool gguf_shape_is_direct_matrix(const gguf::TensorInfo& info, int64_t rows, int64_t cols) {
-    return info.dimensions.size() == 2 &&
-           static_cast<int64_t>(info.dimensions[0]) == rows &&
-           static_cast<int64_t>(info.dimensions[1]) == cols;
+    if (info.dimensions.size() != 2) return false;
+    const auto d0 = static_cast<int64_t>(info.dimensions[0]);
+    const auto d1 = static_cast<int64_t>(info.dimensions[1]);
+    // GGUF/GGML stores dim[0] as the contiguous axis.  A MotifCL row-major
+    // [rows, cols] matrix is therefore already direct when GGUF dims are
+    // [cols, rows].  Square tensors are ambiguous; prefer the standard GGUF
+    // [rows, cols] interpretation below, which requires a transpose.
+    return d0 == cols && d1 == rows && !(d0 == rows && d1 == cols);
 }
 
 bool gguf_shape_is_transposed_matrix(const gguf::TensorInfo& info, int64_t rows, int64_t cols) {
-    return info.dimensions.size() == 2 &&
-           static_cast<int64_t>(info.dimensions[0]) == cols &&
-           static_cast<int64_t>(info.dimensions[1]) == rows;
+    if (info.dimensions.size() != 2) return false;
+    const auto d0 = static_cast<int64_t>(info.dimensions[0]);
+    const auto d1 = static_cast<int64_t>(info.dimensions[1]);
+    // Common GGUF tensor metadata is [rows, cols] in logical tensor terms, but
+    // because dim[0] is contiguous, the raw payload is row-major [cols, rows]
+    // for MotifCL and must be transposed/repacked.
+    return d0 == rows && d1 == cols;
 }
 
 Tensor gguf_quantized_matrix_for_shape(Backend& backend,
@@ -1030,10 +1123,10 @@ Tensor gguf_quantized_matrix_for_shape(Backend& backend,
         clear_memory_pool();
         return q;
     }
-    if (direct) return file.read_tensor_quantized(backend, name);
-    MCL_CHECK(transposed, "packed GGUF tensor shape mismatch for " + name);
+    MCL_CHECK(direct || transposed, "packed GGUF tensor shape mismatch for " + name);
 
-    const auto values = transpose_2d(gguf_tensor_f32(file, name), cols, rows);
+    const auto raw_values = gguf_tensor_f32(file, name);
+    const auto values = direct ? raw_values : transpose_2d(raw_values, cols, rows);
     auto dense = tensor_from_f32(backend, {rows, cols}, values);
     if (info.type == gguf::TensorType::Q4_0) return quantize_q4_symmetric_cols(dense);
     return quantize_q8_symmetric_cols(dense);
@@ -1046,10 +1139,10 @@ Tensor gguf_primary_quantized_matrix_for_shape(Backend& backend,
                                                int64_t cols) {
     const auto& info = file.tensor_info(name);
     const bool direct = gguf_shape_is_direct_matrix(info, rows, cols);
-    if (direct) return file.read_tensor_quantized(backend, name);
-    MCL_CHECK(gguf_shape_is_transposed_matrix(info, rows, cols),
-              "packed GGUF tensor shape mismatch for " + name);
-    const auto values = transpose_2d(gguf_tensor_f32(file, name), cols, rows);
+    const bool transposed = gguf_shape_is_transposed_matrix(info, rows, cols);
+    MCL_CHECK(direct || transposed, "packed GGUF tensor shape mismatch for " + name);
+    const auto raw_values = gguf_tensor_f32(file, name);
+    const auto values = direct ? raw_values : transpose_2d(raw_values, cols, rows);
     auto dense = tensor_from_f32(backend, {rows, cols}, values);
     if (info.type == gguf::TensorType::Q4_0) return quantize_q4_symmetric_cols(dense);
     return quantize_q8_symmetric_cols(dense);
@@ -1143,7 +1236,9 @@ bool apply_gguf_quantized_embedding_transposed(Backend& backend,
     if (!gguf_tensor_is_native_quant(file, name)) return false;
     const auto& info = file.tensor_info(name);
     if (info.type != gguf::TensorType::Q4_K && info.type != gguf::TensorType::Q5_K) return false;
-    MCL_CHECK(gguf_shape_is_direct_matrix(info, embed_dim, vocab_size),
+    MCL_CHECK(info.dimensions.size() == 2 &&
+                  static_cast<int64_t>(info.dimensions[0]) == embed_dim &&
+                  static_cast<int64_t>(info.dimensions[1]) == vocab_size,
               "GGUF quantized embedding expects transposed [embed_dim,vocab] layout: " + name);
     auto q = file.read_tensor_quantized(backend, name);
     embedding.set_quantized_weight_transposed(q);
@@ -1161,8 +1256,8 @@ std::vector<float> gguf_matrix_for_shape(const gguf::File& file,
     const auto values = gguf_tensor_f32(file, name);
     const auto d0 = static_cast<int64_t>(info.dimensions[0]);
     const auto d1 = static_cast<int64_t>(info.dimensions[1]);
-    if (d0 == rows && d1 == cols) return values;
-    if (d0 == cols && d1 == rows) return transpose_2d(values, cols, rows);
+    if (d0 == cols && d1 == rows && !(d0 == rows && d1 == cols)) return values;
+    if (d0 == rows && d1 == cols) return transpose_2d(values, cols, rows);
     MCL_CHECK(false, "GGUF tensor shape mismatch for " + name);
     return {};
 }
@@ -1728,6 +1823,17 @@ std::string apply_hf_chat_template(const std::vector<HFChatMessage>& messages,
         return out;
     }
     if (kind == HFChatTemplateKind::Gemma) {
+        if (architecture == HFArchitecture::Gemma4) {
+            std::string out = "<bos>";
+            for (const auto& message : messages) {
+                auto role = role_or(message.role, "user");
+                if (role == "assistant") role = "model";
+                if (role == "developer") role = "system";
+                out += "<|turn>" + role + "\n" + trim_ascii(message.content) + "<turn|>\n";
+            }
+            if (add_generation_prompt) out += "<|turn>model\n";
+            return out;
+        }
         std::string out;
         for (const auto& message : messages) {
             auto role = role_or(message.role, "user");
@@ -1899,6 +2005,16 @@ HFTransformerConfig load_hf_transformer_config_json(const std::string& path, HFA
 
     const auto gemma_like = load_gemma_config_json(path);
     out.transformer = to_transformer_config(gemma_like);
+    const auto hidden_activation = json_string_or(
+        model_text, "hidden_activation",
+        json_string_or(model_text, "hidden_act",
+                       json_string_or(text, "hidden_activation",
+                                      json_string_or(text, "hidden_act", ""))));
+    configure_mlp_activation(out.transformer, hidden_activation, out.architecture, out.architecture_name);
+    configure_gemma4_attention_semantics(out.transformer, out.architecture, out.architecture_name);
+    if (out.architecture == HFArchitecture::Gemma4) {
+        out.transformer.rope_split_half = true;
+    }
     const bool gemma_scaled_embeddings = out.architecture == HFArchitecture::Gemma ||
                                          out.architecture == HFArchitecture::Gemma2 ||
                                          out.architecture == HFArchitecture::Gemma3 ||
@@ -1959,13 +2075,29 @@ HFTransformerConfig load_hf_transformer_config_json(const std::string& path, HFA
         const int local_head_dim = static_cast<int>(json_integer_or(model_text, "head_dim", out.transformer.head_dim));
         const int global_head_dim = static_cast<int>(json_integer_or(model_text, "global_head_dim", local_head_dim));
         out.transformer.layer_head_dims.clear();
+        out.transformer.layer_rotary_dims.clear();
+        out.transformer.layer_rope_split_half.clear();
         out.transformer.layer_head_dims.reserve(static_cast<std::size_t>(out.transformer.n_layer));
+        out.transformer.layer_rotary_dims.reserve(static_cast<std::size_t>(out.transformer.n_layer));
+        out.transformer.layer_rope_split_half.reserve(static_cast<std::size_t>(out.transformer.n_layer));
         for (int i = 0; i < out.transformer.n_layer; ++i) {
             const auto kind = attention_kind_for_layer(out, i);
-            out.transformer.layer_head_dims.push_back(kind == ModernLayerKind::FullAttention ? global_head_dim : local_head_dim);
+            const int layer_head_dim = kind == ModernLayerKind::FullAttention ? global_head_dim : local_head_dim;
+            out.transformer.layer_head_dims.push_back(layer_head_dim);
+            const bool gemma4_full = out.architecture == HFArchitecture::Gemma4 &&
+                                     kind == ModernLayerKind::FullAttention;
+            out.transformer.layer_rotary_dims.push_back(gemma4_full ? std::max(2, layer_head_dim / 4)
+                                                                     : layer_head_dim);
+            out.transformer.layer_rope_split_half.push_back(out.architecture == HFArchitecture::Gemma4);
         }
         if (!out.transformer.layer_head_dims.empty()) out.transformer.head_dim = out.transformer.layer_head_dims.front();
+        if (!out.transformer.layer_rotary_dims.empty()) out.transformer.rotary_dim = out.transformer.layer_rotary_dims.front();
     }
+    configure_kv_shared_sources(
+        out.transformer,
+        out.layer_types,
+        static_cast<int>(json_integer_or(model_text, "num_kv_shared_layers",
+                                         json_integer_or(text, "num_kv_shared_layers", 0))));
     out.has_gated_delta_net = lower.find("gated_deltanet") != std::string::npos ||
                               lower.find("gated_delta_net") != std::string::npos ||
                               lower.find("delta_net") != std::string::npos ||
@@ -2029,10 +2161,19 @@ HFTransformerConfig load_hf_transformer_config_gguf(const std::string& path, HFA
         {prefix + ".rope.dimension_count", prefix + ".attention.key_length"}, full_head_dim));
     out.transformer.dropout = 0.0f;
     out.transformer.use_rope = true;
-    out.transformer.use_swiglu = true;
     out.transformer.causal = true;
     out.transformer.learned_position_embeddings = false;
     out.transformer.skip_weight_init = true;
+    const auto gguf_hidden_activation = file.metadata_string_or(
+        prefix + ".feed_forward.activation",
+        file.metadata_string_or(prefix + ".activation", ""));
+    configure_mlp_activation(out.transformer, gguf_hidden_activation, out.architecture, prefix);
+    configure_gemma4_attention_semantics(out.transformer, out.architecture, prefix);
+    if (out.architecture == HFArchitecture::Gemma4 || prefix == "gemma4") {
+        // HF Gemma4 applies RoPE with split-half rotate_half layout.  Keep the
+        // legacy interleaved layout for older GGUF architectures.
+        out.transformer.rope_split_half = true;
+    }
     out.transformer.embedding_scale =
         (out.architecture == HFArchitecture::Gemma ||
          out.architecture == HFArchitecture::Gemma2 ||
@@ -2088,28 +2229,43 @@ HFTransformerConfig load_hf_transformer_config_gguf(const std::string& path, HFA
             out.local_attention_layers.clear();
             out.global_attention_layers.clear();
             out.transformer.layer_head_dims.clear();
+            out.transformer.layer_rotary_dims.clear();
             out.transformer.layer_rope_thetas.clear();
+            out.transformer.layer_rope_split_half.clear();
             out.layer_types.reserve(sliding_pattern.size());
             out.transformer.layer_head_dims.reserve(sliding_pattern.size());
+            out.transformer.layer_rotary_dims.reserve(sliding_pattern.size());
             out.transformer.layer_rope_thetas.reserve(sliding_pattern.size());
+            out.transformer.layer_rope_split_half.reserve(sliding_pattern.size());
             for (int i = 0; i < static_cast<int>(sliding_pattern.size()); ++i) {
                 if (sliding_pattern[static_cast<std::size_t>(i)]) {
                     out.layer_types.push_back("sliding_attention");
                     out.local_attention_layers.push_back(i);
                     out.transformer.layer_head_dims.push_back(sliding_head_dim);
+                    out.transformer.layer_rotary_dims.push_back(sliding_head_dim);
                     out.transformer.layer_rope_thetas.push_back(sliding_rope_theta);
+                    out.transformer.layer_rope_split_half.push_back(true);
                 } else {
                     out.layer_types.push_back("full_attention");
                     out.global_attention_layers.push_back(i);
                     out.transformer.layer_head_dims.push_back(full_head_dim);
+                    out.transformer.layer_rotary_dims.push_back(std::max(2, full_head_dim / 4));
                     out.transformer.layer_rope_thetas.push_back(full_rope_theta);
+                    out.transformer.layer_rope_split_half.push_back(true);
                 }
             }
             if (!out.transformer.layer_head_dims.empty()) {
                 out.transformer.head_dim = out.transformer.layer_head_dims.front();
             }
+            if (!out.transformer.layer_rotary_dims.empty()) {
+                out.transformer.rotary_dim = out.transformer.layer_rotary_dims.front();
+            }
         }
     }
+    configure_kv_shared_sources(
+        out.transformer,
+        out.layer_types,
+        static_cast<int>(metadata_integer_or(file, {prefix + ".attention.shared_kv_layers"}, 0)));
 
     MCL_CHECK(out.transformer.vocab_size > 0, "GGUF config missing tokenizer vocab_size/tokens");
     MCL_CHECK(out.transformer.block_size > 0, "GGUF config missing context_length");
@@ -2157,6 +2313,7 @@ ModernGPTModel make_hf_transformer_model(Backend& backend, const HFTransformerCo
         block->norm2().eps = cfg.rms_norm_eps;
         block->attention().q_norm().eps = cfg.rms_norm_eps;
         block->attention().k_norm().eps = cfg.rms_norm_eps;
+        block->attention().v_norm().eps = cfg.rms_norm_eps;
         block->post_attention_norm().eps = cfg.rms_norm_eps;
         block->post_ffw_norm().eps = cfg.rms_norm_eps;
         if (auto* post_ple = block->post_per_layer_norm()) post_ple->eps = cfg.rms_norm_eps;
@@ -2227,10 +2384,12 @@ HybridGPTModel make_hf_hybrid_transformer_model(Backend& backend, const HFTransf
         if (auto* attn = block->attention()) {
             attn->q_norm().eps = cfg.rms_norm_eps;
             attn->k_norm().eps = cfg.rms_norm_eps;
+            attn->v_norm().eps = cfg.rms_norm_eps;
         }
         if (auto* gated = block->gated_attention()) {
             gated->attention.q_norm().eps = cfg.rms_norm_eps;
             gated->attention.k_norm().eps = cfg.rms_norm_eps;
+            gated->attention.v_norm().eps = cfg.rms_norm_eps;
         }
     }
     return model;
@@ -2757,7 +2916,7 @@ HFWeightLoadReport load_hf_transformer_gguf_weights(Backend& backend,
         const auto up_name = p + "ffn_up.weight";
         const bool gate_up_present = file.contains_tensor(gate_name) && file.contains_tensor(up_name);
         const bool gate_up_quant = gguf_tensor_is_native_quant(file, gate_name) || gguf_tensor_is_native_quant(file, up_name);
-        if (gate_up_present && gate_up_quant) {
+        if (gate_up_present && (gate_up_quant || block.mlp().split_projections_enabled())) {
             block.mlp().enable_split_projections(true);
             apply_gguf_linear_weight(backend, file, gate_name, block.mlp().gate_proj(), trainable, report);
             apply_gguf_linear_weight(backend, file, up_name, block.mlp().up_proj(), trainable, report);
@@ -2800,8 +2959,11 @@ HFTokenizer load_hf_tokenizer_gguf(const std::string& path, const HFTransformerC
     const auto file = gguf::File::open(path);
     auto tokens = metadata_string_array_or_empty(file, "tokenizer.ggml.tokens");
     if (!tokens.empty()) {
+        auto merges = metadata_string_array_or_empty(file, "tokenizer.ggml.merges");
+        const bool add_space_prefix = metadata_bool_or(file, "tokenizer.ggml.add_space_prefix", true);
         return HFTokenizer::from_tokens(tokens, cfg.bos_token_id, cfg.eos_token_id,
-                                        file.metadata_string_or("tokenizer.ggml.model", "GGUF"));
+                                        file.metadata_string_or("tokenizer.ggml.model", "GGUF"),
+                                        merges, add_space_prefix);
     }
     return HFTokenizer::byte_fallback(cfg.transformer.vocab_size, cfg.bos_token_id, cfg.eos_token_id);
 }

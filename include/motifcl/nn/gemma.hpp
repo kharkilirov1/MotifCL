@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <motifcl/core/dtype.hpp>
@@ -105,7 +106,9 @@ public:
     static GemmaTokenizer from_tokens(const std::vector<std::string>& tokens,
                                       int bos_token_id = 1,
                                       int eos_token_id = 2,
-                                      const std::string& tokenizer_model_type = "GGUF");
+                                      const std::string& tokenizer_model_type = "GGUF",
+                                      const std::vector<std::string>& bpe_merges = {},
+                                      bool add_space_prefix = true);
     static GemmaTokenizer load_vocab(const std::string& path, int bos_token_id = 1, int eos_token_id = 2);
 
     std::vector<std::int32_t> encode(const std::string& text, bool add_bos = false, bool add_eos = false) const;
@@ -131,6 +134,12 @@ private:
     std::unordered_map<std::string, std::int32_t> token_to_id_;
     std::unordered_map<std::int32_t, std::string> id_to_token_;
     std::unordered_map<std::string, int> bpe_merge_rank_;
+    std::vector<std::pair<std::string, std::int32_t>> special_tokens_;
+    std::unordered_set<std::int32_t> special_token_ids_;
+
+    void refresh_special_tokens();
+    std::pair<std::int32_t, std::size_t> match_special_token(const std::string& text,
+                                                             std::size_t pos) const;
 };
 
 class QuantizedLinear : public Module {

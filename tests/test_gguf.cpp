@@ -396,6 +396,11 @@ int main() {
                 std::fabs(gemma4_cfg.transformer.layer_rope_thetas[0] - 10000.0f) < 0.5f &&
                 std::fabs(gemma4_cfg.transformer.layer_rope_thetas[1] - 1000000.0f) < 0.5f,
             "Gemma4 GGUF per-layer rope theta metadata mapping failed");
+    require(gemma4_cfg.transformer.rope_split_half &&
+                gemma4_cfg.transformer.layer_rope_split_half.size() == 2 &&
+                gemma4_cfg.transformer.layer_rope_split_half[0] &&
+                gemma4_cfg.transformer.layer_rope_split_half[1],
+            "Gemma4 GGUF split-half RoPE metadata mapping failed");
     require(gemma4_cfg.layer_types.size() == 2 &&
                 gemma4_cfg.layer_types[0] == "sliding_attention" &&
                 gemma4_cfg.layer_types[1] == "full_attention" &&
@@ -406,6 +411,8 @@ int main() {
     auto gemma4_model = motifcl::nn::make_hf_transformer_model(backend, gemma4_cfg);
     require(gemma4_model.blocks[0]->attention().head_dim() == 2 &&
                 gemma4_model.blocks[1]->attention().head_dim() == 4 &&
+                gemma4_model.blocks[0]->attention().rope_split_half_enabled() &&
+                gemma4_model.blocks[1]->attention().rope_split_half_enabled() &&
                 gemma4_model.blocks[0]->mlp().gate_proj().out_features() == 8 &&
                 gemma4_model.blocks[1]->mlp().gate_proj().out_features() == 16,
             "Gemma4 GGUF per-layer model construction failed");
@@ -517,12 +524,21 @@ int main() {
         constexpr std::uint64_t ple = 8;
         const auto q4 = quant_q4_0_block(0x98u);
         const auto q5 = quant_q5_k_block();
+        auto q5_alt = quant_q5_k_block();
+        std::fill(q5_alt.begin() + 48, q5_alt.end(), 0x43u);
         const auto q6 = quant_q6_k_zero_block();
         auto q4_payload = [&](std::uint64_t elements) {
             return repeat_quant_block(q4, static_cast<std::size_t>(elements / 32));
         };
         auto q5_payload = [&](std::uint64_t elements) {
-            return repeat_quant_block(q5, static_cast<std::size_t>(elements / 256));
+            std::vector<std::uint8_t> raw;
+            const auto blocks = static_cast<std::size_t>(elements / 256);
+            raw.reserve(blocks * q5.size());
+            for (std::size_t i = 0; i < blocks; ++i) {
+                const auto& block = (i & 1u) ? q5_alt : q5;
+                raw.insert(raw.end(), block.begin(), block.end());
+            }
+            return raw;
         };
         auto q6_payload = [&](std::uint64_t elements) {
             return repeat_quant_block(q6, static_cast<std::size_t>(elements / 256));
@@ -605,6 +621,17 @@ int main() {
                 packed_model.per_layer_token_embedding->quantized_inference_enabled() &&
                 packed_model.blocks[0]->per_layer_input_enabled(),
             "GGUF PLE runtime modules were not enabled");
+    {
+        // Token 32 starts at the second 256-value Q5_K block when GGUF
+        // [embed_dim, vocab] memory is interpreted as token-major
+        // (token * embed_dim + d).  The old d-major gather read from the first
+        // block instead.
+        std::vector<std::int32_t> ids{32};
+        auto id_tensor = motifcl::Tensor::from_cpu(backend, {1}, motifcl::DType::I32, ids.data());
+        const auto gathered = packed_model.per_layer_token_embedding->forward(id_tensor).to_vector<float>();
+        require(!gathered.empty() && std::fabs(gathered[0] - 19.0f) < 1e-4f,
+                "GGUF K-quant embedding gather used wrong tensor stride/order");
+    }
     bool saw_repacked_transpose = false;
     for (const auto& item : packed_report.applied) {
         if (item.find("packed_quant_repacked_transpose") != std::string::npos) saw_repacked_transpose = true;
@@ -618,8 +645,9 @@ int main() {
                 packed_model.blocks[0]->attention().o_proj().quantized_weight_dtype() == motifcl::DType::Q4_0,
             "GGUF packed attention projections were not installed");
     require(packed_model.blocks[0]->attention().v_proj().quantized_inference_enabled() &&
-                packed_model.blocks[0]->attention().v_proj().quantized_weight_dtype() == motifcl::DType::Q6_K,
-            "GGUF Q6_K native packed v_proj was not installed");
+                packed_model.blocks[0]->attention().v_proj().quantized_weight_dtype() == motifcl::DType::Q8_0 &&
+                packed_model.blocks[0]->attention().v_proj().decode_quantized_weight().valid(),
+            "GGUF transposed Q6_K v_proj was not repacked for MotifCL layout");
     require(packed_model.blocks[0]->mlp().split_projections_enabled() &&
                 packed_model.blocks[0]->mlp().gate_proj().quantized_weight_dtype() == motifcl::DType::Q4_0 &&
                 packed_model.blocks[0]->mlp().down_proj.quantized_weight_dtype() == motifcl::DType::Q4_0,

@@ -37,6 +37,18 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 11435
 
 
+def configure_stdio() -> None:
+    """Keep streaming output usable on Windows when the model emits emoji/CJK."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+configure_stdio()
+
+
 def log(message: str) -> None:
     print(f"[motifcl] {message}", flush=True)
 
@@ -175,6 +187,24 @@ def model_aliases(path: Path) -> set[str]:
     return {normalize(x) for x in raw if x}
 
 
+def infer_chat_template(model: Path, name: str, requested: str | None) -> str | None:
+    value = (requested or "auto").strip().lower()
+    if value in {"none", "raw", "off", "false", "no"}:
+        return None
+    if value and value != "auto":
+        return value
+    haystack = f"{name} {model.name} {model.parent.name} {model.stem}".lower()
+    if "gemma" in haystack:
+        return "gemma"
+    if "qwen" in haystack:
+        return "chatml"
+    if "llama" in haystack:
+        return "llama3"
+    if "mistral" in haystack:
+        return "mistral"
+    return None
+
+
 def discover_models() -> list[Path]:
     roots = [
         ROOT / "build" / "models",
@@ -217,6 +247,8 @@ def resolve_model(value: str | None) -> Path:
     exact = [p for p in models if wanted in model_aliases(p)]
     if exact:
         return exact[0]
+    if not wanted:
+        raise SystemExit(f"model not found: {value}. Run `.\\motifcl.cmd list` to see discovered models.")
     fuzzy = [p for p in models if any(wanted in alias or alias in wanted for alias in model_aliases(p))]
     if fuzzy:
         return fuzzy[0]
@@ -314,6 +346,9 @@ def server_command(args: argparse.Namespace, model: Path, runner: Path, name: st
         cmd += ["--arch", args.arch]
     if args.tokenizer:
         cmd += ["--tokenizer", args.tokenizer]
+    chat_template = infer_chat_template(model, name, getattr(args, "chat_template", "auto"))
+    if chat_template:
+        cmd += ["--chat-template", chat_template]
     if args.random_init:
         cmd.append("--random-init")
     if args.no_prefill:
@@ -552,6 +587,8 @@ def add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--top-p", type=float, default=1.0, help="server default top_p")
     p.add_argument("--arch", default=None)
     p.add_argument("--tokenizer", default=None)
+    p.add_argument("--chat-template", default="auto",
+                   help="chat template for prompt wrapping: auto, none/raw, gemma, chatml, llama3, mistral")
     p.add_argument("--random-init", action="store_true")
     p.add_argument("--no-prefill", action="store_true")
     p.add_argument("--force-prefill", action="store_true")

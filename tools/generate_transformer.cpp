@@ -47,6 +47,8 @@ void usage() {
         << "  --repl                   keep model loaded and read one prompt per stdin line\n"
         << "  --jsonl-repl             persistent machine REPL: read JSON/plain lines, supports stream=true deltas\n"
         << "  --completion-only        print only newly generated text, not prompt+completion\n"
+        << "  --dump-rendered-prompt   print rendered prompt after chat templating and exit\n"
+        << "  --dump-token-ids         print tokenizer ids for rendered prompt and exit\n"
         << "  --cpu-sampling           download logits and sample on CPU instead of GPU sampler\n"
         << "  --profile                print top OpenCL kernel timings for generation\n"
         << "  --seed N                 default: 1234\n"
@@ -310,6 +312,8 @@ int main(int argc, char** argv) {
     bool repl = false;
     bool jsonl_repl = false;
     bool completion_only = false;
+    bool dump_rendered_prompt = false;
+    bool dump_token_ids = false;
     int ctx_size = 0;
     motifcl::nn::GenerateOptions options;
 
@@ -360,6 +364,8 @@ int main(int argc, char** argv) {
             repl = true;
         }
         else if (arg == "--completion-only") completion_only = true;
+        else if (arg == "--dump-rendered-prompt") dump_rendered_prompt = true;
+        else if (arg == "--dump-token-ids") dump_token_ids = true;
         else if (arg == "--cpu-sampling") options.gpu_greedy_sampling = false;
         else if (arg == "--profile") profile = true;
         else if (arg == "--seed") options.seed = static_cast<std::uint32_t>(std::stoul(require_value("--seed")));
@@ -431,7 +437,6 @@ int main(int argc, char** argv) {
     if (tokenizer_path.empty()) tokenizer_path = model_root.string();
     if (weights.empty()) weights = find_safetensors(model_root);
 
-    auto backend = motifcl::Backend::create_opencl();
     auto cfg = !gguf_path.empty()
         ? motifcl::nn::load_hf_transformer_config_gguf(gguf_path, arch)
         : motifcl::nn::load_hf_transformer_config_json(config_path, arch);
@@ -471,6 +476,23 @@ int main(int argc, char** argv) {
         return motifcl::nn::apply_hf_chat_template(messages, cfg.architecture, resolved_template,
                                                    add_generation_prompt);
     };
+    if (dump_rendered_prompt || dump_token_ids) {
+        auto tokenizer = !gguf_path.empty() && tokenizer_path == model_root.string()
+            ? motifcl::nn::load_hf_tokenizer_gguf(gguf_path, cfg)
+            : motifcl::nn::load_hf_tokenizer(tokenizer_path, cfg);
+        const std::string final_prompt = render_prompt(prompt, false);
+        if (dump_rendered_prompt) std::cout << final_prompt << "\n";
+        if (dump_token_ids) {
+            const auto ids = tokenizer.encode(final_prompt, options.add_bos, false);
+            for (std::size_t i = 0; i < ids.size(); ++i) {
+                if (i) std::cout << ' ';
+                std::cout << ids[i];
+            }
+            std::cout << "\n";
+        }
+        return 0;
+    }
+    auto backend = motifcl::Backend::create_opencl();
     auto print_profile_summary = [&]() {
         backend.finish();
         backend.profiler.set_enabled(false);

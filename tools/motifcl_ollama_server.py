@@ -83,6 +83,24 @@ def _chat_prompt(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _last_user_prompt(messages: list[dict[str, Any]]) -> str:
+    system_parts: list[str] = []
+    user_parts: list[str] = []
+    for msg in messages:
+        role = str(msg.get("role", "user")).lower()
+        content = str(msg.get("content", ""))
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+        elif role == "user":
+            user_parts.append(content)
+    prompt = "\n\n".join(user_parts[-1:] or user_parts)
+    if system_parts:
+        prompt = "\n\n".join(system_parts + ([prompt] if prompt else []))
+    return prompt
+
+
 class MotifCLWorker:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -115,6 +133,8 @@ class MotifCLWorker:
             cmd += ["--arch", self.args.arch]
         if self.args.tokenizer:
             cmd += ["--tokenizer", str(self.args.tokenizer)]
+        if self.args.chat_template:
+            cmd += ["--chat-template", self.args.chat_template]
         if self.args.random_init:
             cmd.append("--random-init")
         if self.args.no_prefill:
@@ -171,6 +191,9 @@ class MotifCLWorker:
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
+
+    def uses_chat_template(self) -> bool:
+        return bool(self.args.chat_template)
 
     def recent_logs(self) -> list[str]:
         items = list(self.stderr_tail.queue)
@@ -249,7 +272,12 @@ class MotifCLHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path in ("/", "/health"):
-            self._send_json({"ok": True, "model": self.model_name, "worker_alive": self.worker.alive()})
+            self._send_json({
+                "ok": True,
+                "model": self.model_name,
+                "worker_alive": self.worker.alive(),
+                "chat_template": self.worker.args.chat_template or None,
+            })
             return
         if self.path == "/api/version":
             self._send_json({"version": "motifcl-ollama-compat-0.2"})
@@ -344,7 +372,7 @@ class MotifCLHandler(BaseHTTPRequestHandler):
     def _handle_chat(self) -> None:
         body = self._read_json()
         messages = body.get("messages") if isinstance(body.get("messages"), list) else []
-        prompt = _chat_prompt(messages)
+        prompt = _last_user_prompt(messages) if self.worker.uses_chat_template() else _chat_prompt(messages)
         stream = bool(body.get("stream", True))
         start = time.perf_counter()
         created = _now_iso()
@@ -401,7 +429,7 @@ class MotifCLHandler(BaseHTTPRequestHandler):
         body = self._read_json()
         if self.path == "/v1/chat/completions":
             messages = body.get("messages") if isinstance(body.get("messages"), list) else []
-            prompt = _chat_prompt(messages)
+            prompt = _last_user_prompt(messages) if self.worker.uses_chat_template() else _chat_prompt(messages)
         else:
             prompt = str(body.get("prompt", ""))
         options: dict[str, Any] = {}
@@ -449,6 +477,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--arch", default=None)
     parser.add_argument("--tokenizer", default=None)
+    parser.add_argument("--chat-template", default=None)
     parser.add_argument("--random-init", action="store_true")
     parser.add_argument("--no-prefill", action="store_true")
     parser.add_argument("--force-prefill", action="store_true")

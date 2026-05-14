@@ -1943,6 +1943,96 @@ __kernel void rope_positions_f32(__global const float* x,
     out[gid] = (d == pair_d) ? (even * cs - odd * sn) : (even * sn + odd * cs);
 }
 
+__kernel void rope_split_half_f32(__global const float* x,
+                                  __global float* out,
+                                  int batch,
+                                  int tokens,
+                                  int channels,
+                                  int n_head,
+                                  int head_dim,
+                                  int rotary_dim,
+                                  int token_offset,
+                                  float theta,
+                                  int inverse) {
+    int gid = get_global_id(0);
+    int total = batch * tokens * channels;
+    if (gid >= total) return;
+    int d = gid % head_dim;
+    int c = gid % channels;
+    int token = (gid / channels) % tokens;
+    int b = gid / (tokens * channels);
+    int head = c / head_dim;
+    if (head >= n_head) return;
+    int half_dim = head_dim >> 1;
+    if (half_dim <= 0 || d >= half_dim * 2) {
+        out[gid] = x[gid];
+        return;
+    }
+    int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
+    rd = min(rd, head_dim);
+    rd = rd - (rd & 1);
+    int rotate_pairs = rd >> 1;
+    int pair_index = d < half_dim ? d : d - half_dim;
+    if (pair_index >= rotate_pairs) {
+        out[gid] = x[gid];
+        return;
+    }
+    float exponent = (float)(2 * pair_index) / (float)head_dim;
+    float angle = (float)(token_offset + token) / pow(theta, exponent);
+    if (inverse) angle = -angle;
+    float cs = cos(angle);
+    float sn = sin(angle);
+    int base = (b * tokens + token) * channels + head * head_dim;
+    float first = x[base + pair_index];
+    float second = x[base + half_dim + pair_index];
+    out[gid] = (d < half_dim) ? (first * cs - second * sn) : (second * cs + first * sn);
+}
+
+__kernel void rope_positions_split_half_f32(__global const float* x,
+                                            __global const int* positions,
+                                            __global float* out,
+                                            int batch,
+                                            int tokens,
+                                            int channels,
+                                            int n_head,
+                                            int head_dim,
+                                            int rotary_dim,
+                                            float theta) {
+    int gid = get_global_id(0);
+    int total = batch * tokens * channels;
+    if (gid >= total) return;
+    int d = gid % head_dim;
+    int c = gid % channels;
+    int token = (gid / channels) % tokens;
+    int b = gid / (tokens * channels);
+    int head = c / head_dim;
+    if (head >= n_head) return;
+    int half_dim = head_dim >> 1;
+    if (half_dim <= 0 || d >= half_dim * 2) {
+        out[gid] = x[gid];
+        return;
+    }
+    int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
+    rd = min(rd, head_dim);
+    rd = rd - (rd & 1);
+    int rotate_pairs = rd >> 1;
+    int pair_index = d < half_dim ? d : d - half_dim;
+    if (pair_index >= rotate_pairs) {
+        out[gid] = x[gid];
+        return;
+    }
+    int pos = positions[b * tokens + token];
+    if (pos < 0) pos = 0;
+    float exponent = (float)(2 * pair_index) / (float)head_dim;
+    float angle = (float)pos / pow(theta, exponent);
+    float cs = cos(angle);
+    float sn = sin(angle);
+    int base = (b * tokens + token) * channels + head * head_dim;
+    float first = x[base + pair_index];
+    float second = x[base + half_dim + pair_index];
+    out[gid] = (d < half_dim) ? (first * cs - second * sn) : (second * cs + first * sn);
+}
+
 // Decode-only fused Q/K RMSNorm + RoPE for one generated token.
 // One workgroup processes one (batch, q-head or kv-head). This replaces:
 //   rmsnorm(q heads) + rmsnorm(k heads) + rope(q) + rope(k)
