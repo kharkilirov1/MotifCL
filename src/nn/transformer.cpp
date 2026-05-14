@@ -3029,6 +3029,77 @@ Tensor ModernGPTModel::forward_with_cache_last_logits(const Tensor& token_ids, s
     return project_logits(last_sequence_hidden_rows(h, B, T, config.n_embd));
 }
 
+void ModernGPTModel::prefill_cache_only(const Tensor& token_ids, std::vector<KVCache>& caches) {
+    std::vector<KVCache*> ptrs;
+    ptrs.reserve(caches.size());
+    for (auto& cache : caches) ptrs.push_back(&cache);
+    prefill_cache_only(token_ids, ptrs);
+}
+
+void ModernGPTModel::prefill_cache_only(const Tensor& token_ids, std::vector<KVCache*>& caches) {
+    MCL_CHECK(token_ids.dtype() == DType::I32, "ModernGPTModel token ids must be i32");
+    MCL_CHECK(token_ids.ndim() == 1 || token_ids.ndim() == 2, "ModernGPTModel token ids must be [T] or [B,T]");
+    MCL_CHECK(caches.size() == blocks.size(), "ModernGPTModel KV cache count must match layer count");
+    MCL_CHECK(!use_positions_, "ModernGPTModel cached inference currently expects RoPE/token-only positions");
+    const int64_t B = token_ids.ndim() == 2 ? token_ids.shape()[0] : 1;
+    const int64_t T = token_ids.ndim() == 2 ? token_ids.shape()[1] : token_ids.shape()[0];
+    MCL_CHECK(T > 0 && T <= config.block_size, "ModernGPTModel invalid cached sequence length");
+    if (!caches.empty()) {
+        MCL_CHECK(caches[0] != nullptr, "ModernGPTModel null KV cache");
+        const int64_t start = caches[0]->length;
+        MCL_CHECK(start + T <= config.block_size, "ModernGPTModel KV cache exceeds block_size");
+        for (auto* cache : caches) {
+            MCL_CHECK(cache != nullptr, "ModernGPTModel null KV cache");
+            MCL_CHECK(cache->length == start, "ModernGPTModel KV caches must have equal current length");
+        }
+    }
+    Tensor h = input_embeddings(token_ids, B, T);
+    Tensor per_layer_inputs = config.use_per_layer_inputs ? compute_per_layer_inputs(token_ids, h, B, T) : Tensor{};
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        h = config.use_per_layer_inputs
+            ? blocks[i]->forward_with_cache_packed_per_layer_input(h, *caches[i], B, T,
+                                                                   &per_layer_inputs,
+                                                                   static_cast<int>(i),
+                                                                   B * T)
+            : blocks[i]->forward_with_cache(h, *caches[i], B, T, nullptr);
+    }
+}
+
+void ModernGPTModel::prefill_cache_only(const Tensor& token_ids, std::vector<PagedKVCache>& caches) {
+    std::vector<PagedKVCache*> ptrs;
+    ptrs.reserve(caches.size());
+    for (auto& cache : caches) ptrs.push_back(&cache);
+    prefill_cache_only(token_ids, ptrs);
+}
+
+void ModernGPTModel::prefill_cache_only(const Tensor& token_ids, std::vector<PagedKVCache*>& caches) {
+    MCL_CHECK(token_ids.dtype() == DType::I32, "ModernGPTModel token ids must be i32");
+    MCL_CHECK(token_ids.ndim() == 1 || token_ids.ndim() == 2, "ModernGPTModel token ids must be [T] or [B,T]");
+    MCL_CHECK(caches.size() == blocks.size(), "ModernGPTModel paged KV cache count must match layer count");
+    MCL_CHECK(!use_positions_, "ModernGPTModel paged cached inference currently expects RoPE/token-only positions");
+    const int64_t B = token_ids.ndim() == 2 ? token_ids.shape()[0] : 1;
+    const int64_t T = token_ids.ndim() == 2 ? token_ids.shape()[1] : token_ids.shape()[0];
+    MCL_CHECK(T > 0 && T <= config.block_size, "ModernGPTModel invalid paged cached sequence length");
+    if (!caches.empty()) {
+        MCL_CHECK(caches[0] != nullptr, "ModernGPTModel null paged KV cache");
+        const int64_t start = caches[0]->tokens_seen;
+        for (auto* cache : caches) {
+            MCL_CHECK(cache != nullptr, "ModernGPTModel null paged KV cache");
+            MCL_CHECK(cache->tokens_seen == start, "ModernGPTModel paged KV caches must have equal current length");
+        }
+    }
+    Tensor h = input_embeddings(token_ids, B, T);
+    Tensor per_layer_inputs = config.use_per_layer_inputs ? compute_per_layer_inputs(token_ids, h, B, T) : Tensor{};
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        h = config.use_per_layer_inputs
+            ? blocks[i]->forward_with_cache_packed_per_layer_input(h, *caches[i], B, T,
+                                                                   &per_layer_inputs,
+                                                                   static_cast<int>(i),
+                                                                   B * T)
+            : blocks[i]->forward_with_cache(h, *caches[i], B, T, nullptr);
+    }
+}
+
 Tensor ModernGPTModel::decode_step(const Tensor& token_ids, std::vector<KVCache>& caches) {
     check_decode_step_token_shape(token_ids, "ModernGPTModel");
     return forward_with_cache_last_logits(token_ids, caches);

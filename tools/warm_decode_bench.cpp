@@ -222,9 +222,14 @@ BenchResult run_modern_once(motifcl::Backend& backend,
                                                    motifcl::DType::I32, tokens.data());
             logits = model.forward_with_cache_last_logits(input, caches);
         } else {
-            for (std::int32_t token : tokens) {
+            for (std::size_t i = 0; i < tokens.size(); ++i) {
+                const std::int32_t token = tokens[i];
                 auto input = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, &token);
-                logits = model.decode_step(input, caches);
+                if (i + 1 == tokens.size()) {
+                    logits = model.decode_step(input, caches);
+                } else {
+                    model.prefill_cache_only(input, caches);
+                }
             }
         }
         backend.finish();
@@ -254,9 +259,14 @@ BenchResult run_modern_once(motifcl::Backend& backend,
                                                motifcl::DType::I32, tokens.data());
         logits = model.forward_with_cache_last_logits(input, caches);
     } else {
-        for (std::int32_t token : tokens) {
+        for (std::size_t i = 0; i < tokens.size(); ++i) {
+            const std::int32_t token = tokens[i];
             auto input = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, &token);
-            logits = model.decode_step(input, caches);
+            if (i + 1 == tokens.size()) {
+                logits = model.decode_step(input, caches);
+            } else {
+                model.prefill_cache_only(input, caches);
+            }
         }
     }
     backend.finish();
@@ -310,9 +320,14 @@ ModernPromptCache build_modern_prompt_cache(motifcl::Backend& backend,
                                                motifcl::DType::I32, tokens.data());
         cache.logits = model.forward_with_cache_last_logits(input, cache.caches);
     } else {
-        for (std::int32_t token : tokens) {
+        for (std::size_t i = 0; i < tokens.size(); ++i) {
+            const std::int32_t token = tokens[i];
             auto input = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, &token);
-            cache.logits = model.decode_step(input, cache.caches);
+            if (i + 1 == tokens.size()) {
+                cache.logits = model.decode_step(input, cache.caches);
+            } else {
+                model.prefill_cache_only(input, cache.caches);
+            }
         }
     }
     backend.finish();

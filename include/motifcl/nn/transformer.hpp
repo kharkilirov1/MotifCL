@@ -473,6 +473,10 @@ public:
     Tensor forward_with_cache_last_logits(const Tensor& token_ids, std::vector<KVCache*>& caches);
     Tensor forward_with_cache_last_logits(const Tensor& token_ids, std::vector<PagedKVCache>& caches);
     Tensor forward_with_cache_last_logits(const Tensor& token_ids, std::vector<PagedKVCache*>& caches);
+    void prefill_cache_only(const Tensor& token_ids, std::vector<KVCache>& caches);
+    void prefill_cache_only(const Tensor& token_ids, std::vector<KVCache*>& caches);
+    void prefill_cache_only(const Tensor& token_ids, std::vector<PagedKVCache>& caches);
+    void prefill_cache_only(const Tensor& token_ids, std::vector<PagedKVCache*>& caches);
     Tensor decode_step(const Tensor& token_ids, std::vector<KVCache>& caches);
     Tensor decode_step(const Tensor& token_ids, std::vector<KVCache*>& caches);
     Tensor decode_step(const Tensor& token_ids, std::vector<PagedKVCache>& caches);
