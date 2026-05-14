@@ -9,6 +9,45 @@ REPL readiness, runs a configurable one-token warmup by default, and only then s
 This is not a replacement for Ollama's model registry or lifecycle manager yet; it is a compatible hot local
 serving path for benchmarking and app integration.
 
+## One-command launcher
+
+On Windows, use the root `motifcl.cmd` launcher instead of manually building and starting the server:
+
+```powershell
+.\motifcl.cmd
+```
+
+That single command:
+
+1. finds or builds `motifcl_generate_transformer`;
+2. auto-selects the newest local `.gguf` under `build/models`, `build_kquant_prefill/models`, or `models`;
+3. starts `tools/motifcl_ollama_server.py` in the background;
+4. waits until `/health` is ready after model load and warmup.
+
+Ollama-like terminal generation:
+
+```powershell
+.\motifcl.cmd run "Привет. Ответь одним предложением."
+```
+
+Lifecycle helpers:
+
+```powershell
+.\motifcl.cmd list
+.\motifcl.cmd status
+.\motifcl.cmd down
+```
+
+Explicit model/path:
+
+```powershell
+.\motifcl.cmd up .\build\models\gemma-4-E2B-it-GGUF\gemma-4-E2B-it-Q4_K_M.gguf
+.\motifcl.cmd run gemma "Hello"
+```
+
+The lower-level sections below are still useful when you want to run the HTTP server in the foreground or pass
+special runner flags directly.
+
 ## Build the runner
 
 ```bash
