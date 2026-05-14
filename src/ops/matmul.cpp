@@ -500,7 +500,8 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
         k.set_arg_local(10, kRowGroup * kKparLocal * sizeof(float));
         k.launch2d(static_cast<std::size_t>(N) * kKparLocal, rows, kKparLocal, 1);
     } else if (variant == 59 || variant == 79) {
-        constexpr std::size_t kLocal = 128;
+        const std::size_t kLocal =
+            (variant == 59 && a.backend().device_info().max_work_group_size >= 256u) ? 256u : 128u;
         constexpr std::size_t kRowGroup = 4;
         constexpr std::size_t kTileK = 64;
         const std::size_t rows = (static_cast<std::size_t>(M) + kRowGroup - 1u) / kRowGroup;

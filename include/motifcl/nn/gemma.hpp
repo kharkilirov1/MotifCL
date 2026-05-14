@@ -170,7 +170,7 @@ struct GenerateOptions {
     bool add_bos = false;
     bool prefill_prompt = true;
     bool adaptive_prefill = true;
-    int adaptive_prefill_max_tokens = 64;
+    int adaptive_prefill_max_tokens = 24;
     bool gpu_greedy_sampling = true;
     bool use_paged_kv_cache = false;
     int kv_page_size = 256;

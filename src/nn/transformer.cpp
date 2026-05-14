@@ -203,8 +203,7 @@ bool env_enabled(const char* name) {
 }
 
 bool decode_block_graph_replay_enabled() {
-    return env_enabled("MOTIFCL_ENABLE_DECODE_BLOCK_GRAPH_REPLAY") &&
-           !env_enabled("MOTIFCL_DISABLE_DECODE_BLOCK_GRAPH_REPLAY");
+    return !env_enabled("MOTIFCL_DISABLE_DECODE_BLOCK_GRAPH_REPLAY");
 }
 
 bool decode_block_graph_replay_log_enabled() {
@@ -922,8 +921,7 @@ bool can_use_fused_packed_ple_m1(const Tensor& h,
                                  const RMSNorm& norm,
                                  int layer,
                                  int64_t token_count) {
-    if (!env_enabled("MOTIFCL_ENABLE_FUSED_PLE_M1") ||
-        env_enabled("MOTIFCL_DISABLE_FUSED_PLE_M1") ||
+    if (env_enabled("MOTIFCL_DISABLE_FUSED_PLE_M1") ||
         autograd::is_enabled()) {
         return false;
     }

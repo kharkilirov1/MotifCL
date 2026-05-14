@@ -38,7 +38,7 @@ void usage() {
         << "  --disable-adaptive-prefill\n"
         << "                            disable default small GGUF K-quant streaming prefill\n"
         << "  --adaptive-prefill-max-tokens N\n"
-        << "                            default: 64; env override: MOTIFCL_ADAPTIVE_STREAMING_PREFILL_MAX_TOKENS\n"
+        << "                            default: 24; env override: MOTIFCL_ADAPTIVE_STREAMING_PREFILL_MAX_TOKENS\n"
         << "  --paged-kv               use paged KV cache for single-prompt generation\n"
         << "  --kv-page-size N         paged KV page size (default: 256)\n"
         << "  --repl                   keep model loaded and read one prompt per stdin line\n"

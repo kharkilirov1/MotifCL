@@ -39,6 +39,7 @@ struct Options {
 struct BenchResult {
     double prompt_eval_ms = 0.0;
     double decode_ms = 0.0;
+    int prompt_tokens = 0;
     int generated_tokens = 0;
     bool streaming_prefill = false;
 
@@ -74,7 +75,7 @@ void usage() {
         << "  --disable-adaptive-prefill\n"
         << "                            disable default small GGUF K-quant streaming prefill\n"
         << "  --adaptive-prefill-max-tokens N\n"
-        << "                            default: 64; env override: MOTIFCL_ADAPTIVE_STREAMING_PREFILL_MAX_TOKENS\n"
+        << "                            default: 24; env override: MOTIFCL_ADAPTIVE_STREAMING_PREFILL_MAX_TOKENS\n"
         << "  --paged-kv               use paged KV cache\n"
         << "  --kv-page-size N         paged KV page size (default: 256)\n"
         << "  --quant none|q8|q4       quantize dense HF Linear/lm_head weights\n"
@@ -239,7 +240,8 @@ BenchResult run_modern_once(motifcl::Backend& backend,
         }
         backend.finish();
         const auto decode_end = Clock::now();
-        return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end), generated, stream_prompt};
+        return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end),
+                static_cast<int>(tokens.size() - generated), generated, stream_prompt};
     }
 
     auto caches = model.create_kv_cache(backend, 1);
@@ -271,7 +273,8 @@ BenchResult run_modern_once(motifcl::Backend& backend,
     }
     backend.finish();
     const auto decode_end = Clock::now();
-    return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end), generated, stream_prompt};
+    return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end),
+            static_cast<int>(tokens.size() - generated), generated, stream_prompt};
 }
 
 BenchResult run_hybrid_once(motifcl::Backend& backend,
@@ -317,7 +320,8 @@ BenchResult run_hybrid_once(motifcl::Backend& backend,
     }
     backend.finish();
     const auto decode_end = Clock::now();
-    return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end), generated, stream_prompt};
+    return {elapsed_ms(prompt_start, prompt_end), elapsed_ms(decode_start, decode_end),
+            static_cast<int>(tokens.size() - generated), generated, stream_prompt};
 }
 
 template <typename RunFn>
@@ -345,10 +349,12 @@ void run_benchmark_loop(motifcl::Backend& backend,
     double prompt_total = 0.0;
     double decode_total = 0.0;
     int token_total = 0;
+    int prompt_token_total = 0;
     for (const auto& r : results) {
         prompt_total += r.prompt_eval_ms;
         decode_total += r.decode_ms;
         token_total += r.generated_tokens;
+        prompt_token_total += r.prompt_tokens;
     }
     const double prompt_avg = prompt_total / static_cast<double>(results.size());
     const double decode_tok_s = decode_total > 0.0
@@ -359,6 +365,7 @@ void run_benchmark_loop(motifcl::Backend& backend,
               << "warmup_runs=" << opts.warmup << "\n"
               << "iters=" << opts.iters << "\n"
               << "prefill_mode=" << (results.front().streaming_prefill ? "streaming" : "full") << "\n"
+              << "prompt_tokens=" << (prompt_token_total / static_cast<int>(results.size())) << "\n"
               << "prompt_eval_ms=" << prompt_avg << "\n"
               << "decode_ms_total=" << decode_total << "\n"
               << "decode_tokens=" << token_total << "\n"
@@ -453,6 +460,7 @@ int main(int argc, char** argv) {
                 std::cout << std::fixed << std::setprecision(3)
                           << "load_ms=" << load_ms
                           << " prefill_mode=" << (result.streaming_prefill ? "streaming" : "full")
+                          << " prompt_tokens=" << result.prompt_tokens
                           << " prompt_eval_ms=" << result.prompt_eval_ms
                           << " decode_tokens=" << result.generated_tokens
                           << " decode_tok_s=" << result.decode_tok_s() << "\n" << std::flush;
@@ -507,6 +515,7 @@ int main(int argc, char** argv) {
             std::cout << std::fixed << std::setprecision(3)
                       << "load_ms=" << load_ms
                       << " prefill_mode=" << (result.streaming_prefill ? "streaming" : "full")
+                      << " prompt_tokens=" << result.prompt_tokens
                       << " prompt_eval_ms=" << result.prompt_eval_ms
                       << " decode_tokens=" << result.generated_tokens
                       << " decode_tok_s=" << result.decode_tok_s() << "\n" << std::flush;
