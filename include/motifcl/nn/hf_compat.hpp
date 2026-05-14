@@ -249,12 +249,14 @@ std::string generate_hf_text(Backend& backend,
                              ModernGPTModel& model,
                              const HFTokenizer& tokenizer,
                              const std::string& prompt,
-                             const GenerateOptions& options = {});
+                             const GenerateOptions& options = {},
+                             const TextTokenCallback& token_callback = {});
 std::string generate_hf_hybrid_text(Backend& backend,
                                     HybridGPTModel& model,
                                     const HFTokenizer& tokenizer,
                                     const std::string& prompt,
-                                    const GenerateOptions& options = {});
+                                    const GenerateOptions& options = {},
+                                    const TextTokenCallback& token_callback = {});
 
 std::vector<std::string> generate_hf_batch_text(Backend& backend,
                                                 ModernGPTModel& model,

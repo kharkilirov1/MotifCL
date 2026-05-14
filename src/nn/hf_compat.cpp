@@ -2810,15 +2810,33 @@ std::string generate_hf_text(Backend& backend,
                              ModernGPTModel& model,
                              const HFTokenizer& tokenizer,
                              const std::string& prompt,
-                             const GenerateOptions& options) {
-    return generate_text(backend, model, tokenizer, prompt, options);
+                             const GenerateOptions& options,
+                             const TextTokenCallback& token_callback) {
+    return generate_text(backend, model, tokenizer, prompt, options, token_callback);
+}
+
+static std::string decoded_hf_delta_from_generated(const HFTokenizer& tokenizer,
+                                                   std::vector<std::int32_t>& generated_tokens,
+                                                   std::string& emitted_text,
+                                                   std::int32_t token_id) {
+    generated_tokens.push_back(token_id);
+    const auto current = tokenizer.decode(generated_tokens, true);
+    std::string delta;
+    if (current.rfind(emitted_text, 0) == 0) {
+        delta = current.substr(emitted_text.size());
+    } else {
+        delta = tokenizer.decode({token_id}, true);
+    }
+    emitted_text = current;
+    return delta;
 }
 
 std::string generate_hf_hybrid_text(Backend& backend,
                                     HybridGPTModel& model,
                                     const HFTokenizer& tokenizer,
                                     const std::string& prompt,
-                                    const GenerateOptions& options) {
+                                    const GenerateOptions& options,
+                                    const TextTokenCallback& token_callback) {
     MCL_CHECK(options.max_new_tokens >= 0, "GenerateOptions max_new_tokens must be non-negative");
     MCL_CHECK(options.kv_page_size > 0, "GenerateOptions kv_page_size must be positive");
     autograd::NoGradGuard no_grad;
@@ -2846,6 +2864,8 @@ std::string generate_hf_hybrid_text(Backend& backend,
     }
 
     std::mt19937 rng(options.seed);
+    std::vector<std::int32_t> generated_tokens;
+    std::string emitted_text;
     for (int step = 0; step < options.max_new_tokens; ++step) {
         MCL_CHECK(static_cast<int>(tokens.size()) < model.config.block_size,
                   "generate_hf_hybrid_text reached model block_size");
@@ -2856,6 +2876,10 @@ std::string generate_hf_hybrid_text(Backend& backend,
                                                 static_cast<std::uint32_t>(rng()));
         const auto next = next_tensor.to_vector<std::int32_t>()[0];
         tokens.push_back(next);
+        if (token_callback) {
+            const auto delta = decoded_hf_delta_from_generated(tokenizer, generated_tokens, emitted_text, next);
+            token_callback(next, delta);
+        }
         if (options.eos_token_id >= 0 && next == options.eos_token_id) break;
         if (step + 1 >= options.max_new_tokens) break;
         auto input = next_tensor.view({1, 1});

@@ -83,25 +83,6 @@ def _chat_prompt(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _stream_chunks(text: str, target_chars: int = 96) -> list[str]:
-    if not text:
-        return [""]
-    chunks: list[str] = []
-    current: list[str] = []
-    size = 0
-    for part in text.split(" "):
-        piece = part if not current else " " + part
-        current.append(piece)
-        size += len(piece)
-        if size >= target_chars:
-            chunks.append("".join(current))
-            current = []
-            size = 0
-    if current:
-        chunks.append("".join(current))
-    return chunks
-
-
 class MotifCLWorker:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -212,13 +193,36 @@ class MotifCLWorker:
                 raise RuntimeError(str(data.get("error", "MotifCL generation failed")))
             return data
 
+    def generate_stream(self, prompt: str, options: dict[str, Any]):
+        with self.lock:
+            if not self.alive():
+                self.start()
+            assert self.proc is not None and self.proc.stdin is not None and self.proc.stdout is not None
+            request = {"prompt": prompt, "stream": True, **options}
+            self.proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+            self.proc.stdin.flush()
+            while True:
+                line = self.proc.stdout.readline()
+                if not line:
+                    code = self.proc.poll()
+                    raise RuntimeError(
+                        f"MotifCL worker exited before streaming response finished; "
+                        f"code={code}; logs={self.recent_logs()}"
+                    )
+                data = json.loads(line)
+                if not data.get("ok", False):
+                    raise RuntimeError(str(data.get("error", "MotifCL generation failed")))
+                yield data
+                if data.get("done", False):
+                    break
+
     def close(self) -> None:
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
 
 
 class MotifCLHandler(BaseHTTPRequestHandler):
-    server_version = "MotifCLOllamaCompat/0.1"
+    server_version = "MotifCLOllamaCompat/0.2"
 
     def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
         data = _json_bytes(payload)
@@ -248,7 +252,7 @@ class MotifCLHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "model": self.model_name, "worker_alive": self.worker.alive()})
             return
         if self.path == "/api/version":
-            self._send_json({"version": "motifcl-ollama-compat-0.1"})
+            self._send_json({"version": "motifcl-ollama-compat-0.2"})
             return
         if self.path in ("/api/tags", "/v1/models"):
             model = {
@@ -287,29 +291,44 @@ class MotifCLHandler(BaseHTTPRequestHandler):
         prompt = str(body.get("prompt", ""))
         stream = bool(body.get("stream", True))
         start = time.perf_counter()
-        result = self.worker.generate(prompt, _ollama_options(body))
-        response = str(result.get("response", ""))
-        total_duration = _ns_since(start)
         created = _now_iso()
         if stream:
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
             self.end_headers()
-            for chunk in _stream_chunks(response):
-                payload = {"model": self.model_name, "created_at": created, "response": chunk, "done": False}
-                self.wfile.write(_json_bytes(payload) + b"\n")
+            try:
+                for event in self.worker.generate_stream(prompt, _ollama_options(body)):
+                    if event.get("done", False):
+                        final = {
+                            "model": self.model_name,
+                            "created_at": created,
+                            "response": "",
+                            "done": True,
+                            "total_duration": _ns_since(start),
+                            "load_duration": 0,
+                            "worker_total_ms": event.get("total_ms"),
+                        }
+                        self.wfile.write(_json_bytes(final) + b"\n")
+                        self.wfile.flush()
+                        return
+                    payload = {
+                        "model": self.model_name,
+                        "created_at": created,
+                        "response": str(event.get("delta", "")),
+                        "done": False,
+                    }
+                    if "token" in event:
+                        payload["token"] = event["token"]
+                    self.wfile.write(_json_bytes(payload) + b"\n")
+                    self.wfile.flush()
+            except Exception as exc:
+                error = {"model": self.model_name, "created_at": created, "error": str(exc), "done": True}
+                self.wfile.write(_json_bytes(error) + b"\n")
                 self.wfile.flush()
-            final = {
-                "model": self.model_name,
-                "created_at": created,
-                "response": "",
-                "done": True,
-                "total_duration": total_duration,
-                "load_duration": 0,
-                "worker_total_ms": result.get("total_ms"),
-            }
-            self.wfile.write(_json_bytes(final) + b"\n")
             return
+        result = self.worker.generate(prompt, _ollama_options(body))
+        response = str(result.get("response", ""))
+        total_duration = _ns_since(start)
         self._send_json(
             {
                 "model": self.model_name,
@@ -328,34 +347,44 @@ class MotifCLHandler(BaseHTTPRequestHandler):
         prompt = _chat_prompt(messages)
         stream = bool(body.get("stream", True))
         start = time.perf_counter()
-        result = self.worker.generate(prompt, _ollama_options(body))
-        response = str(result.get("response", ""))
-        total_duration = _ns_since(start)
         created = _now_iso()
         if stream:
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
             self.end_headers()
-            for chunk in _stream_chunks(response):
-                payload = {
-                    "model": self.model_name,
-                    "created_at": created,
-                    "message": {"role": "assistant", "content": chunk},
-                    "done": False,
-                }
-                self.wfile.write(_json_bytes(payload) + b"\n")
+            try:
+                for event in self.worker.generate_stream(prompt, _ollama_options(body)):
+                    if event.get("done", False):
+                        final = {
+                            "model": self.model_name,
+                            "created_at": created,
+                            "message": {"role": "assistant", "content": ""},
+                            "done": True,
+                            "total_duration": _ns_since(start),
+                            "load_duration": 0,
+                            "worker_total_ms": event.get("total_ms"),
+                        }
+                        self.wfile.write(_json_bytes(final) + b"\n")
+                        self.wfile.flush()
+                        return
+                    payload = {
+                        "model": self.model_name,
+                        "created_at": created,
+                        "message": {"role": "assistant", "content": str(event.get("delta", ""))},
+                        "done": False,
+                    }
+                    if "token" in event:
+                        payload["token"] = event["token"]
+                    self.wfile.write(_json_bytes(payload) + b"\n")
+                    self.wfile.flush()
+            except Exception as exc:
+                error = {"model": self.model_name, "created_at": created, "error": str(exc), "done": True}
+                self.wfile.write(_json_bytes(error) + b"\n")
                 self.wfile.flush()
-            final = {
-                "model": self.model_name,
-                "created_at": created,
-                "message": {"role": "assistant", "content": ""},
-                "done": True,
-                "total_duration": total_duration,
-                "load_duration": 0,
-                "worker_total_ms": result.get("total_ms"),
-            }
-            self.wfile.write(_json_bytes(final) + b"\n")
             return
+        result = self.worker.generate(prompt, _ollama_options(body))
+        response = str(result.get("response", ""))
+        total_duration = _ns_since(start)
         self._send_json(
             {
                 "model": self.model_name,

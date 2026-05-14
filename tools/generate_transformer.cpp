@@ -45,7 +45,7 @@ void usage() {
         << "  --paged-kv               use paged KV cache for single-prompt generation\n"
         << "  --kv-page-size N         paged KV page size (default: 256)\n"
         << "  --repl                   keep model loaded and read one prompt per stdin line\n"
-        << "  --jsonl-repl             persistent machine REPL: read JSON/plain lines, emit one JSON line\n"
+        << "  --jsonl-repl             persistent machine REPL: read JSON/plain lines, supports stream=true deltas\n"
         << "  --completion-only        print only newly generated text, not prompt+completion\n"
         << "  --cpu-sampling           download logits and sample on CPU instead of GPU sampler\n"
         << "  --profile                print top OpenCL kernel timings for generation\n"
@@ -210,20 +210,72 @@ std::string id_from_json_or_empty(const std::string& line) {
     return value;
 }
 
+bool stream_from_json_or_false(const std::string& line) {
+    if (!looks_like_json_object(line)) return false;
+    bool value = false;
+    return json_bool_field(line, "stream", value) && value;
+}
+
+void write_json_delta(const std::string& request_id, std::int32_t token_id, const std::string& delta) {
+    std::cout << "{\"ok\":true";
+    if (!request_id.empty()) std::cout << ",\"id\":\"" << json_escape(request_id) << "\"";
+    std::cout << ",\"token\":" << token_id
+              << ",\"delta\":\"" << json_escape(delta) << "\""
+              << ",\"done\":false}\n" << std::flush;
+}
+
+void write_json_final(const std::string& request_id,
+                      const std::string& response,
+                      double total_ms,
+                      bool include_done) {
+    std::cout << "{\"ok\":true";
+    if (!request_id.empty()) std::cout << ",\"id\":\"" << json_escape(request_id) << "\"";
+    std::cout << ",\"response\":\"" << json_escape(response) << "\"";
+    if (include_done) std::cout << ",\"done\":true";
+    std::cout << ",\"total_ms\":" << std::fixed << std::setprecision(3) << total_ms
+              << "}\n" << std::flush;
+}
+
+void write_json_error(const std::string& request_id, const std::string& error, bool include_done) {
+    std::cout << "{\"ok\":false";
+    if (!request_id.empty()) std::cout << ",\"id\":\"" << json_escape(request_id) << "\"";
+    std::cout << ",\"error\":\"" << json_escape(error) << "\"";
+    if (include_done) std::cout << ",\"done\":true";
+    std::cout << "}\n" << std::flush;
+}
+
 std::string generate_modern_output(motifcl::Backend& backend,
                                    motifcl::nn::ModernGPTModel& model,
                                    const motifcl::nn::HFTokenizer& tokenizer,
                                    const std::string& prompt,
                                    motifcl::nn::GenerateOptions options,
-                                   bool completion_only) {
+                                   bool completion_only,
+                                   const motifcl::nn::TextTokenCallback& token_callback = {}) {
     if (!completion_only) {
-        return motifcl::nn::generate_hf_text(backend, model, tokenizer, prompt, options);
+        return motifcl::nn::generate_hf_text(backend, model, tokenizer, prompt, options, token_callback);
     }
     auto prompt_ids = tokenizer.encode(prompt, options.add_bos, false);
     auto local_options = options;
     local_options.add_bos = false;
     if (local_options.eos_token_id < 0) local_options.eos_token_id = tokenizer.eos_token_id();
-    auto all_ids = motifcl::nn::generate(backend, model, prompt_ids, local_options);
+    std::vector<std::int32_t> generated_ids;
+    std::string emitted_text;
+    motifcl::nn::TokenCallback id_callback;
+    if (token_callback) {
+        id_callback = [&](std::int32_t token_id) {
+            generated_ids.push_back(token_id);
+            const auto current = tokenizer.decode(generated_ids, true);
+            std::string delta;
+            if (current.rfind(emitted_text, 0) == 0) {
+                delta = current.substr(emitted_text.size());
+            } else {
+                delta = tokenizer.decode({token_id}, true);
+            }
+            emitted_text = current;
+            token_callback(token_id, delta);
+        };
+    }
+    auto all_ids = motifcl::nn::generate(backend, model, prompt_ids, local_options, id_callback);
     const auto begin = std::min(prompt_ids.size(), all_ids.size());
     std::vector<std::int32_t> generated(all_ids.begin() + static_cast<std::ptrdiff_t>(begin), all_ids.end());
     return tokenizer.decode(generated, true);
@@ -476,6 +528,7 @@ int main(int argc, char** argv) {
                 auto request_options = looks_like_json_object(line)
                     ? options_from_json_line(line, options)
                     : options;
+                const bool stream_response = jsonl_repl && stream_from_json_or_false(line);
                 try {
                     if (profile) {
                         backend.profiler.clear();
@@ -483,28 +536,27 @@ int main(int argc, char** argv) {
                     }
                     const auto start = std::chrono::steady_clock::now();
                     const auto rendered = render_prompt(runtime_prompt, true);
+                    motifcl::nn::TextTokenCallback token_callback;
+                    if (stream_response) {
+                        token_callback = [&](std::int32_t token_id, const std::string& delta) {
+                            write_json_delta(request_id, token_id, delta);
+                        };
+                    }
                     auto text = motifcl::nn::generate_hf_hybrid_text(backend, hybrid_model, tokenizer,
-                                                                      rendered, request_options);
+                                                                      rendered, request_options, token_callback);
                     if (completion_only) text = completion_by_prefix_strip(rendered, text);
                     backend.finish();
                     const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now() - start).count();
                     if (jsonl_repl) {
-                        std::cout << "{\"ok\":true";
-                        if (!request_id.empty()) std::cout << ",\"id\":\"" << json_escape(request_id) << "\"";
-                        std::cout << ",\"response\":\"" << json_escape(text) << "\""
-                                  << ",\"total_ms\":" << std::fixed << std::setprecision(3)
-                                  << (static_cast<double>(elapsed_us) / 1000.0)
-                                  << "}\n" << std::flush;
+                        write_json_final(request_id, text, static_cast<double>(elapsed_us) / 1000.0, stream_response);
                     } else {
                         std::cout << text << "\n" << std::flush;
                     }
                     if (profile) print_profile_summary();
                 } catch (const std::exception& e) {
                     if (jsonl_repl) {
-                        std::cout << "{\"ok\":false";
-                        if (!request_id.empty()) std::cout << ",\"id\":\"" << json_escape(request_id) << "\"";
-                        std::cout << ",\"error\":\"" << json_escape(e.what()) << "\"}\n" << std::flush;
+                        write_json_error(request_id, e.what(), stream_response);
                     } else {
                         std::cerr << "generation failed: " << e.what() << "\n";
                     }
@@ -577,34 +629,34 @@ int main(int argc, char** argv) {
             auto request_options = looks_like_json_object(line)
                 ? options_from_json_line(line, options)
                 : options;
+            const bool stream_response = jsonl_repl && stream_from_json_or_false(line);
             try {
                 if (profile) {
                     backend.profiler.clear();
                     backend.profiler.set_enabled(true);
                 }
                 const auto start = std::chrono::steady_clock::now();
+                motifcl::nn::TextTokenCallback token_callback;
+                if (stream_response) {
+                    token_callback = [&](std::int32_t token_id, const std::string& delta) {
+                        write_json_delta(request_id, token_id, delta);
+                    };
+                }
                 const auto text = generate_modern_output(backend, model, tokenizer,
                                                          render_prompt(runtime_prompt, true),
-                                                         request_options, completion_only);
+                                                         request_options, completion_only, token_callback);
                 backend.finish();
                 const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - start).count();
                 if (jsonl_repl) {
-                    std::cout << "{\"ok\":true";
-                    if (!request_id.empty()) std::cout << ",\"id\":\"" << json_escape(request_id) << "\"";
-                    std::cout << ",\"response\":\"" << json_escape(text) << "\""
-                              << ",\"total_ms\":" << std::fixed << std::setprecision(3)
-                              << (static_cast<double>(elapsed_us) / 1000.0)
-                              << "}\n" << std::flush;
+                    write_json_final(request_id, text, static_cast<double>(elapsed_us) / 1000.0, stream_response);
                 } else {
                     std::cout << text << "\n" << std::flush;
                 }
                 if (profile) print_profile_summary();
             } catch (const std::exception& e) {
                 if (jsonl_repl) {
-                    std::cout << "{\"ok\":false";
-                    if (!request_id.empty()) std::cout << ",\"id\":\"" << json_escape(request_id) << "\"";
-                    std::cout << ",\"error\":\"" << json_escape(e.what()) << "\"}\n" << std::flush;
+                    write_json_error(request_id, e.what(), stream_response);
                 } else {
                     std::cerr << "generation failed: " << e.what() << "\n";
                 }

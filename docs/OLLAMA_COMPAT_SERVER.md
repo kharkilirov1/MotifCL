@@ -60,7 +60,7 @@ curl http://127.0.0.1:11435/api/generate \
   -d '{"model":"motifcl-local:latest","prompt":"Hello","stream":false,"options":{"num_predict":32}}'
 ```
 
-Streaming-shaped completion:
+True token-streaming completion:
 
 ```bash
 curl http://127.0.0.1:11435/api/generate \
@@ -94,13 +94,14 @@ The server accepts Ollama-style options either at top level or inside `options`:
 - `ignore_eos`
 
 Internally each request is sent as one JSONL line to the persistent worker, so model weights and OpenCL runtime
-state remain hot across requests. Responses include `worker_total_ms` from the MotifCL worker and HTTP-side
-`total_duration` in nanoseconds.
+state remain hot across requests. For `stream:true`, the runner emits one JSONL delta from the generation loop
+after every sampled token, and the HTTP server forwards it immediately as Ollama-style NDJSON. Responses include
+`worker_total_ms` from the MotifCL worker and HTTP-side `total_duration` in nanoseconds.
 
 ## Current limits
 
-- Streaming is API-compatible NDJSON chunking after the backend finishes the request. It is not true token-latency
-  streaming yet; that requires a token callback inside the generation loop.
+- Streaming now uses a token callback inside the generation loop and forwards per-token NDJSON deltas. The Python
+  server still owns one serialized worker, so it is a hot single-runner path rather than a multi-model daemon.
 - `/api/chat` uses a simple role-prefixed prompt bridge. Exact per-model chat templates still belong in the
   runner arguments or a future template-aware server layer.
 - The server owns one worker process and serializes requests through it. This matches current MotifCL single-GPU
@@ -116,9 +117,16 @@ printf '{"id":"smoke","prompt":"Hello","num_predict":8,"temperature":0}\n' | \
   ./build/tools/motifcl_generate_transformer --model ./model.gguf --jsonl-repl --completion-only
 ```
 
-Each input line may be plain text or JSON with `prompt`/`input`, optional `id`, and the generation options above.
-The JSONL response is one line:
+Each input line may be plain text or JSON with `prompt`/`input`, optional `id`, `stream:true`, and the generation
+options above. Without streaming, the JSONL response is one line:
 
 ```json
 {"ok":true,"id":"smoke","response":"...","total_ms":12.345}
+```
+
+With `stream:true`, the worker emits token deltas before the final line:
+
+```json
+{"ok":true,"id":"smoke","token":42,"delta":" hello","done":false}
+{"ok":true,"id":"smoke","response":" hello","done":true,"total_ms":12.345}
 ```

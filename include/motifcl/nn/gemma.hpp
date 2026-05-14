@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -177,6 +178,9 @@ struct GenerateOptions {
     std::uint32_t seed = 1234;
 };
 
+using TokenCallback = std::function<void(std::int32_t token_id)>;
+using TextTokenCallback = std::function<void(std::int32_t token_id, const std::string& text_delta)>;
+
 bool should_use_streaming_prefill(const ModernGPTModel& model,
                                   std::size_t prompt_token_count,
                                   const GenerateOptions& options = {});
@@ -184,13 +188,15 @@ bool should_use_streaming_prefill(const ModernGPTModel& model,
 std::vector<std::int32_t> generate(Backend& backend,
                                    ModernGPTModel& model,
                                    const std::vector<std::int32_t>& prompt_tokens,
-                                   const GenerateOptions& options = {});
+                                   const GenerateOptions& options = {},
+                                   const TokenCallback& token_callback = {});
 
 std::string generate_text(Backend& backend,
                           ModernGPTModel& model,
                           const GemmaTokenizer& tokenizer,
                           const std::string& prompt,
-                          const GenerateOptions& options = {});
+                          const GenerateOptions& options = {},
+                          const TextTokenCallback& token_callback = {});
 
 std::vector<std::vector<std::int32_t>> generate_batch(
     Backend& backend,

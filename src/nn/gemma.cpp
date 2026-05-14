@@ -1792,10 +1792,27 @@ Tensor prefill_prompt_logits(Backend& backend,
     return logits;
 }
 
+static std::string decoded_delta_from_generated(const GemmaTokenizer& tokenizer,
+                                                std::vector<std::int32_t>& generated_tokens,
+                                                std::string& emitted_text,
+                                                std::int32_t token_id) {
+    generated_tokens.push_back(token_id);
+    const auto current = tokenizer.decode(generated_tokens, true);
+    std::string delta;
+    if (current.rfind(emitted_text, 0) == 0) {
+        delta = current.substr(emitted_text.size());
+    } else {
+        delta = tokenizer.decode({token_id}, true);
+    }
+    emitted_text = current;
+    return delta;
+}
+
 std::vector<std::int32_t> generate(Backend& backend,
                                    ModernGPTModel& model,
                                    const std::vector<std::int32_t>& prompt_tokens,
-                                   const GenerateOptions& options) {
+                                   const GenerateOptions& options,
+                                   const TokenCallback& token_callback) {
     MCL_CHECK(options.max_new_tokens >= 0, "GenerateOptions max_new_tokens must be non-negative");
     autograd::NoGradGuard no_grad;
     std::vector<std::int32_t> tokens;
@@ -1828,6 +1845,7 @@ std::vector<std::int32_t> generate(Backend& backend,
                 next = choose_next_token(logits, options, rng, cpu_logits);
             }
             tokens.push_back(next);
+            if (token_callback) token_callback(next);
             if (options.eos_token_id >= 0 && next == options.eos_token_id) break;
             if (step + 1 >= options.max_new_tokens) break;
             auto input = options.gpu_greedy_sampling
@@ -1854,6 +1872,7 @@ std::vector<std::int32_t> generate(Backend& backend,
                 next = choose_next_token(logits, options, rng, cpu_logits);
             }
             tokens.push_back(next);
+            if (token_callback) token_callback(next);
             if (options.eos_token_id >= 0 && next == options.eos_token_id) break;
             if (step + 1 >= options.max_new_tokens) break;
             auto input = options.gpu_greedy_sampling
@@ -1869,12 +1888,22 @@ std::string generate_text(Backend& backend,
                           ModernGPTModel& model,
                           const GemmaTokenizer& tokenizer,
                           const std::string& prompt,
-                          const GenerateOptions& options) {
+                          const GenerateOptions& options,
+                          const TextTokenCallback& token_callback) {
     auto prompt_ids = tokenizer.encode(prompt, options.add_bos, false);
     auto local_options = options;
     local_options.add_bos = false;
     if (local_options.eos_token_id < 0) local_options.eos_token_id = tokenizer.eos_token_id();
-    return tokenizer.decode(generate(backend, model, prompt_ids, local_options), true);
+    std::vector<std::int32_t> generated_tokens;
+    std::string emitted_text;
+    TokenCallback id_callback;
+    if (token_callback) {
+        id_callback = [&](std::int32_t token_id) {
+            const auto delta = decoded_delta_from_generated(tokenizer, generated_tokens, emitted_text, token_id);
+            token_callback(token_id, delta);
+        };
+    }
+    return tokenizer.decode(generate(backend, model, prompt_ids, local_options, id_callback), true);
 }
 
 std::vector<std::vector<std::int32_t>> generate_batch(

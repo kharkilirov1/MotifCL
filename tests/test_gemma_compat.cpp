@@ -247,6 +247,18 @@ int main() {
         options.gpu_greedy_sampling = true;
         auto generated = motifcl::nn::generate(backend, gen_model, {1, 2}, options);
         require(generated.size() == 4, "Gemma generate length mismatch");
+        std::vector<std::int32_t> callback_tokens;
+        auto generated_with_callback = motifcl::nn::generate(
+            backend,
+            gen_model,
+            {1, 2},
+            options,
+            [&](std::int32_t token_id) { callback_tokens.push_back(token_id); });
+        require(generated_with_callback.size() == 4 && callback_tokens.size() == 2,
+                "Gemma generate token callback count mismatch");
+        require(callback_tokens[0] == generated_with_callback[2] &&
+                    callback_tokens[1] == generated_with_callback[3],
+                "Gemma generate token callback ids mismatch");
         auto batch_generated = motifcl::nn::generate_batch(backend, gen_model, {{1, 2}, {2, 3}}, options);
         require(batch_generated.size() == 2 && batch_generated[0].size() == 4 && batch_generated[1].size() == 4,
                 "Gemma batch generate length mismatch");
