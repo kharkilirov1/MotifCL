@@ -394,6 +394,26 @@ void Tensor::_set_quant_scales(const Tensor& scales, int axis, int64_t block_siz
               "quant scale axis must be 0, 1, 2, 3, or 4");
     MCL_CHECK(axis != 2 || block_size > 0, "blockwise quantization requires positive block size");
     MCL_CHECK(axis != 3 || block_size > 0, "column-block quantization requires positive block size");
+
+    const int64_t scale_count = scales.numel();
+    MCL_CHECK(scale_count > 0, "quant scale tensor must be non-empty");
+    if (axis == 0) {
+        MCL_CHECK(ndim() >= 1, "row-scale quantization expects rank >= 1 tensor");
+        MCL_CHECK(scale_count >= shape()[0], "row-scale quantization scale tensor is too small");
+    } else if (axis == 1) {
+        MCL_CHECK(ndim() >= 2, "column-scale quantization expects rank >= 2 tensor");
+        MCL_CHECK(scale_count >= shape()[1], "column-scale quantization scale tensor is too small");
+    } else if (axis == 2) {
+        const int64_t blocks = (numel() + block_size - 1) / block_size;
+        MCL_CHECK(scale_count >= blocks, "blockwise quantization scale tensor is too small");
+    } else if (axis == 3 || axis == 4) {
+        MCL_CHECK(ndim() >= 2, "column-block quantization expects rank >= 2 tensor");
+        const int64_t rows = shape()[0];
+        const int64_t cols = shape()[1];
+        const int64_t blocks_per_col = axis == 4 ? (rows / block_size) : ((rows + block_size - 1) / block_size);
+        MCL_CHECK(scale_count >= cols * blocks_per_col, "column-block quantization scale tensor is too small");
+    }
+
     impl_->quant_scales = std::make_shared<Tensor>(scales);
     impl_->quant_scale_axis = axis;
     impl_->quant_block_size = block_size;
