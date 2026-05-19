@@ -41,10 +41,10 @@ def main() -> int:
 
     baseline = Path(args.baseline).expanduser().resolve()
     candidate = Path(args.candidate).expanduser().resolve()
-    if not baseline.exists():
-        raise SystemExit(f"baseline artifact not found: {baseline}")
-    if not candidate.exists():
-        raise SystemExit(f"candidate artifact not found: {candidate}")
+    if not baseline.is_file():
+        raise SystemExit(f"baseline artifact file not found: {baseline}")
+    if not candidate.is_file():
+        raise SystemExit(f"candidate artifact file not found: {candidate}")
 
     cmd = [
         sys.executable,

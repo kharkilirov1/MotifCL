@@ -1281,6 +1281,9 @@ Tensor paged_grouped_query_attention(const Tensor& q, const Tensor& k_pages, con
     MCL_CHECK(page_table.shape()[0] == batch_size && page_table.shape()[1] == page_count,
               "paged_grouped_query_attention page table shape mismatch");
     MCL_CHECK(query_abs_start >= 0 && key_abs_start >= 0, "paged_grouped_query_attention absolute starts must be non-negative");
+    // Absolute starts are monotonically increasing timeline positions for the paged ring buffer;
+    // they may exceed the physical page capacity. The enforceable safety bound is the visible
+    // span length, because kernels map timeline positions through the page table modulo page_count.
     MCL_CHECK(query_len <= max_paged_tokens,
               "paged_grouped_query_attention query range exceeds paged cache capacity");
     MCL_CHECK(key_len <= max_paged_tokens,
