@@ -28,9 +28,8 @@ std::string get_device_string_noexcept(cl_device_id device, cl_device_info name)
 
 template <typename Fn>
 Fn load_extension_fn(cl_platform_id platform, const char* name) {
-    void* ptr = nullptr;
-    if (platform) ptr = clGetExtensionFunctionAddressForPlatform(platform, name);
-    if (!ptr) ptr = clGetExtensionFunctionAddress(name);
+    if (!platform) return nullptr;
+    void* ptr = clGetExtensionFunctionAddressForPlatform(platform, name);
     return reinterpret_cast<Fn>(ptr);
 }
 
