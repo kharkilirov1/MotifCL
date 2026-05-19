@@ -693,9 +693,9 @@ int main() {
         write_metadata_u32(out, "tokenizer.ggml.bos_token_id", 0);
         write_metadata_u32(out, "tokenizer.ggml.eos_token_id", 1);
         write_metadata_string(out, "tokenizer.ggml.model", "llama");
-        std::vector<std::string> tokens;
-        for (std::uint64_t i = 0; i < vocab; ++i) tokens.push_back("T" + std::to_string(i));
-        write_metadata_string_array(out, "tokenizer.ggml.tokens", tokens);
+        std::vector<std::string> token_strings;
+        for (std::uint64_t i = 0; i < vocab; ++i) token_strings.push_back("T" + std::to_string(i));
+        write_metadata_string_array(out, "tokenizer.ggml.tokens", token_strings);
         for (const auto& tensor : tensors) write_tensor_info(out, tensor);
         pad_to_alignment(out, 32);
         for (const auto& tensor : tensors) write_tensor_payload(out, tensor);

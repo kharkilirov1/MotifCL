@@ -20,7 +20,11 @@ include(GNUInstallDirs)
 
 find_package(OpenCL QUIET)
 if(NOT OpenCL_FOUND)
-    if(WIN32 AND NOT MOTIFCL_OPENCL_LIBRARY)
+    if(WIN32 AND MSVC)
+        find_library(MOTIFCL_OPENCL_LIBRARY
+            NAMES OpenCL OpenCL.lib
+        )
+    elseif(WIN32 AND NOT MOTIFCL_OPENCL_LIBRARY)
         foreach(_motifcl_opencl_candidate
                 "$ENV{SystemRoot}/System32/OpenCL.dll"
                 "$ENV{WINDIR}/System32/OpenCL.dll"
@@ -30,15 +34,16 @@ if(NOT OpenCL_FOUND)
                 break()
             endif()
         endforeach()
+    else()
+        find_library(MOTIFCL_OPENCL_LIBRARY
+            NAMES OpenCL libOpenCL.so.1 OpenCL.dll
+            HINTS
+                /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
+                "$ENV{SystemRoot}/System32"
+                "$ENV{WINDIR}/System32"
+                "C:/Windows/System32"
+        )
     endif()
-    find_library(MOTIFCL_OPENCL_LIBRARY
-        NAMES OpenCL libOpenCL.so.1 OpenCL.dll
-        HINTS
-            /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
-            "$ENV{SystemRoot}/System32"
-            "$ENV{WINDIR}/System32"
-            "C:/Windows/System32"
-    )
     if(NOT MOTIFCL_OPENCL_LIBRARY)
         message(FATAL_ERROR "OpenCL library not found. Install an OpenCL ICD loader, e.g. ocl-icd-opencl-dev, or set MOTIFCL_OPENCL_LIBRARY.")
     endif()

@@ -418,7 +418,6 @@ int main() {
             require_close_vec(fused, ref, 3e-4f);
 
             {
-                motifcl::autograd::NoGradGuard no_grad;
                 std::int32_t token_values[2] = {3, 4};
                 auto token_a = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, token_values);
                 auto token_b = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, token_values + 1);
