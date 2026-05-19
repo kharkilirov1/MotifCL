@@ -6,6 +6,7 @@
 namespace motifcl {
 
 class Backend;
+class OpenCLContext;
 
 class Storage {
 public:
@@ -24,6 +25,7 @@ public:
 };
 
 void clear_memory_pool();
+void clear_memory_pool_for_context(const OpenCLContext& ctx);
 std::size_t memory_pool_cached_blocks();
 std::size_t memory_pool_cached_bytes();
 

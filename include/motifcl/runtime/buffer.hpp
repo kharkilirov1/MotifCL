@@ -33,6 +33,7 @@ public:
     std::size_t nbytes() const { return nbytes_; }
     bool valid() const { return mem_ != nullptr; }
     bool same_context(const OpenCLContext& ctx) const;
+    bool owner_alive() const;
     void set_profiler(Profiler* profiler, std::shared_ptr<BackendLifetime> profiler_lifetime = {});
     OpenCLContext& context() const { return *ctx_; }
 

@@ -39,6 +39,7 @@ Buffer acquire_buffer(Backend& backend, std::size_t bytes, bool& pooled) {
     auto best = g_pool.end();
     for (auto it = g_pool.begin(); it != g_pool.end(); ++it) {
         if (it->buffer.valid() &&
+            it->buffer.owner_alive() &&
             it->buffer.same_context(backend.ctx) &&
             it->buffer.nbytes() >= bytes &&
             (best == g_pool.end() || it->buffer.nbytes() < best->buffer.nbytes())) {
@@ -55,7 +56,7 @@ Buffer acquire_buffer(Backend& backend, std::size_t bytes, bool& pooled) {
 }
 
 void release_buffer(Buffer&& buffer) {
-    if (!buffer.valid() || !memory_pool_enabled()) return;
+    if (!buffer.valid() || !memory_pool_enabled() || !buffer.owner_alive()) return;
     std::lock_guard<std::mutex> lock(g_pool_mutex);
     if (g_pool.size() >= max_cached_blocks()) return;
     g_pool.push_back(PooledBlock{std::move(buffer)});
@@ -72,6 +73,13 @@ Storage::~Storage() {
 void clear_memory_pool() {
     std::lock_guard<std::mutex> lock(g_pool_mutex);
     g_pool.clear();
+}
+
+void clear_memory_pool_for_context(const OpenCLContext& ctx) {
+    std::lock_guard<std::mutex> lock(g_pool_mutex);
+    g_pool.erase(std::remove_if(g_pool.begin(), g_pool.end(), [&](const PooledBlock& block) {
+        return block.buffer.valid() && block.buffer.same_context(ctx);
+    }), g_pool.end());
 }
 
 std::size_t memory_pool_cached_blocks() {

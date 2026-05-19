@@ -2,6 +2,7 @@
 
 #include <motifcl/core/error.hpp>
 #include <motifcl/runtime/command_buffer.hpp>
+#include <motifcl/tensor/storage.hpp>
 
 #include <cstdlib>
 #include <filesystem>
@@ -234,20 +235,24 @@ Backend::Backend(OpenCLContext&& context, std::string kernel_dir)
     : ctx(std::move(context)), kernels(ctx, kernel_dir.empty() ? default_kernel_dir() : std::move(kernel_dir), &profiler) {}
 
 Backend::~Backend() {
+    if (ctx.valid()) clear_memory_pool_for_context(ctx);
     if (lifetime_) lifetime_->alive = false;
 }
 
 Backend::Backend(Backend&& other) noexcept
     : ctx(std::move(other.ctx)), kernels(ctx, other.kernels.kernel_dir(), &profiler), lifetime_(std::make_shared<BackendLifetime>()) {
     if (other.lifetime_) other.lifetime_->alive = false;
+    if (ctx.valid()) clear_memory_pool_for_context(ctx);
 }
 
 Backend& Backend::operator=(Backend&& other) noexcept {
     if (this != &other) {
+        if (ctx.valid()) clear_memory_pool_for_context(ctx);
         if (lifetime_) lifetime_->alive = false;
         ctx = std::move(other.ctx);
         kernels = KernelCache(ctx, other.kernels.kernel_dir(), &profiler);
         if (other.lifetime_) other.lifetime_->alive = false;
+        if (ctx.valid()) clear_memory_pool_for_context(ctx);
         lifetime_ = std::make_shared<BackendLifetime>();
     }
     return *this;

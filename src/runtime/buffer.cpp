@@ -97,4 +97,8 @@ bool Buffer::same_context(const OpenCLContext& ctx) const {
     return state_ && state_ == ctx.shared_state();
 }
 
+bool Buffer::owner_alive() const {
+    return profiler_lifetime_ && profiler_lifetime_->alive;
+}
+
 } // namespace motifcl
