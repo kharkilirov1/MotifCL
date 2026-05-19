@@ -30,10 +30,20 @@ void require_close_vec(const std::vector<float>& a, const std::vector<float>& b,
     }
 }
 
+template <typename Fn>
+void require_motifcl_error(Fn&& fn) {
+    try {
+        fn();
+    } catch (const motifcl::Error&) {
+        return;
+    }
+    std::exit(1);
+}
+
 motifcl::Tensor make_q4_0_tile8_weight(motifcl::Backend& backend,
-                                       int rows,
-                                       int cols,
-                                       const std::vector<float>& values) {
+                                        int rows,
+                                        int cols,
+                                        const std::vector<float>& values) {
     constexpr int block = 32;
     constexpr int tile_cols = 8;
     if (rows % block != 0 || cols % tile_cols != 0 ||
@@ -88,6 +98,17 @@ motifcl::Tensor make_q4_0_tile8_weight(motifcl::Backend& backend,
 int main() {
     try {
         auto backend = motifcl::Backend::create_opencl();
+
+        {
+            require_motifcl_error([&]() {
+                motifcl::nn::KVCache bad_cache(backend, 1, 2, 1, 3, motifcl::DType::Q4_0);
+                (void)bad_cache;
+            });
+            require_motifcl_error([&]() {
+                motifcl::nn::PagedKVCache bad_paged(backend, 1, 8, 0, 1, 4, motifcl::DType::F32);
+                (void)bad_paged;
+            });
+        }
 
         {
             std::vector<float> packed_host = {
@@ -166,6 +187,21 @@ int main() {
                 if (!std::isfinite(value)) return 1;
             }
             set_test_env("MOTIFCL_FORCE_GQA_DECODE_SCORES", "");
+        }
+
+        {
+            std::vector<float> q_host = {1.0f, 0.0f, 0.0f};
+            std::vector<std::uint8_t> packed(2, 0);
+            std::vector<float> row_scales = {1.0f};
+            auto q = motifcl::Tensor::from_cpu(backend, {1, 3}, motifcl::DType::F32, q_host.data());
+            auto k = motifcl::Tensor::from_cpu(backend, {1, 3}, motifcl::DType::Q4_0, packed.data());
+            auto v = motifcl::Tensor::from_cpu(backend, {1, 3}, motifcl::DType::Q4_0, packed.data());
+            auto scales = motifcl::Tensor::from_cpu(backend, {1}, motifcl::DType::F32, row_scales.data());
+            k._set_quant_scales(scales, 0, 0);
+            v._set_quant_scales(scales, 0, 0);
+            require_motifcl_error([&]() {
+                (void)motifcl::grouped_query_attention(q, k, v, 1, 1, true, 1, 1, 1, 0);
+            });
         }
 
         {
@@ -477,6 +513,9 @@ int main() {
 
         {
             motifcl::nn::ModernGPTModel model(backend, cfg);
+            require_motifcl_error([&]() {
+                (void)model.create_paged_kv_cache(backend, 2, 0);
+            });
             auto paged = model.create_paged_kv_cache(backend, 2, 3);
             if (paged.size() != 1 || paged[0].page_size != 3 || paged[0].page_count != 3) return 1;
             if (paged[0].k_pages.shape() != motifcl::Shape({18, 16})) return 1;
@@ -494,6 +533,26 @@ int main() {
                 paged_q4[0].k_scales.shape() != motifcl::Shape({18})) return 1;
             auto table = paged[0].page_table.to_vector<std::int32_t>();
             if (table != std::vector<std::int32_t>({0, 1, 2, 3, 4, 5})) return 1;
+            std::vector<float> paged_q_host(static_cast<std::size_t>(2 * cfg.n_embd), 0.0f);
+            auto paged_q = motifcl::Tensor::from_cpu(backend, {2, cfg.n_embd}, motifcl::DType::F32, paged_q_host.data());
+            require_motifcl_error([&]() {
+                (void)motifcl::paged_grouped_query_attention(paged_q,
+                                                             paged[0].k_pages,
+                                                             paged[0].v_pages,
+                                                             paged[0].page_table,
+                                                             cfg.n_head,
+                                                             cfg.n_kv_head,
+                                                             0,
+                                                             true,
+                                                             2,
+                                                             1,
+                                                             paged[0].capacity() + 1,
+                                                             0,
+                                                             0,
+                                                             paged[0].page_size,
+                                                             paged[0].page_count,
+                                                             0.0f);
+            });
             paged[0].length = 5;
             paged[0].reset();
             if (paged[0].length != 0 || paged[0].capacity() != 9) return 1;
@@ -688,6 +747,11 @@ int main() {
             auto cache_mask = motifcl::Tensor::from_cpu(backend, {1, 1, cfg.block_size}, motifcl::DType::I32, cache_mask_host.data());
             auto masked_step_logits = model.forward_with_cache_masked(step1, cache_mask, masked_caches);
             if (masked_step_logits.shape() != motifcl::Shape({1, 1, cfg.vocab_size}) || masked_caches[0].length != 1) return 1;
+            auto masked_q8_caches = model.create_kv_cache(backend, 1, motifcl::DType::Q8_0);
+            require_motifcl_error([&]() {
+                (void)model.forward_with_cache_masked(step1, cache_mask, masked_q8_caches);
+            });
+            if (masked_q8_caches[0].length != 0) return 1;
         }
     } catch (const std::exception& e) {
         return motifcl_test::handle_exception(e);

@@ -233,6 +233,11 @@ void validate_quant_tensor_args(const Tensor& x, const char* op, const char* nam
     MCL_CHECK(x.dtype() == DType::Q8_0 || x.dtype() == DType::Q4_0,
               std::string(op) + " " + name + " quantized cache must be q8_0 or q4_0");
     MCL_CHECK(x.ndim() == 2, std::string(op) + " " + name + " quantized cache expects rank-2 tensor");
+    if (x.dtype() == DType::Q4_0) {
+        MCL_CHECK((x.shape()[1] % 2) == 0,
+                  std::string(op) + " " + name +
+                      " Q4_0 cache requires even kv_channels because cache_k/cache_v kernels pack pairs with packed_cols = kv_channels >> 1");
+    }
     MCL_CHECK(x.has_quant_scales(), std::string(op) + " " + name + " quantized cache requires row scale tensor");
     MCL_CHECK(x.quant_scale_axis() == 0, std::string(op) + " " + name + " quantized cache requires row-wise scales");
     MCL_CHECK(x.quant_scales().valid(), std::string(op) + " " + name + " quant scales are invalid");
@@ -1269,6 +1274,13 @@ Tensor paged_grouped_query_attention(const Tensor& q, const Tensor& k_pages, con
     MCL_CHECK(page_table.shape()[0] == batch_size && page_table.shape()[1] == page_count,
               "paged_grouped_query_attention page table shape mismatch");
     MCL_CHECK(query_abs_start >= 0 && key_abs_start >= 0, "paged_grouped_query_attention absolute starts must be non-negative");
+    MCL_CHECK(query_len <= max_paged_tokens,
+              "paged_grouped_query_attention query range exceeds paged cache capacity");
+    MCL_CHECK(key_len <= max_paged_tokens,
+              "paged_grouped_query_attention key range exceeds paged cache capacity");
+    MCL_CHECK(query_abs_start <= std::numeric_limits<int64_t>::max() - query_len &&
+                  key_abs_start <= std::numeric_limits<int64_t>::max() - key_len,
+              "paged_grouped_query_attention absolute range overflow");
     validate_kernel_int64(batch_size, "paged_grouped_query_attention", "batch_size");
     validate_kernel_int64(query_len, "paged_grouped_query_attention", "query_len");
     validate_kernel_int64(key_len, "paged_grouped_query_attention", "key_len");
@@ -1886,6 +1898,8 @@ MultiHeadAttentionGradients grouped_query_attention_backward_fused(const Tensor&
     require_attention_microkernel();
     auto s = validate_attention_args(q, k, v, n_head, n_kv_head, batch_size, query_len, key_len, "grouped_query_attention_backward");
     MCL_CHECK(grad_out.dtype() == DType::F32 && grad_out.shape() == q.shape(), "grouped_query_attention_backward grad_out mismatch");
+    MCL_CHECK(k.dtype() == DType::F32 && v.dtype() == DType::F32,
+              "grouped_query_attention_backward supports f32 k/v only; quantized KV backward is not implemented");
     if (supports_staged_grouped_attention_backward_kernel(q.backend(), s)) {
         return grouped_query_attention_backward_staged(q, k, v, grad_out, n_head, n_kv_head,
                                                        causal, query_offset, s);
@@ -1926,6 +1940,8 @@ MultiHeadAttentionGradients grouped_query_attention_backward_masked_fused(const 
     require_attention_microkernel();
     auto s = validate_attention_args(q, k, v, n_head, n_kv_head, batch_size, query_len, key_len, "grouped_query_attention_backward_masked");
     MCL_CHECK(grad_out.dtype() == DType::F32 && grad_out.shape() == q.shape(), "grouped_query_attention_backward_masked grad_out mismatch");
+    MCL_CHECK(k.dtype() == DType::F32 && v.dtype() == DType::F32,
+              "grouped_query_attention_backward_masked supports f32 k/v only; quantized KV backward is not implemented");
     MCL_CHECK(mask.backend_ptr() == q.backend_ptr(), "grouped_query_attention_backward_masked mask must share backend");
     auto mask_info = validate_attention_mask(mask, s.batch, s.query_tokens, s.key_tokens, additive_mask, "grouped_query_attention_backward_masked");
     if (supports_staged_grouped_attention_backward_kernel(q.backend(), s)) {

@@ -12,16 +12,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTRACTS = ROOT / "docs" / "kernel_validation_contracts.json"
-KERNEL_RE = re.compile(r"^\s*__kernel\s+void\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+KERNEL_RE = re.compile(r"^\s*__kernel\s+void\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.MULTILINE)
 
 
 def kernel_names() -> list[str]:
     names: set[str] = set()
     for path in sorted((ROOT / "kernels").glob("*.cl")):
-        for line in path.read_text(encoding="utf-8").splitlines():
-            match = KERNEL_RE.match(line)
-            if match:
-                names.add(match.group(1))
+        text = path.read_text(encoding="utf-8")
+        for match in KERNEL_RE.finditer(text):
+            names.add(match.group(1))
     return sorted(names)
 
 

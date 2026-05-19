@@ -1111,9 +1111,7 @@ Tensor gated_delta_recurrent(const Tensor& q,
 
 KVCache::KVCache(Backend& backend, int64_t batch, int64_t max_seq, int n_kv, int head_dim_value,
                  DType dtype_value)
-    : k(Tensor::empty(backend, {batch * max_seq, n_kv * head_dim_value}, dtype_value)),
-      v(Tensor::empty(backend, {batch * max_seq, n_kv * head_dim_value}, dtype_value)),
-      batch_size(batch),
+    : batch_size(batch),
       max_seq_len(max_seq),
       n_kv_head(n_kv),
       head_dim(head_dim_value),
@@ -1126,6 +1124,8 @@ KVCache::KVCache(Backend& backend, int64_t batch, int64_t max_seq, int n_kv, int
     if (dtype_value == DType::Q4_0) {
         MCL_CHECK((channels % 2) == 0, "Q4_0 KVCache requires an even KV channel count");
     }
+    k = Tensor::empty(backend, {rows, channels}, dtype_value);
+    v = Tensor::empty(backend, {rows, channels}, dtype_value);
     if (dtype_value == DType::Q8_0 || dtype_value == DType::Q4_0) {
         k_scales = Tensor::empty(backend, {rows}, DType::F32);
         v_scales = Tensor::empty(backend, {rows}, DType::F32);
@@ -1139,7 +1139,6 @@ PagedKVCache::PagedKVCache(Backend& backend, int64_t batch, int64_t max_seq, int
     : batch_size(batch),
       max_seq_len(max_seq),
       page_size(page_size_value),
-      page_count((max_seq + page_size_value - 1) / page_size_value),
       n_kv_head(n_kv),
       head_dim(head_dim_value),
       dtype(dtype_value) {
@@ -1151,6 +1150,7 @@ PagedKVCache::PagedKVCache(Backend& backend, int64_t batch, int64_t max_seq, int
     if (dtype_value == DType::Q4_0) {
         MCL_CHECK((channels % 2) == 0, "Q4_0 PagedKVCache requires an even KV channel count");
     }
+    page_count = (max_seq + page_size_value - 1) / page_size_value;
     const int64_t rows = batch * page_count * page_size;
     k_pages = Tensor::empty(backend, {rows, channels}, dtype_value);
     v_pages = Tensor::empty(backend, {rows, channels}, dtype_value);
@@ -1950,6 +1950,8 @@ Tensor ModernSelfAttention::forward_with_cache_masked(const Tensor& x, const Ten
     MCL_CHECK(cache.k.valid() && cache.v.valid(), "ModernSelfAttention cache is not initialized");
     MCL_CHECK(batch_size == cache.batch_size && n_kv_head_ == cache.n_kv_head && head_dim_ == cache.head_dim, "ModernSelfAttention cache shape mismatch");
     MCL_CHECK(cache.length + seq_len <= cache.max_seq_len, "ModernSelfAttention KV cache capacity exceeded");
+    MCL_CHECK(cache.k.dtype() == DType::F32 && cache.v.dtype() == DType::F32,
+              "ModernSelfAttention masked KV cache path supports f32 cache only");
     QKV split = project_qkv(x);
     apply_v_norm_if_enabled(*this, split.v);
     const int64_t offset = cache.length;
@@ -1981,6 +1983,8 @@ Tensor ModernSelfAttention::forward_with_cache_positions_masked(const Tensor& x,
     MCL_CHECK(cache.k.valid() && cache.v.valid(), "ModernSelfAttention cache is not initialized");
     MCL_CHECK(batch_size == cache.batch_size && n_kv_head_ == cache.n_kv_head && head_dim_ == cache.head_dim, "ModernSelfAttention cache shape mismatch");
     MCL_CHECK(cache_length_after >= cache.length && cache_length_after <= cache.max_seq_len, "ModernSelfAttention positioned KV cache length out of range");
+    MCL_CHECK(cache.k.dtype() == DType::F32 && cache.v.dtype() == DType::F32,
+              "ModernSelfAttention masked positioned KV cache path supports f32 cache only");
     QKV split = project_qkv(x);
     apply_v_norm_if_enabled(*this, split.v);
     apply_qk_norm_if_enabled(*this, split.q, split.k);
@@ -3443,6 +3447,7 @@ std::vector<PagedKVCache> ModernGPTModel::create_paged_kv_cache(Backend& backend
                                                                 int64_t batch_size,
                                                                 int64_t page_size,
                                                                 DType dtype) const {
+    MCL_CHECK(page_size > 0, "ModernGPTModel::create_paged_kv_cache page_size must be positive");
     std::vector<PagedKVCache> caches;
     caches.reserve(static_cast<std::size_t>(config.n_layer));
     for (int i = 0; i < config.n_layer; ++i) {

@@ -1,10 +1,12 @@
 #include <motifcl/motifcl.hpp>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -24,7 +26,8 @@ void require_motifcl_error(Fn&& fn, const std::string& message) {
     } catch (const motifcl::Error&) {
         return;
     }
-    throw std::runtime_error(message);
+    std::cerr << message << '\n';
+    std::exit(1);
 }
 
 template <typename T>

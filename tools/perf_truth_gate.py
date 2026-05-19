@@ -49,8 +49,8 @@ def main() -> int:
     cmd = [
         sys.executable,
         "tools/perf_regression.py",
-        str(baseline),
         str(candidate),
+        str(baseline),
         "--tolerance",
         str(args.tolerance),
         "--min-metrics",
