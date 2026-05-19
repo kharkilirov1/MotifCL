@@ -678,6 +678,7 @@ File File::open(const std::string& path) {
         }
         info.raw_type = read_le<std::uint32_t>(in, info.name + " type");
         info.type = tensor_type_from_u32(info.raw_type);
+        MCL_CHECK(info.type != TensorType::Unknown, "unknown GGUF tensor type: " + info.name);
         info.offset = read_le<std::uint64_t>(in, info.name + " offset");
         if (tensor_type_block_nbytes(info.type) > 0) (void)tensor_nbytes(info);
         MCL_CHECK(file.tensor_index_.emplace(info.name, file.tensors_.size()).second,

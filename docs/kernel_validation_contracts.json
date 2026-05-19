@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "description": "CPU-side validation contract coverage for OpenCL kernel families. tools/check_kernel_contracts.py verifies every concrete __kernel entry is covered by at least one family pattern.",
+  "ignored_kernel_names": ["NAME", "KERNEL_NAME"],
+  "families": [
+    {
+      "name": "elementwise_and_broadcast",
+      "pattern": "^(add|sub|mul|div|exp|sqrt|rsqrt|copy|fill|scale|axpy|add_scalar|mul_scalar|add_tensor_scalar|mul_tensor_scalar|add_inplace|mul_rows|sum_rows|mean_reduce|cast_).*$",
+      "validated_by": ["src/ops/basic_ops.cpp", "src/ops/fp16.cpp", "src/ops/reduce.cpp"],
+      "contract": ["same backend", "dtype-specific dispatch", "output allocation matches logical shape", "broadcast/scalar sizes checked before kernel launch"]
+    },
+    {
+      "name": "matmul_and_quantized_matmul",
+      "pattern": "^matmul_.*$",
+      "validated_by": ["src/ops/matmul.cpp", "src/tensor/tensor.cpp"],
+      "contract": ["rank-2 inputs", "inner dimensions match", "dtype combination selects a known kernel", "packed quant block divisibility and byte sizes checked", "external quant scales validated by Tensor::_set_quant_scales before kernel launch"]
+    },
+    {
+      "name": "quantize_dequantize",
+      "pattern": "^(quantize|dequantize)_.*$",
+      "validated_by": ["src/ops/quant.cpp", "src/tensor/tensor.cpp", "src/gguf.cpp", "src/serialization.cpp"],
+      "contract": ["F32 source for quantization", "quant dtype target is explicit", "axis/block metadata valid", "scale tensors cover rows/cols/blocks", "serialized/GGUF payload byte lengths match dtype and shape"]
+    },
+    {
+      "name": "attention_and_kv_cache",
+      "pattern": "^(multihead_attention|grouped_query_attention|paged_grouped_query_attention|attention_backward|gqa_backward|kv_cache|paged_kv_cache|qk_norm|qkv_split|rope|causal_mask).*",
+      "validated_by": ["src/ops/attention.cpp", "src/nn/transformer.cpp"],
+      "contract": ["Q/K/V rank and head dimensions checked", "batch/query/key lengths checked", "cache/page-table shapes checked", "sliding-window and offsets bounded", "q8/q4 KV scale tensors are row-wise and cover cache rows"]
+    },
+    {
+      "name": "normalization",
+      "pattern": "^(rmsnorm|layernorm|rms_per_row).*",
+      "validated_by": ["src/ops/norm.cpp", "src/nn/rmsnorm.cpp"],
+      "contract": ["rank and row width checked", "weight/bias shape matches last dimension", "epsilon is supplied by host wrapper", "backward outputs match input/weight shapes"]
+    },
+    {
+      "name": "activations_and_mlp",
+      "pattern": "^(relu|gelu|silu|swiglu|sigmoid|moe|router|gated_delta|sarc|motif|fused|add_bias).*",
+      "validated_by": ["src/ops/activation.cpp", "src/motif", "src/nn/transformer.cpp"],
+      "contract": ["input/output shape compatibility checked", "packed gate/up widths checked", "router/expert dimensions checked", "experimental fused paths remain behind host-side capability/env gates"]
+    },
+    {
+      "name": "embedding_and_indexing",
+      "pattern": "^(embedding|token_position|position_embedding|gather_last_token_logits|masked_fill|dropout).*",
+      "validated_by": ["src/ops/indexing.cpp", "src/nn/embedding.cpp", "src/ops/basic_ops.cpp"],
+      "contract": ["index tensor dtype checked", "embedding/logit dimensions checked", "mask dtype/shape checked", "dropout probability and seed supplied by host wrapper"]
+    },
+    {
+      "name": "rowwise_sampling_and_reductions",
+      "pattern": "^(rowwise|softmax_rows).*",
+      "validated_by": ["src/ops/reduce.cpp", "src/ops/loss.cpp"],
+      "contract": ["rank-2 row layout checked", "output shape and dtype checked", "sampling parameters bounded before launch"]
+    },
+    {
+      "name": "losses",
+      "pattern": "^(mse|softmax_cross_entropy).*",
+      "validated_by": ["src/ops/loss.cpp"],
+      "contract": ["prediction/target shapes checked", "target dtype checked", "reduction output shapes checked"]
+    },
+    {
+      "name": "optimizers",
+      "pattern": "^(adam|sgd).*",
+      "validated_by": ["src/train/adam.cpp", "src/train/sgd.cpp"],
+      "contract": ["parameter/gradient/state shapes match", "hyperparameters are host-side scalars", "grouped update arity checked before fast kernels"]
+    }
+  ]
+}

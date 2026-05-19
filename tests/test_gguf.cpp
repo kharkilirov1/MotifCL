@@ -17,6 +17,16 @@ void require(bool cond, const std::string& message) {
     if (!cond) throw std::runtime_error(message);
 }
 
+template <typename Fn>
+void require_motifcl_error(Fn&& fn, const std::string& message) {
+    try {
+        fn();
+    } catch (const motifcl::Error&) {
+        return;
+    }
+    throw std::runtime_error(message);
+}
+
 template <typename T>
 void write_le(std::ostream& out, T value) {
     if constexpr (std::is_same<T, float>::value) {
@@ -138,6 +148,18 @@ void write_tensor_info(std::ostream& out, const TinyTensor& tensor) {
     write_le<std::uint64_t>(out, tensor.offset);
 }
 
+void write_raw_tensor_info(std::ostream& out,
+                           const std::string& name,
+                           const std::vector<std::uint64_t>& dims,
+                           std::uint32_t raw_type,
+                           std::uint64_t offset) {
+    write_string(out, name);
+    write_le<std::uint32_t>(out, static_cast<std::uint32_t>(dims.size()));
+    for (auto dim : dims) write_le<std::uint64_t>(out, dim);
+    write_le<std::uint32_t>(out, raw_type);
+    write_le<std::uint64_t>(out, offset);
+}
+
 void write_tensor_payload(std::ostream& out, const TinyTensor& tensor) {
     if (!tensor.raw_payload.empty()) {
         out.write(reinterpret_cast<const char*>(tensor.raw_payload.data()),
@@ -217,6 +239,76 @@ std::vector<std::uint8_t> quant_q6_k_zero_block() {
 
 int main() {
     const auto path = std::filesystem::current_path() / "tiny_test.gguf";
+    const auto bad_duplicate_meta_path = std::filesystem::current_path() / "bad_duplicate_meta.gguf";
+    {
+        std::ofstream out(bad_duplicate_meta_path, std::ios::binary);
+        write_le<std::uint32_t>(out, 0x46554747u);
+        write_le<std::uint32_t>(out, 3u);
+        write_le<std::uint64_t>(out, 0u);
+        write_le<std::uint64_t>(out, 2u);
+        write_metadata_string(out, "general.architecture", "llama");
+        write_metadata_string(out, "general.architecture", "gemma");
+    }
+    require_motifcl_error([&] { (void)motifcl::gguf::File::open(bad_duplicate_meta_path.string()); },
+                          "GGUF duplicate metadata key was accepted");
+    std::filesystem::remove(bad_duplicate_meta_path);
+
+    const auto bad_metadata_type_path = std::filesystem::current_path() / "bad_metadata_type.gguf";
+    {
+        std::ofstream out(bad_metadata_type_path, std::ios::binary);
+        write_le<std::uint32_t>(out, 0x46554747u);
+        write_le<std::uint32_t>(out, 3u);
+        write_le<std::uint64_t>(out, 0u);
+        write_le<std::uint64_t>(out, 1u);
+        write_string(out, "bad.type");
+        write_le<std::uint32_t>(out, 0xffffffffu);
+    }
+    require_motifcl_error([&] { (void)motifcl::gguf::File::open(bad_metadata_type_path.string()); },
+                          "GGUF unknown metadata type was accepted");
+    std::filesystem::remove(bad_metadata_type_path);
+
+    const auto bad_tensor_type_path = std::filesystem::current_path() / "bad_tensor_type.gguf";
+    {
+        std::ofstream out(bad_tensor_type_path, std::ios::binary);
+        write_le<std::uint32_t>(out, 0x46554747u);
+        write_le<std::uint32_t>(out, 3u);
+        write_le<std::uint64_t>(out, 1u);
+        write_le<std::uint64_t>(out, 0u);
+        write_raw_tensor_info(out, "x", {1}, 0xffffffffu, 0);
+        pad_to_alignment(out, 32);
+    }
+    require_motifcl_error([&] { (void)motifcl::gguf::File::open(bad_tensor_type_path.string()); },
+                          "GGUF unknown tensor type was accepted");
+    std::filesystem::remove(bad_tensor_type_path);
+
+    const auto bad_qblock_shape_path = std::filesystem::current_path() / "bad_qblock_shape.gguf";
+    {
+        std::ofstream out(bad_qblock_shape_path, std::ios::binary);
+        write_le<std::uint32_t>(out, 0x46554747u);
+        write_le<std::uint32_t>(out, 3u);
+        write_le<std::uint64_t>(out, 1u);
+        write_le<std::uint64_t>(out, 0u);
+        write_raw_tensor_info(out, "bad_q4", {31}, static_cast<std::uint32_t>(motifcl::gguf::TensorType::Q4_0), 0);
+        pad_to_alignment(out, 32);
+    }
+    require_motifcl_error([&] { (void)motifcl::gguf::File::open(bad_qblock_shape_path.string()); },
+                          "GGUF incomplete quant block shape was accepted");
+    std::filesystem::remove(bad_qblock_shape_path);
+
+    const auto bad_truncated_tensor_path = std::filesystem::current_path() / "bad_truncated_tensor.gguf";
+    {
+        std::ofstream out(bad_truncated_tensor_path, std::ios::binary);
+        write_le<std::uint32_t>(out, 0x46554747u);
+        write_le<std::uint32_t>(out, 3u);
+        write_le<std::uint64_t>(out, 1u);
+        write_le<std::uint64_t>(out, 0u);
+        write_raw_tensor_info(out, "short_f32", {4}, static_cast<std::uint32_t>(motifcl::gguf::TensorType::F32), 0);
+        pad_to_alignment(out, 32);
+    }
+    require_motifcl_error([&] { (void)motifcl::gguf::File::open(bad_truncated_tensor_path.string()); },
+                          "GGUF truncated tensor payload was accepted");
+    std::filesystem::remove(bad_truncated_tensor_path);
+
     {
         constexpr std::uint64_t vocab = 8;
         constexpr std::uint64_t hidden = 4;

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cstdint>
 #include <atomic>
+#include <limits>
 #include <random>
 #include <unordered_map>
 #include <unordered_set>
@@ -94,6 +95,53 @@ struct BackwardEngine {
     }
 };
 }
+
+namespace {
+
+bool supports_external_quant_scales(DType dtype) {
+    return dtype == DType::Q8_0 || dtype == DType::Q4_0 || dtype == DType::Q4_0_COL;
+}
+
+int64_t ceil_div_positive(int64_t value, int64_t divisor) {
+    MCL_CHECK(value >= 0, "quant scale coverage requires non-negative dimensions");
+    MCL_CHECK(divisor > 0, "quant scale coverage requires a positive divisor");
+    return value == 0 ? 0 : ((value - 1) / divisor) + 1;
+}
+
+int64_t checked_mul_nonnegative(int64_t lhs, int64_t rhs) {
+    MCL_CHECK(lhs >= 0 && rhs >= 0, "quant scale coverage requires non-negative factors");
+    if (lhs != 0) {
+        MCL_CHECK(rhs <= std::numeric_limits<int64_t>::max() / lhs,
+                  "quant scale coverage size overflow");
+    }
+    return lhs * rhs;
+}
+
+int64_t required_quant_scale_numel(const Shape& shape, DType dtype, int axis, int64_t block_size) {
+    if (axis == 0) {
+        MCL_CHECK(shape.ndim() >= 1, "axis-0 quant scales require rank >= 1");
+        return shape[0];
+    }
+    if (axis == 1) {
+        MCL_CHECK(shape.ndim() >= 2, "axis-1 quant scales require rank >= 2");
+        return shape[1];
+    }
+    if (axis == 2) {
+        MCL_CHECK(block_size > 0, "blockwise quantization requires positive block size");
+        return ceil_div_positive(shape.numel(), block_size);
+    }
+    if (axis == 3 || axis == 4) {
+        MCL_CHECK(dtype == DType::Q4_0_COL, "column-block quant scales require Q4_0_COL tensor");
+        MCL_CHECK(shape.ndim() == 2, "column-block quant scales require rank-2 tensor");
+        MCL_CHECK(block_size > 0, "column-block quantization requires positive block size");
+        const int64_t blocks_per_col = ceil_div_positive(shape[0], block_size);
+        return checked_mul_nonnegative(shape[1], blocks_per_col);
+    }
+    MCL_CHECK(false, "invalid quant scale axis");
+    return 0;
+}
+
+} // namespace
 
 void manual_seed(std::uint32_t seed) {
     host_rng().seed(seed);
@@ -388,12 +436,18 @@ void Tensor::_set_quant_scale(float scale) {
 void Tensor::_set_quant_scales(const Tensor& scales, int axis, int64_t block_size) {
     MCL_CHECK(valid(), "invalid tensor");
     MCL_CHECK(scales.valid(), "quant scale tensor is invalid");
+    MCL_CHECK(supports_external_quant_scales(dtype()), "quant scales require a quantized tensor");
     MCL_CHECK(scales.dtype() == DType::F32, "quant scale tensor must be f32");
     MCL_CHECK(scales.backend_ptr() == backend_ptr(), "quant scale tensor must be on same backend");
+    MCL_CHECK(scales.ndim() == 1, "quant scale tensor must be rank-1");
     MCL_CHECK(axis == 0 || axis == 1 || axis == 2 || axis == 3 || axis == 4,
               "quant scale axis must be 0, 1, 2, 3, or 4");
     MCL_CHECK(axis != 2 || block_size > 0, "blockwise quantization requires positive block size");
     MCL_CHECK(axis != 3 || block_size > 0, "column-block quantization requires positive block size");
+    MCL_CHECK(axis != 4 || block_size > 0, "tile8 column-block quantization requires positive block size");
+    const int64_t required_scales = required_quant_scale_numel(shape(), dtype(), axis, block_size);
+    MCL_CHECK(scales.numel() >= required_scales,
+              "quant scale tensor is too small for tensor shape and scale axis");
     impl_->quant_scales = std::make_shared<Tensor>(scales);
     impl_->quant_scale_axis = axis;
     impl_->quant_block_size = block_size;

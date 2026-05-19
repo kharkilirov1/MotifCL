@@ -1,5 +1,7 @@
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <vector>
 #include <motifcl/motifcl.hpp>
@@ -8,6 +10,15 @@
 int main() {
     try {
         auto backend = motifcl::Backend::create_opencl();
+        auto expect_motifcl_error = [](const auto& fn) {
+            try {
+                fn();
+            } catch (const motifcl::Error&) {
+                return true;
+            }
+            return false;
+        };
+
         const auto int_dot_mode = backend.int_dot_mode();
         if (int_dot_mode != "cl_khr_integer_dot_product" &&
             int_dot_mode != "cl_arm_integer_dot_product" &&
@@ -132,6 +143,21 @@ int main() {
             if (std::fabs(CBlock[i] - ref_block[i]) > 0.15f) return 1;
         }
 
+        std::vector<float> one_scale = {1.0f};
+        auto OneScale = motifcl::Tensor::from_cpu(backend, {1}, motifcl::DType::F32, one_scale.data());
+        if (!expect_motifcl_error([&] {
+                auto BadRows = motifcl::Tensor::empty(backend, {2, 3}, motifcl::DType::Q4_0);
+                BadRows._set_quant_scales(OneScale, 0, 0);
+            })) return 1;
+        if (!expect_motifcl_error([&] {
+                auto BadCols = motifcl::Tensor::empty(backend, {3, 4}, motifcl::DType::Q8_0);
+                BadCols._set_quant_scales(OneScale, 1, 0);
+            })) return 1;
+        if (!expect_motifcl_error([&] {
+                auto BadBlocks = motifcl::Tensor::empty(backend, {2, 3}, motifcl::DType::Q4_0);
+                BadBlocks._set_quant_scales(OneScale, 2, 3);
+            })) return 1;
+
         auto argmax = motifcl::rowwise_argmax(A2).to_vector<std::int32_t>();
         if (argmax != std::vector<std::int32_t>({1, 1})) return 1;
         auto sample_greedy = motifcl::rowwise_sample(A2, 0.0f, 0, 123).to_vector<std::int32_t>();
@@ -151,6 +177,45 @@ int main() {
         for (std::size_t i = 0; i < a_exact.size(); ++i) {
             if (std::fabs(loaded_d4[i] - a_exact[i]) > 1e-4f) return 1;
         }
+
+        const auto bad_q_path = std::filesystem::current_path() / "quant_tensor_bad_scales.mclt";
+        {
+            std::ofstream out(bad_q_path, std::ios::binary);
+            const char magic[8] = {'M', 'C', 'L', 'T', 'E', 'N', '2', '\0'};
+            out.write(magic, sizeof(magic));
+            auto write_value = [&](const auto& value) {
+                out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+            };
+            auto write_payload_header = [&](motifcl::DType dtype,
+                                            std::vector<std::int64_t> dims,
+                                            std::uint64_t nbytes,
+                                            float quant_scale,
+                                            std::int32_t has_quant_scales,
+                                            std::int32_t quant_scale_axis,
+                                            std::int64_t quant_block_size) {
+                write_value(static_cast<std::int32_t>(dtype));
+                write_value(static_cast<std::uint64_t>(dims.size()));
+                for (auto dim : dims) write_value(dim);
+                write_value(nbytes);
+                write_value(quant_scale);
+                write_value(has_quant_scales);
+                write_value(quant_scale_axis);
+                write_value(quant_block_size);
+            };
+            write_payload_header(motifcl::DType::Q8_0, {2, 4}, 8, 1.0f, 1, 1, 0);
+            write_payload_header(motifcl::DType::F32, {1}, 4, 1.0f, 0, -1, 0);
+            float malicious_single_scale = 1.0f;
+            out.write(reinterpret_cast<const char*>(&malicious_single_scale), sizeof(malicious_single_scale));
+            std::vector<std::uint8_t> qbytes(8, 0);
+            out.write(reinterpret_cast<const char*>(qbytes.data()), static_cast<std::streamsize>(qbytes.size()));
+            if (!out.good()) return 1;
+        }
+        const bool rejected_bad_load = expect_motifcl_error([&] {
+            auto bad_loaded = motifcl::load_tensor(backend, bad_q_path.string());
+            (void)bad_loaded;
+        });
+        std::filesystem::remove(bad_q_path);
+        if (!rejected_bad_load) return 1;
     } catch (const std::exception& e) {
         return motifcl_test::handle_exception(e);
     }

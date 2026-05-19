@@ -8,11 +8,16 @@
 #include <motifcl/autograd/graph.hpp>
 #include <motifcl/core/error.hpp>
 #include <motifcl/runtime/backend.hpp>
+#include <motifcl/runtime/microkernel.hpp>
 
 namespace motifcl {
 namespace {
 
 constexpr std::size_t kLocal = 256;
+
+void require_quant_microkernel() {
+    (void)microkernel_runtime_uses_opencl(MicrokernelDomain::Quant);
+}
 
 std::size_t round_up(std::size_t x, std::size_t multiple) {
     return ((x + multiple - 1) / multiple) * multiple;
@@ -91,6 +96,7 @@ int scale_mode_for_axis(int axis) {
 }
 
 Tensor quantize_scaled(const Tensor& x, DType dtype, const Tensor& scales, int axis, int64_t block_size) {
+    require_quant_microkernel();
     MCL_CHECK(x.dtype() == DType::F32, "scaled quantization expects f32 input");
     MCL_CHECK(dtype == DType::Q8_0 || dtype == DType::Q4_0, "scaled quantization expects q8_0 or q4_0 output");
     MCL_CHECK(axis == 0 || axis == 1 || axis == 2, "scaled quantization axis must be 0, 1, or 2");
@@ -123,6 +129,7 @@ Tensor quantize_scaled(const Tensor& x, DType dtype, const Tensor& scales, int a
 } // namespace
 
 Tensor quantize_q8_symmetric(const Tensor& x, float scale) {
+    require_quant_microkernel();
     MCL_CHECK(x.dtype() == DType::F32, "quantize_q8_symmetric expects f32 input");
     MCL_CHECK(x.valid(), "quantize_q8_symmetric input is invalid");
     if (scale <= 0.0f) scale = choose_q8_scale(x);
@@ -142,6 +149,7 @@ Tensor quantize_q8_symmetric(const Tensor& x, float scale) {
 }
 
 Tensor dequantize_q8(const Tensor& x) {
+    require_quant_microkernel();
     MCL_CHECK(x.dtype() == DType::Q8_0, "dequantize_q8 expects q8_0 input");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     int n = static_cast<int>(x.numel());
@@ -176,6 +184,7 @@ Tensor dequantize_q8(const Tensor& x) {
 }
 
 Tensor quantize_q4_symmetric(const Tensor& x, float scale) {
+    require_quant_microkernel();
     MCL_CHECK(x.dtype() == DType::F32, "quantize_q4_symmetric expects f32 input");
     MCL_CHECK(x.valid(), "quantize_q4_symmetric input is invalid");
     if (scale <= 0.0f) scale = choose_q4_scale(x);
@@ -196,6 +205,7 @@ Tensor quantize_q4_symmetric(const Tensor& x, float scale) {
 }
 
 Tensor dequantize_q4(const Tensor& x) {
+    require_quant_microkernel();
     MCL_CHECK(x.dtype() == DType::Q4_0, "dequantize_q4 expects q4_0 input");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     int n = static_cast<int>(x.numel());
@@ -235,6 +245,7 @@ Tensor quantize_q8_symmetric_axis(const Tensor& x, int axis) {
 }
 
 Tensor quantize_q8_symmetric_rows(const Tensor& x) {
+    require_quant_microkernel();
     MCL_CHECK(x.dtype() == DType::F32, "quantize_q8_symmetric_rows expects f32 input");
     MCL_CHECK(x.ndim() == 2, "row quantization expects rank-2 tensors");
     const auto rows = static_cast<int>(x.shape()[0]);

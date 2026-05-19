@@ -20,6 +20,16 @@ void require(bool cond, const std::string& message) {
     if (!cond) throw std::runtime_error(message);
 }
 
+template <typename Fn>
+void require_motifcl_error(Fn&& fn, const std::string& message) {
+    try {
+        fn();
+    } catch (const motifcl::Error&) {
+        return;
+    }
+    throw std::runtime_error(message);
+}
+
 void write_le_u64(std::ostream& out, std::uint64_t value) {
     for (int i = 0; i < 8; ++i) {
         const char byte = static_cast<char>((value >> (8 * i)) & 0xffu);
@@ -107,6 +117,42 @@ std::vector<float> seq(std::size_t n, float scale = 0.01f) {
     std::vector<float> values(n);
     for (std::size_t i = 0; i < n; ++i) values[i] = static_cast<float>(i + 1) * scale;
     return values;
+}
+
+template <typename T>
+void write_native(std::ostream& out, const T& value) {
+    out.write(reinterpret_cast<const char*>(&value), sizeof(T));
+}
+
+void write_bad_axis1_q8_mclt(const std::filesystem::path& path, std::int64_t rows, std::int64_t cols) {
+    std::ofstream out(path, std::ios::binary);
+    require(out.good(), "failed to open malformed mclt for write");
+    const char magic[8] = {'M', 'C', 'L', 'T', 'E', 'N', '2', '\0'};
+    out.write(magic, sizeof(magic));
+    auto write_payload_header = [&](motifcl::DType dtype,
+                                    std::vector<std::int64_t> dims,
+                                    std::uint64_t nbytes,
+                                    float quant_scale,
+                                    std::int32_t has_quant_scales,
+                                    std::int32_t quant_scale_axis,
+                                    std::int64_t quant_block_size) {
+        write_native(out, static_cast<std::int32_t>(dtype));
+        write_native(out, static_cast<std::uint64_t>(dims.size()));
+        for (auto dim : dims) write_native(out, dim);
+        write_native(out, nbytes);
+        write_native(out, quant_scale);
+        write_native(out, has_quant_scales);
+        write_native(out, quant_scale_axis);
+        write_native(out, quant_block_size);
+    };
+    write_payload_header(motifcl::DType::Q8_0, {rows, cols}, static_cast<std::uint64_t>(rows * cols),
+                         1.0f, 1, 1, 0);
+    write_payload_header(motifcl::DType::F32, {1}, 4, 1.0f, 0, -1, 0);
+    float malicious_single_scale = 1.0f;
+    out.write(reinterpret_cast<const char*>(&malicious_single_scale), sizeof(malicious_single_scale));
+    std::vector<std::uint8_t> qbytes(static_cast<std::size_t>(rows * cols), 0);
+    out.write(reinterpret_cast<const char*>(qbytes.data()), static_cast<std::streamsize>(qbytes.size()));
+    require(out.good(), "failed to write malformed mclt");
 }
 
 } // namespace
@@ -290,6 +336,12 @@ int main() {
         auto loaded_quant_generated = motifcl::nn::generate_batch(backend, loaded_quant_model, {{1, 2}, {2, 3}}, options);
         require(loaded_quant_generated.size() == 2 && loaded_quant_generated[0].size() == 4,
                 "Quantized transformer checkpoint generate failed");
+        write_bad_axis1_q8_mclt(q_ckpt_dir / "lm_head.qweight.mclt", cfg.hidden_size, cfg.vocab_size);
+        auto rejected_quant_model = motifcl::nn::make_gemma_model(backend, cfg);
+        require_motifcl_error([&] {
+                motifcl::load_quantized_transformer_checkpoint(rejected_quant_model, backend, q_ckpt_dir.string());
+            },
+            "Malformed quantized transformer checkpoint with short lm_head scales was accepted");
         std::filesystem::remove_all(q_ckpt_dir);
 
         motifcl::nn::QuantizationPolicy qpolicy;

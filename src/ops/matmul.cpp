@@ -5,8 +5,10 @@
 #include <motifcl/core/error.hpp>
 #include <motifcl/ops/fp16.hpp>
 #include <motifcl/runtime/backend.hpp>
+#include <motifcl/runtime/microkernel.hpp>
 
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -16,6 +18,87 @@ namespace {
 
 std::size_t round_up(std::size_t x, std::size_t multiple) {
     return ((x + multiple - 1) / multiple) * multiple;
+}
+
+void validate_kernel_int64(int64_t value, const char* op, const char* name) {
+    MCL_CHECK(value >= 0 && value <= static_cast<int64_t>(std::numeric_limits<int>::max()),
+              std::string(op) + " " + name + " is outside OpenCL int argument range");
+}
+
+int64_t ceil_div_nonnegative(int64_t value, int64_t divisor, const char* op) {
+    MCL_CHECK(value >= 0, std::string(op) + " requires non-negative dimensions");
+    MCL_CHECK(divisor > 0, std::string(op) + " requires a positive quant block size");
+    return value == 0 ? 0 : ((value - 1) / divisor) + 1;
+}
+
+void validate_matmul_args(const Tensor& a, const Tensor& b, const char* op,
+                          bool trans_a = false, bool trans_b = false) {
+    MCL_CHECK(a.valid() && b.valid(), std::string(op) + " expects valid tensors");
+    MCL_CHECK(a.ndim() == 2 && b.ndim() == 2, std::string(op) + " expects rank-2 tensors");
+    MCL_CHECK(a.backend_ptr() == b.backend_ptr(), std::string(op) + " requires tensors on same backend");
+    const int64_t m = trans_a ? a.shape()[1] : a.shape()[0];
+    const int64_t a_k = trans_a ? a.shape()[0] : a.shape()[1];
+    const int64_t b_k = trans_b ? b.shape()[1] : b.shape()[0];
+    const int64_t n = trans_b ? b.shape()[0] : b.shape()[1];
+    MCL_CHECK(a_k == b_k, std::string(op) + " inner dimension mismatch");
+    validate_kernel_int64(m, op, "M");
+    validate_kernel_int64(n, op, "N");
+    validate_kernel_int64(a_k, op, "K");
+}
+
+int64_t required_quant_scale_numel_for_callsite(const Tensor& x, const char* op) {
+    const int axis = x.quant_scale_axis();
+    if (axis == 0) return x.shape()[0];
+    if (axis == 1) return x.shape()[1];
+    if (axis == 2) return ceil_div_nonnegative(x.numel(), x.quant_block_size(), op);
+    if (axis == 3 || axis == 4) {
+        MCL_CHECK(x.dtype() == DType::Q4_0_COL,
+                  std::string(op) + " column-block scales require Q4_0_COL tensor");
+        const int64_t blocks_per_col = ceil_div_nonnegative(x.shape()[0], x.quant_block_size(), op);
+        MCL_CHECK(x.shape()[1] == 0 || blocks_per_col <= std::numeric_limits<int64_t>::max() / x.shape()[1],
+                  std::string(op) + " quant scale coverage size overflow");
+        return x.shape()[1] * blocks_per_col;
+    }
+    MCL_CHECK(false, std::string(op) + " invalid quant scale axis");
+    return 0;
+}
+
+void validate_quant_tensor_args(const Tensor& x, const char* op, const char* name,
+                                bool allow_q4_col = true) {
+    MCL_CHECK(x.valid(), std::string(op) + " " + name + " tensor is invalid");
+    MCL_CHECK(x.dtype() == DType::Q8_0 || x.dtype() == DType::Q4_0 ||
+                  x.dtype() == DType::Q4_K || x.dtype() == DType::Q5_K ||
+                  x.dtype() == DType::Q6_K || (allow_q4_col && x.dtype() == DType::Q4_0_COL),
+              std::string(op) + " " + name + " has unsupported quantized dtype");
+    MCL_CHECK(x.ndim() == 2, std::string(op) + " " + name + " expects rank-2 tensor");
+    validate_kernel_int64(x.shape()[0], op, "quant rows");
+    validate_kernel_int64(x.shape()[1], op, "quant cols");
+    if (!x.has_quant_scales()) return;
+    auto scales = x.quant_scales();
+    MCL_CHECK(scales.valid(), std::string(op) + " " + name + " quant scales are invalid");
+    MCL_CHECK(scales.dtype() == DType::F32, std::string(op) + " " + name + " quant scales must be f32");
+    MCL_CHECK(scales.ndim() == 1, std::string(op) + " " + name + " quant scales must be rank-1");
+    MCL_CHECK(scales.backend_ptr() == x.backend_ptr(),
+              std::string(op) + " " + name + " quant scales must share backend");
+    const int axis = x.quant_scale_axis();
+    MCL_CHECK(axis == 0 || axis == 1 || axis == 2 || axis == 3 || axis == 4,
+              std::string(op) + " " + name + " quant scale axis is invalid");
+    MCL_CHECK(axis != 3 || x.dtype() == DType::Q4_0_COL,
+              std::string(op) + " " + name + " axis-3 scales require Q4_0_COL");
+    MCL_CHECK(axis != 4 || x.dtype() == DType::Q4_0_COL,
+              std::string(op) + " " + name + " axis-4 scales require Q4_0_COL");
+    MCL_CHECK((axis != 2 && axis != 3 && axis != 4) || x.quant_block_size() > 0,
+              std::string(op) + " " + name + " block scales require positive block size");
+    const int64_t required = required_quant_scale_numel_for_callsite(x, op);
+    MCL_CHECK(scales.numel() >= required,
+              std::string(op) + " " + name + " quant scale tensor is too small for kernel access pattern");
+}
+
+void validate_scaled_quant_matmul_tensor(const Tensor& x, const char* op, const char* name) {
+    validate_quant_tensor_args(x, op, name, false);
+    if (!x.has_quant_scales()) return;
+    MCL_CHECK(x.quant_scale_axis() == 0 || x.quant_scale_axis() == 1 || x.quant_scale_axis() == 2,
+              std::string(op) + " " + name + " scaled matmul supports quant scale axis 0, 1, or 2");
 }
 
 void launch_register_block4(Kernel& k, int M, int N) {
@@ -212,14 +295,16 @@ void require_matmul_f32(const Tensor& a, const Tensor& b) {
 
 void require_matmul_q8(const Tensor& a, const Tensor& b) {
     MCL_CHECK(a.dtype() == DType::Q8_0 && b.dtype() == DType::Q8_0, "q8 matmul expects q8_0 tensors");
-    MCL_CHECK(a.ndim() == 2 && b.ndim() == 2, "q8 matmul expects rank-2 tensors");
-    MCL_CHECK(a.backend_ptr() == b.backend_ptr(), "q8 matmul requires tensors on same backend");
+    validate_matmul_args(a, b, "q8 matmul");
+    validate_quant_tensor_args(a, "q8 matmul", "lhs", false);
+    validate_quant_tensor_args(b, "q8 matmul", "rhs", false);
 }
 
 void require_matmul_q4(const Tensor& a, const Tensor& b) {
     MCL_CHECK(a.dtype() == DType::Q4_0 && b.dtype() == DType::Q4_0, "q4 matmul expects q4_0 tensors");
-    MCL_CHECK(a.ndim() == 2 && b.ndim() == 2, "q4 matmul expects rank-2 tensors");
-    MCL_CHECK(a.backend_ptr() == b.backend_ptr(), "q4 matmul requires tensors on same backend");
+    validate_matmul_args(a, b, "q4 matmul");
+    validate_quant_tensor_args(a, "q4 matmul", "lhs", false);
+    validate_quant_tensor_args(b, "q4 matmul", "rhs", false);
 }
 
 bool is_quant_dtype(DType dtype) {
@@ -279,9 +364,9 @@ const char* f32_qk_m1_wg4_kernel_name(DType dtype) {
 
 void require_matmul_quantized(const Tensor& a, const Tensor& b) {
     MCL_CHECK(is_quant_dtype(a.dtype()) && is_quant_dtype(b.dtype()), "quantized matmul expects q8_0/q4_0/q4_k/q5_k tensors");
-    MCL_CHECK(a.ndim() == 2 && b.ndim() == 2, "quantized matmul expects rank-2 tensors");
-    MCL_CHECK(a.backend_ptr() == b.backend_ptr(), "quantized matmul requires tensors on same backend");
-    MCL_CHECK(a.shape()[1] == b.shape()[0], "quantized matmul inner dimension mismatch");
+    validate_matmul_args(a, b, "quantized matmul");
+    validate_quant_tensor_args(a, "quantized matmul", "lhs");
+    validate_quant_tensor_args(b, "quantized matmul", "rhs");
 }
 
 int scale_mode(const Tensor& x) {
@@ -401,6 +486,8 @@ Tensor matmul_q4_q8(const Tensor& a, const Tensor& b) {
 Tensor matmul_quant_scaled(const Tensor& a, const Tensor& b) {
     require_matmul_quantized(a, b);
     MCL_CHECK(a.has_quant_scales() || b.has_quant_scales(), "scaled quantized matmul requires at least one scale tensor");
+    validate_scaled_quant_matmul_tensor(a, "scaled quantized matmul", "lhs");
+    validate_scaled_quant_matmul_tensor(b, "scaled quantized matmul", "rhs");
     auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32);
     auto k = a.backend().kernels.get(quant_scaled_kernel_name(a, b));
     int M = static_cast<int>(a.shape()[0]);
@@ -438,6 +525,7 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
               "K-quant matmul expects q8_0 lhs and q4_k/q5_k rhs");
     MCL_CHECK(a.has_quant_scales(),
               "K-quant matmul expects row/block quant scales on q8_0 lhs");
+    validate_scaled_quant_matmul_tensor(a, "K-quant matmul", "lhs");
     auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32);
     int M = static_cast<int>(a.shape()[0]);
     int N = static_cast<int>(b.shape()[1]);
@@ -570,10 +658,9 @@ Tensor matmul_q8_qk(const Tensor& a, const Tensor& b) {
 Tensor matmul_f32_qk_m1(const Tensor& a, const Tensor& b) {
     MCL_CHECK(a.dtype() == DType::F32 && is_k_quant_dtype(b.dtype()),
               "F32/K-quant decode matmul expects f32 lhs and q4_k/q5_k rhs");
-    MCL_CHECK(a.ndim() == 2 && b.ndim() == 2, "F32/K-quant decode matmul expects rank-2 tensors");
-    MCL_CHECK(a.backend_ptr() == b.backend_ptr(), "F32/K-quant decode matmul requires tensors on same backend");
+    validate_matmul_args(a, b, "F32/K-quant decode matmul");
+    validate_quant_tensor_args(b, "F32/K-quant decode matmul", "rhs", false);
     MCL_CHECK(a.shape()[0] == 1, "F32/K-quant decode matmul is specialized for M=1");
-    MCL_CHECK(a.shape()[1] == b.shape()[0], "F32/K-quant decode matmul inner dimension mismatch");
     auto out = Tensor::empty(a.backend(), {1, b.shape()[1]}, DType::F32);
     const int N = static_cast<int>(b.shape()[1]);
     const int K = static_cast<int>(a.shape()[1]);
@@ -609,10 +696,9 @@ Tensor matmul_f32_qk_m1(const Tensor& a, const Tensor& b) {
 Tensor matmul_f32_q4_0_m1(const Tensor& a, const Tensor& b) {
     MCL_CHECK(a.dtype() == DType::F32 && b.dtype() == DType::Q4_0,
               "F32/Q4_0 decode matmul expects f32 lhs and q4_0 rhs");
-    MCL_CHECK(a.ndim() == 2 && b.ndim() == 2, "F32/Q4_0 decode matmul expects rank-2 tensors");
-    MCL_CHECK(a.backend_ptr() == b.backend_ptr(), "F32/Q4_0 decode matmul requires tensors on same backend");
+    validate_matmul_args(a, b, "F32/Q4_0 decode matmul");
+    validate_scaled_quant_matmul_tensor(b, "F32/Q4_0 decode matmul", "rhs");
     MCL_CHECK(a.shape()[0] == 1, "F32/Q4_0 decode matmul is specialized for M=1");
-    MCL_CHECK(a.shape()[1] == b.shape()[0], "F32/Q4_0 decode matmul inner dimension mismatch");
     const float scalar_b = b.quant_scale();
     Tensor scalar_scales = b.has_quant_scales() ? Tensor{} : Tensor::from_cpu(a.backend(), {1}, DType::F32, &scalar_b);
     Tensor scales_b = b.has_quant_scales() ? b.quant_scales() : scalar_scales;
@@ -639,10 +725,9 @@ Tensor matmul_f32_q4_0_m1(const Tensor& a, const Tensor& b) {
 Tensor matmul_f32_q4_0_col_m1(const Tensor& a, const Tensor& b) {
     MCL_CHECK(a.dtype() == DType::F32 && b.dtype() == DType::Q4_0_COL,
               "F32/Q4_0_COL decode matmul expects f32 lhs and q4_0_col rhs");
-    MCL_CHECK(a.ndim() == 2 && b.ndim() == 2, "F32/Q4_0_COL decode matmul expects rank-2 tensors");
-    MCL_CHECK(a.backend_ptr() == b.backend_ptr(), "F32/Q4_0_COL decode matmul requires tensors on same backend");
+    validate_matmul_args(a, b, "F32/Q4_0_COL decode matmul");
+    validate_quant_tensor_args(b, "F32/Q4_0_COL decode matmul", "rhs", true);
     MCL_CHECK(a.shape()[0] == 1, "F32/Q4_0_COL decode matmul is specialized for M=1");
-    MCL_CHECK(a.shape()[1] == b.shape()[0], "F32/Q4_0_COL decode matmul inner dimension mismatch");
     MCL_CHECK(b.has_quant_scales(), "F32/Q4_0_COL decode matmul requires column-block scale tensor");
     const bool tile8_layout = b.quant_scale_axis() == 4;
     MCL_CHECK(b.quant_scale_axis() == 3 || tile8_layout,
@@ -726,12 +811,12 @@ void matmul_f32_m1_out(const Tensor& a, const Tensor& b, Tensor& out, int N, int
 }
 
 Tensor matmul_flags(const Tensor& a, const Tensor& b, bool trans_a, bool trans_b) {
+    (void)microkernel_runtime_uses_opencl(MicrokernelDomain::Matmul);
     require_matmul_f32(a, b);
+    validate_matmul_args(a, b, "matmul", trans_a, trans_b);
     int64_t a_m = trans_a ? a.shape()[1] : a.shape()[0];
     int64_t a_k = trans_a ? a.shape()[0] : a.shape()[1];
-    int64_t b_k = trans_b ? b.shape()[1] : b.shape()[0];
     int64_t b_n = trans_b ? b.shape()[0] : b.shape()[1];
-    MCL_CHECK(a_k == b_k, "matmul inner dimension mismatch");
     auto out = Tensor::empty(a.backend(), {a_m, b_n}, DType::F32);
     int M = static_cast<int>(a_m);
     int N = static_cast<int>(b_n);
@@ -805,6 +890,7 @@ struct MatMulBackward : autograd::Node {
 } // namespace
 
 Tensor matmul(const Tensor& a, const Tensor& b) {
+    (void)microkernel_runtime_uses_opencl(MicrokernelDomain::Matmul);
     if (a.dtype() == DType::F16 || b.dtype() == DType::F16) {
         MCL_CHECK(a.dtype() == DType::F16 && b.dtype() == DType::F16, "f16 matmul expects both inputs to be f16");
         MCL_CHECK(!a.requires_grad() && !b.requires_grad(), "f16 matmul autograd is not implemented; use f32 training path for now");
@@ -853,9 +939,10 @@ Tensor matmul_transpose_b(const Tensor& a, const Tensor& b) {
 }
 
 void matmul_out(const Tensor& a, const Tensor& b, Tensor& out) {
+    (void)microkernel_runtime_uses_opencl(MicrokernelDomain::Matmul);
     require_matmul_f32(a, b);
+    validate_matmul_args(a, b, "matmul_out");
     MCL_CHECK(out.dtype() == DType::F32, "matmul_out supports f32 output only");
-    MCL_CHECK(a.shape()[1] == b.shape()[0], "matmul_out inner dimension mismatch");
     MCL_CHECK(out.shape() == Shape({a.shape()[0], b.shape()[1]}), "matmul_out output shape mismatch");
     int M = static_cast<int>(a.shape()[0]);
     int N = static_cast<int>(b.shape()[1]);
@@ -888,8 +975,9 @@ void matmul_out(const Tensor& a, const Tensor& b, Tensor& out) {
 }
 
 Tensor matmul_tiled_variant(const Tensor& a, const Tensor& b, int tile) {
+    (void)microkernel_runtime_uses_opencl(MicrokernelDomain::Matmul);
     require_matmul_f32(a, b);
-    MCL_CHECK(a.shape()[1] == b.shape()[0], "matmul_tiled_variant inner dimension mismatch");
+    validate_matmul_args(a, b, "matmul_tiled_variant");
     MCL_CHECK(tile == 4 || tile == 8 || tile == 16, "matmul_tiled_variant tile must be one of 4, 8, or 16");
     MCL_CHECK(static_cast<std::size_t>(tile * tile) <= a.backend().device_info().max_work_group_size,
               "matmul_tiled_variant tile exceeds device max work-group size");
@@ -910,10 +998,9 @@ Tensor matmul_tiled_variant(const Tensor& a, const Tensor& b, int tile) {
 }
 
 Tensor matmul_f16_accum_f32(const Tensor& a, const Tensor& b) {
+    (void)microkernel_runtime_uses_opencl(MicrokernelDomain::Matmul);
     MCL_CHECK(a.dtype() == DType::F16 && b.dtype() == DType::F16, "matmul_f16_accum_f32 expects f16 inputs");
-    MCL_CHECK(a.ndim() == 2 && b.ndim() == 2, "matmul_f16_accum_f32 expects rank-2 tensors");
-    MCL_CHECK(a.backend_ptr() == b.backend_ptr(), "matmul_f16_accum_f32 requires tensors on same backend");
-    MCL_CHECK(a.shape()[1] == b.shape()[0], "matmul_f16_accum_f32 inner dimension mismatch");
+    validate_matmul_args(a, b, "matmul_f16_accum_f32");
     MCL_CHECK(backend_supports_fp16(a.backend()), "backend does not expose cl_khr_fp16");
     auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32);
     int M = static_cast<int>(a.shape()[0]);

@@ -9,6 +9,15 @@
 int main() {
     try {
         auto backend = motifcl::Backend::create_opencl();
+        auto expect_motifcl_error = [](const auto& fn) {
+            try {
+                fn();
+            } catch (const motifcl::Error&) {
+                return true;
+            }
+            return false;
+        };
+
         std::vector<float> a = {1, 2, 3, 4, 5, 6};
         std::vector<float> b = {7, 8, 9, 10, 11, 12};
         std::vector<float> ref = {58, 64, 139, 154};
@@ -152,6 +161,12 @@ int main() {
         auto ColA = motifcl::Tensor::from_cpu(backend, {1, CK}, motifcl::DType::F32, col_a.data());
         auto ColB = motifcl::Tensor::from_cpu(backend, {CK, CN}, motifcl::DType::Q4_0_COL, col_q.data());
         auto ColS = motifcl::Tensor::from_cpu(backend, {static_cast<int64_t>(col_scales.size())}, motifcl::DType::F32, col_scales.data());
+        std::vector<float> short_col_scales = {1.0f};
+        auto ShortColS = motifcl::Tensor::from_cpu(backend, {1}, motifcl::DType::F32, short_col_scales.data());
+        if (!expect_motifcl_error([&] {
+                auto BadColB = motifcl::Tensor::from_cpu(backend, {CK, CN}, motifcl::DType::Q4_0_COL, col_q.data());
+                BadColB._set_quant_scales(ShortColS, 3, CB);
+            })) return 17;
         ColB._set_quant_scales(ColS, 3, CB);
         auto ColC = motifcl::matmul(ColA, ColB).to_vector<float>();
         for (int c = 0; c < CN; ++c) {
@@ -200,6 +215,10 @@ int main() {
         }
         auto TileB = motifcl::Tensor::from_cpu(backend, {CK, TN8}, motifcl::DType::Q4_0_COL, tile_q.data());
         auto TileS = motifcl::Tensor::from_cpu(backend, {static_cast<int64_t>(tile_scales.size())}, motifcl::DType::F32, tile_scales.data());
+        if (!expect_motifcl_error([&] {
+                auto BadTileB = motifcl::Tensor::from_cpu(backend, {CK, TN8}, motifcl::DType::Q4_0_COL, tile_q.data());
+                BadTileB._set_quant_scales(ShortColS, 4, CB);
+            })) return 18;
         TileB._set_quant_scales(TileS, 4, CB);
         auto TileC = motifcl::matmul(ColA, TileB).to_vector<float>();
         for (int c = 0; c < TN8; ++c) {
