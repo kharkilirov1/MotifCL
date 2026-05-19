@@ -173,8 +173,13 @@ int main() {
         auto captured_attn = motifcl::multihead_attention(Q, K, V, H, true, B, T);
         (void)captured_attn;
         auto graph = motifcl::autograd::end_graph_capture();
-        if (backend.device_info().max_work_group_size >= 128 &&
-            backend.device_info().local_mem_size >= 24 * 1024 &&
+        const auto attention_device = backend.device_info();
+        const bool attention_device_gpu_like =
+            (attention_device.device_type & CL_DEVICE_TYPE_GPU) != 0 ||
+            (attention_device.device_type & CL_DEVICE_TYPE_ACCELERATOR) != 0;
+        if (attention_device_gpu_like &&
+            attention_device.max_work_group_size >= 128 &&
+            attention_device.local_mem_size >= 24 * 1024 &&
             (graph.empty() || graph.nodes()[0].op != "multihead_attention_flash_f32")) return 1;
         auto ref = reference_attention(q, k, v, B, T, C, H, true);
         for (std::size_t i = 0; i < Y.size(); ++i) {

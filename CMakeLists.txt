@@ -107,6 +107,7 @@ set(MOTIFCL_SOURCES
 
 add_library(motifcl ${MOTIFCL_SOURCES})
 add_library(MotifCL::motifcl ALIAS motifcl)
+set_target_properties(motifcl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(motifcl
     PUBLIC

@@ -27,9 +27,16 @@ int main() {
             int_dot_mode != "scalar_fallback") return 1;
         if (int_dot_mode != "scalar_fallback" && !backend.supports_integer_dot()) return 1;
         const auto command_mode = backend.command_buffer_mode();
-        if (command_mode != "cl_khr_command_buffer_available" &&
-            command_mode != "host_replay_fallback") return 1;
-        if (backend.supports_command_buffer() != (command_mode == "cl_khr_command_buffer_available")) return 1;
+        const bool command_mode_known =
+            command_mode == "cl_khr_command_buffer_mutable_dispatch" ||
+            command_mode == "cl_khr_command_buffer_replay" ||
+            command_mode == "cl_khr_command_buffer_missing_entrypoints" ||
+            command_mode == "host_replay_fallback";
+        if (!command_mode_known) return 1;
+        const bool command_buffer_available =
+            command_mode == "cl_khr_command_buffer_mutable_dispatch" ||
+            command_mode == "cl_khr_command_buffer_replay";
+        if (backend.supports_command_buffer() != command_buffer_available) return 1;
 
         std::vector<float> values = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f};
         auto X = motifcl::Tensor::from_cpu(backend, {5}, motifcl::DType::F32, values.data());

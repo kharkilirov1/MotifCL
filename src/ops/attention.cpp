@@ -114,6 +114,11 @@ std::size_t flash_attention_local_bytes() {
                             2 * tile + 8);
 }
 
+bool device_prefers_workgroup_attention(const DeviceInfo& info) {
+    return (info.device_type & CL_DEVICE_TYPE_GPU) != 0 ||
+           (info.device_type & CL_DEVICE_TYPE_ACCELERATOR) != 0;
+}
+
 bool gqa_hd64_backward_enabled() {
     const char* env = std::getenv("MOTIFCL_DISABLE_GQA_HD64_BWD");
     return !(env && *env && std::string(env) != "0" && std::string(env) != "false" && std::string(env) != "FALSE");
@@ -186,7 +191,8 @@ MultiHeadShape validate_multihead_attention(const Tensor& q, const Tensor& k, co
 
 bool supports_flash_attention_kernel(const Backend& backend, const MultiHeadShape& s) {
     const auto info = backend.device_info();
-    return s.head_dim > 0 &&
+    return device_prefers_workgroup_attention(info) &&
+           s.head_dim > 0 &&
            s.head_dim <= kFlashAttentionMaxHeadDim &&
            info.max_work_group_size >= flash_attention_workgroup() &&
            info.local_mem_size >= flash_attention_local_bytes();
@@ -251,7 +257,8 @@ void validate_quant_tensor_args(const Tensor& x, const char* op, const char* nam
 
 bool supports_staged_grouped_attention_backward_kernel(const Backend& backend, const GroupedAttentionShape& s) {
     const auto info = backend.device_info();
-    return s.head_dim > 0 &&
+    return device_prefers_workgroup_attention(info) &&
+           s.head_dim > 0 &&
            s.head_dim <= kFlashAttentionMaxHeadDim &&
            s.key_tokens <= kStagedAttentionMaxSeqLen &&
            info.max_work_group_size >= staged_attention_workgroup_for_keys(s.key_tokens);
@@ -2157,6 +2164,7 @@ bool can_use_grouped_query_decode_wg(const Backend& backend, int64_t query_token
     constexpr std::size_t kLocal = 256;
     if (!grouped_query_decode_wg_enabled() || !causal || query_tokens != 1 || key_tokens <= 0) return false;
     const auto& info = backend.device_info();
+    if (!device_prefers_workgroup_attention(info)) return false;
     if (info.max_work_group_size < kLocal) return false;
     const std::size_t local_bytes = (static_cast<std::size_t>(key_tokens) + kLocal) * sizeof(float);
     return local_bytes <= info.local_mem_size;
@@ -2170,6 +2178,7 @@ bool can_use_grouped_query_prefill_wg(const Backend& backend,
     constexpr std::size_t kLocal = 256;
     if (!grouped_query_prefill_wg_enabled() || query_tokens <= 1 || key_tokens <= 0) return false;
     const auto& info = backend.device_info();
+    if (!device_prefers_workgroup_attention(info)) return false;
     if (info.max_work_group_size < kLocal) return false;
     int64_t attended_keys = key_tokens;
     if (sliding_window > 0 && causal) attended_keys = std::min<int64_t>(attended_keys, sliding_window);

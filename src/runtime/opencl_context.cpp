@@ -43,6 +43,7 @@ DeviceInfo make_info(cl_platform_id platform, cl_device_id device) {
     info.driver_version = get_device_string(device, CL_DRIVER_VERSION);
     info.device_version = get_device_string(device, CL_DEVICE_VERSION);
     info.extensions = get_device_string(device, CL_DEVICE_EXTENSIONS);
+    info.device_type = get_device_value<cl_device_type>(device, CL_DEVICE_TYPE);
     info.global_mem_size = get_device_value<cl_ulong>(device, CL_DEVICE_GLOBAL_MEM_SIZE);
     info.local_mem_size = get_device_value<cl_ulong>(device, CL_DEVICE_LOCAL_MEM_SIZE);
     info.compute_units = get_device_value<cl_uint>(device, CL_DEVICE_MAX_COMPUTE_UNITS);

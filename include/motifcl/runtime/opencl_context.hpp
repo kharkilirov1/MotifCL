@@ -31,6 +31,7 @@ struct DeviceInfo {
     std::string driver_version;
     std::string device_version;
     std::string extensions;
+    cl_device_type device_type = 0;
     cl_ulong global_mem_size = 0;
     cl_ulong local_mem_size = 0;
     cl_uint compute_units = 0;

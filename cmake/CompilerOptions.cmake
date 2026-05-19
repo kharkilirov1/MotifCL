@@ -1,4 +1,7 @@
 function(motifcl_apply_compiler_options target_name)
+    target_compile_definitions(${target_name} PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
+    )
     target_compile_options(${target_name} PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic>
         $<$<BOOL:${MOTIFCL_WARNINGS_AS_ERRORS}>:$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Werror>>
