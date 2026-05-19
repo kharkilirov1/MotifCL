@@ -1914,6 +1914,10 @@ std::vector<std::int32_t> generate(Backend& backend,
                                    const GenerateOptions& options,
                                    const TokenCallback& token_callback) {
     MCL_CHECK(options.max_new_tokens >= 0, "GenerateOptions max_new_tokens must be non-negative");
+    MCL_CHECK(options.kv_cache_dtype == DType::F32 ||
+              options.kv_cache_dtype == DType::Q8_0 ||
+              options.kv_cache_dtype == DType::Q4_0,
+              "GenerateOptions kv_cache_dtype must be f32, q8_0, or q4_0");
     autograd::NoGradGuard no_grad;
     std::vector<std::int32_t> tokens;
     if (options.add_bos) tokens.push_back(options.bos_token_id);
@@ -1928,7 +1932,7 @@ std::vector<std::int32_t> generate(Backend& backend,
     const bool stream_prompt = should_use_streaming_prefill(model, tokens.size(), options);
     Tensor logits;
     if (options.use_paged_kv_cache) {
-        auto caches = model.create_paged_kv_cache(backend, 1, options.kv_page_size);
+        auto caches = model.create_paged_kv_cache(backend, 1, options.kv_page_size, options.kv_cache_dtype);
         logits = prefill_prompt_logits(backend, model, tokens, caches, stream_prompt);
 
         std::mt19937 rng(options.seed);
@@ -1955,7 +1959,7 @@ std::vector<std::int32_t> generate(Backend& backend,
         }
         return tokens;
     } else {
-        auto caches = model.create_kv_cache(backend, 1);
+        auto caches = model.create_kv_cache(backend, 1, options.kv_cache_dtype);
         logits = prefill_prompt_logits(backend, model, tokens, caches, stream_prompt);
 
         std::mt19937 rng(options.seed);
@@ -2012,10 +2016,15 @@ std::vector<std::vector<std::int32_t>> generate_batch(
     const std::vector<std::vector<std::int32_t>>& prompt_tokens,
     const GenerateOptions& options) {
     MCL_CHECK(options.max_new_tokens >= 0, "GenerateOptions max_new_tokens must be non-negative");
+    MCL_CHECK(options.kv_cache_dtype == DType::F32 ||
+              options.kv_cache_dtype == DType::Q8_0 ||
+              options.kv_cache_dtype == DType::Q4_0,
+              "GenerateOptions kv_cache_dtype must be f32, q8_0, or q4_0");
     MCL_CHECK(options.adaptive_prefill_max_tokens >= 0,
               "GenerateOptions adaptive_prefill_max_tokens must be non-negative");
     if (prompt_tokens.empty()) return {};
-    bool stream_prompts = !options.prefill_prompt || options.use_paged_kv_cache;
+    bool stream_prompts = !options.prefill_prompt || options.use_paged_kv_cache ||
+                          options.kv_cache_dtype != DType::F32;
     if (!stream_prompts) {
         for (const auto& prompt : prompt_tokens) {
             const auto prompt_len = prompt.size() + (options.add_bos ? 1u : 0u);
@@ -2060,7 +2069,7 @@ std::vector<std::vector<std::int32_t>> generate_batch(
         }
     }
 
-    auto caches = model.create_kv_cache(backend, batch_size);
+    auto caches = model.create_kv_cache(backend, batch_size, options.kv_cache_dtype);
     auto input = Tensor::from_cpu(backend, {batch_size, max_prompt}, DType::I32, input_ids.data());
     auto mask_tensor = Tensor::from_cpu(backend, {batch_size, model.config.block_size}, DType::I32, mask.data());
     auto logits = last_token_logits_batch_tensor(

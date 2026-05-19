@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -31,7 +32,10 @@ struct Options {
     bool repl = false;
     bool profile = false;
     bool reuse_prompt_cache = false;
-    int ctx_size = 0;
+    bool ignore_eos = false;
+    std::string ctx_size_arg;
+    int native_ctx_size = 0;
+    int resolved_ctx_size = 0;
     int warmup = 1;
     int iters = 3;
     motifcl::nn::GenerateOptions gen;
@@ -71,7 +75,7 @@ void usage() {
         << "  --max-new-tokens N       default: 32\n"
         << "  --warmup N               warm in-process runs before measuring (default: 1)\n"
         << "  --iters N                measured in-process runs (default: 3)\n"
-        << "  --ctx-size N             cap runtime context/cache length below model max context\n"
+        << "  --ctx-size N|auto|max    cap runtime context/cache length below model max context\n"
         << "  --no-prefill             force prompt token-by-token through decode_step\n"
         << "  --force-prefill          force one cached [T] prefill and disable adaptive prefill\n"
         << "  --disable-adaptive-prefill\n"
@@ -80,9 +84,12 @@ void usage() {
         << "                            default: 24; env override: MOTIFCL_ADAPTIVE_STREAMING_PREFILL_MAX_TOKENS\n"
         << "  --paged-kv               use paged KV cache\n"
         << "  --kv-page-size N         paged KV page size (default: 256)\n"
+        << "  --kv-cache-dtype f32|q8|q4\n"
+        << "                            experimental compressed KV cache dtype\n"
         << "  --reuse-prompt-cache     build prompt KV once, then benchmark decode from the cached prefix\n"
         << "  --quant none|q8|q4       quantize dense HF Linear/lm_head weights\n"
         << "  --cpu-sampling           download logits and sample on CPU (default: GPU sampler)\n"
+        << "  --ignore-eos             keep decoding until --max-new-tokens for fair speed runs\n"
         << "  --seed N                 default: 1234\n"
         << "  --repl                   keep model loaded and benchmark each stdin line\n"
         << "  --profile                print OpenCL kernel profile for the final measured run\n"
@@ -98,6 +105,62 @@ std::string lower_ascii(std::string value) {
 
 std::string extension_lower(const std::filesystem::path& path) {
     return lower_ascii(path.extension().string());
+}
+
+int auto_ctx_limit() {
+    const char* raw = std::getenv("MOTIFCL_CTX_AUTO_MAX");
+    if (!raw || !*raw) return 8192;
+    try {
+        const int value = std::stoi(raw);
+        return value > 0 ? value : 8192;
+    } catch (...) {
+        return 8192;
+    }
+}
+
+int resolve_ctx_size_arg(const std::string& arg, int native_ctx_size) {
+    const auto lower_ctx = lower_ascii(arg);
+    if (lower_ctx.empty() || lower_ctx == "auto") {
+        return std::min(native_ctx_size, auto_ctx_limit());
+    }
+    if (lower_ctx == "max" || lower_ctx == "native" || lower_ctx == "model") {
+        return native_ctx_size;
+    }
+    try {
+        const int requested = std::stoi(arg);
+        if (requested <= 0) return native_ctx_size;
+        return std::min(native_ctx_size, requested);
+    } catch (...) {
+        std::cerr << "--ctx-size must be an integer, auto, or max/native/model\n";
+        std::exit(2);
+    }
+}
+
+motifcl::DType parse_kv_cache_dtype(const std::string& value) {
+    const auto lower = lower_ascii(value);
+    if (lower == "f32" || lower == "float" || lower == "none") return motifcl::DType::F32;
+    if (lower == "q8" || lower == "q8_0") return motifcl::DType::Q8_0;
+    if (lower == "q4" || lower == "q4_0") return motifcl::DType::Q4_0;
+    std::cerr << "--kv-cache-dtype must be f32, q8, or q4\n";
+    std::exit(2);
+}
+
+const char* kv_cache_dtype_name(motifcl::DType dtype) {
+    if (dtype == motifcl::DType::Q8_0) return "q8";
+    if (dtype == motifcl::DType::Q4_0) return "q4";
+    return "f32";
+}
+
+void warn_experimental_runtime(const motifcl::nn::GenerateOptions& options) {
+    if (options.use_paged_kv_cache) {
+        std::cerr << "warning: experimental paged KV cache enabled explicitly (--paged-kv, page_size="
+                  << options.kv_page_size << "); keep it behind measured runs and stable fallback\n";
+    }
+    if (options.kv_cache_dtype != motifcl::DType::F32) {
+        std::cerr << "warning: experimental compressed KV cache enabled explicitly (--kv-cache-dtype="
+                  << kv_cache_dtype_name(options.kv_cache_dtype)
+                  << "); keep it behind measured runs and stable fallback\n";
+    }
 }
 
 std::vector<std::string> find_safetensors(const std::filesystem::path& dir) {
@@ -135,7 +198,7 @@ Options parse_args(int argc, char** argv) {
         else if (arg == "--max-new-tokens") opts.gen.max_new_tokens = std::stoi(require_value("--max-new-tokens"));
         else if (arg == "--warmup") opts.warmup = std::stoi(require_value("--warmup"));
         else if (arg == "--iters") opts.iters = std::stoi(require_value("--iters"));
-        else if (arg == "--ctx-size") opts.ctx_size = std::stoi(require_value("--ctx-size"));
+        else if (arg == "--ctx-size") opts.ctx_size_arg = require_value("--ctx-size");
         else if (arg == "--no-prefill") opts.gen.prefill_prompt = false;
         else if (arg == "--force-prefill") {
             opts.gen.prefill_prompt = true;
@@ -147,8 +210,10 @@ Options parse_args(int argc, char** argv) {
         }
         else if (arg == "--paged-kv") opts.gen.use_paged_kv_cache = true;
         else if (arg == "--kv-page-size") opts.gen.kv_page_size = std::stoi(require_value("--kv-page-size"));
+        else if (arg == "--kv-cache-dtype") opts.gen.kv_cache_dtype = parse_kv_cache_dtype(require_value("--kv-cache-dtype"));
         else if (arg == "--reuse-prompt-cache") opts.reuse_prompt_cache = true;
         else if (arg == "--cpu-sampling") opts.gen.gpu_greedy_sampling = false;
+        else if (arg == "--ignore-eos") opts.ignore_eos = true;
         else if (arg == "--seed") opts.gen.seed = static_cast<std::uint32_t>(std::stoul(require_value("--seed")));
         else if (arg == "--repl") opts.repl = true;
         else if (arg == "--profile") opts.profile = true;
@@ -216,7 +281,7 @@ BenchResult run_modern_once(motifcl::Backend& backend,
     const auto prompt_start = Clock::now();
     const bool stream_prompt = motifcl::nn::should_use_streaming_prefill(model, tokens.size(), gen);
     if (gen.use_paged_kv_cache) {
-        auto caches = model.create_paged_kv_cache(backend, 1, gen.kv_page_size);
+        auto caches = model.create_paged_kv_cache(backend, 1, gen.kv_page_size, gen.kv_cache_dtype);
         if (!stream_prompt) {
             auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
                                                    motifcl::DType::I32, tokens.data());
@@ -253,7 +318,7 @@ BenchResult run_modern_once(motifcl::Backend& backend,
                 static_cast<int>(tokens.size() - generated), generated, stream_prompt};
     }
 
-    auto caches = model.create_kv_cache(backend, 1);
+    auto caches = model.create_kv_cache(backend, 1, gen.kv_cache_dtype);
     if (!stream_prompt) {
         auto input = motifcl::Tensor::from_cpu(backend, {1, static_cast<int64_t>(tokens.size())},
                                                motifcl::DType::I32, tokens.data());
@@ -311,7 +376,7 @@ ModernPromptCache build_modern_prompt_cache(motifcl::Backend& backend,
 
     ModernPromptCache cache;
     cache.prompt_tokens = tokens;
-    cache.caches = model.create_kv_cache(backend, 1);
+    cache.caches = model.create_kv_cache(backend, 1, gen.kv_cache_dtype);
     cache.streaming_prefill = motifcl::nn::should_use_streaming_prefill(model, tokens.size(), gen);
 
     const auto start = Clock::now();
@@ -378,6 +443,8 @@ BenchResult run_hybrid_once(motifcl::Backend& backend,
                             const std::string& prompt,
                             motifcl::nn::GenerateOptions gen,
                             std::uint32_t seed_offset) {
+    MCL_CHECK(gen.kv_cache_dtype == motifcl::DType::F32,
+              "compressed KV cache is not implemented for HybridGPTModel bench yet");
     auto tokens = encode_prompt(tokenizer, prompt, gen);
     MCL_CHECK(static_cast<int>(tokens.size()) <= model.config.block_size, "prompt exceeds model block_size");
     gen.seed += seed_offset;
@@ -458,6 +525,9 @@ void run_benchmark_loop(motifcl::Backend& backend,
         : 0.0;
     std::cout << std::fixed << std::setprecision(3)
               << "load_ms=" << load_ms << "\n"
+              << "native_context_length=" << opts.native_ctx_size << "\n"
+              << "ctx_size=" << opts.resolved_ctx_size << "\n"
+              << "kv_cache_dtype=" << kv_cache_dtype_name(opts.gen.kv_cache_dtype) << "\n"
               << "warmup_runs=" << opts.warmup << "\n"
               << "iters=" << opts.iters << "\n"
               << "prefill_mode="
@@ -492,6 +562,7 @@ void run_benchmark_loop(motifcl::Backend& backend,
 
 int main(int argc, char** argv) {
     auto opts = parse_args(argc, argv);
+    warn_experimental_runtime(opts.gen);
 
     if (!opts.model_path.empty()) {
         const std::filesystem::path model_arg(opts.model_path);
@@ -518,9 +589,13 @@ int main(int argc, char** argv) {
     auto cfg = !opts.gguf_path.empty()
         ? motifcl::nn::load_hf_transformer_config_gguf(opts.gguf_path, arch)
         : motifcl::nn::load_hf_transformer_config_json(opts.config_path, arch);
-    if (opts.ctx_size > 0) cfg.transformer.block_size = std::min(cfg.transformer.block_size, opts.ctx_size);
+    opts.native_ctx_size = cfg.transformer.block_size;
+    if (!opts.ctx_size_arg.empty()) {
+        cfg.transformer.block_size = resolve_ctx_size_arg(opts.ctx_size_arg, cfg.transformer.block_size);
+    }
+    opts.resolved_ctx_size = cfg.transformer.block_size;
     opts.gen.bos_token_id = cfg.bos_token_id;
-    opts.gen.eos_token_id = cfg.eos_token_id;
+    opts.gen.eos_token_id = opts.ignore_eos ? -1 : cfg.eos_token_id;
     opts.gen.pad_token_id = cfg.pad_token_id;
 
     const auto spec = motifcl::nn::modern_model_spec_from_config(cfg);

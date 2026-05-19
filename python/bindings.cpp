@@ -286,17 +286,20 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("grouped_query_attention", &motifcl::grouped_query_attention,
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("n_head"), py::arg("n_kv_head"),
           py::arg("causal") = true, py::arg("batch_size") = 1, py::arg("query_len") = 0,
-          py::arg("key_len") = 0, py::arg("query_offset") = 0);
+          py::arg("key_len") = 0, py::arg("query_offset") = 0,
+          py::arg("scale_override") = 0.0f);
     m.def("grouped_query_attention_windowed", &motifcl::grouped_query_attention_windowed,
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("n_head"), py::arg("n_kv_head"),
           py::arg("sliding_window"), py::arg("causal") = true, py::arg("batch_size") = 1,
-          py::arg("query_len") = 0, py::arg("key_len") = 0, py::arg("query_offset") = 0);
+          py::arg("query_len") = 0, py::arg("key_len") = 0, py::arg("query_offset") = 0,
+          py::arg("scale_override") = 0.0f);
     m.def("grouped_query_attention_masked", &motifcl::grouped_query_attention_masked,
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask"),
           py::arg("n_head"), py::arg("n_kv_head"), py::arg("causal") = true,
           py::arg("batch_size") = 1, py::arg("query_len") = 0,
           py::arg("key_len") = 0, py::arg("query_offset") = 0,
-          py::arg("additive_mask") = false);
+          py::arg("additive_mask") = false,
+          py::arg("scale_override") = 0.0f);
     m.def("kv_cache_append", &motifcl::kv_cache_append,
           py::arg("new_k"), py::arg("new_v"), py::arg("cache_k"), py::arg("cache_v"),
           py::arg("batch_size"), py::arg("new_tokens"), py::arg("max_tokens"), py::arg("start_pos"));
@@ -430,25 +433,31 @@ PYBIND11_MODULE(_motifcl, m) {
 
     py::class_<motifcl::nn::KVCache>(m, "KVCache")
         .def(py::init<>())
-        .def(py::init<motifcl::Backend&, int64_t, int64_t, int, int>(),
+        .def(py::init<motifcl::Backend&, int64_t, int64_t, int, int, motifcl::DType>(),
              py::arg("backend"), py::arg("batch_size"), py::arg("max_seq_len"),
-             py::arg("n_kv_head"), py::arg("head_dim"))
+             py::arg("n_kv_head"), py::arg("head_dim"), py::arg("dtype") = motifcl::DType::F32)
         .def_readwrite("k", &motifcl::nn::KVCache::k)
         .def_readwrite("v", &motifcl::nn::KVCache::v)
+        .def_readwrite("k_scales", &motifcl::nn::KVCache::k_scales)
+        .def_readwrite("v_scales", &motifcl::nn::KVCache::v_scales)
         .def_readwrite("batch_size", &motifcl::nn::KVCache::batch_size)
         .def_readwrite("max_seq_len", &motifcl::nn::KVCache::max_seq_len)
         .def_readwrite("length", &motifcl::nn::KVCache::length)
         .def_readwrite("n_kv_head", &motifcl::nn::KVCache::n_kv_head)
         .def_readwrite("head_dim", &motifcl::nn::KVCache::head_dim)
+        .def_readwrite("dtype", &motifcl::nn::KVCache::dtype)
         .def("reset", &motifcl::nn::KVCache::reset);
 
     py::class_<motifcl::nn::PagedKVCache>(m, "PagedKVCache")
         .def(py::init<>())
-        .def(py::init<motifcl::Backend&, int64_t, int64_t, int64_t, int, int>(),
+        .def(py::init<motifcl::Backend&, int64_t, int64_t, int64_t, int, int, motifcl::DType>(),
              py::arg("backend"), py::arg("batch_size"), py::arg("max_seq_len"),
-             py::arg("page_size"), py::arg("n_kv_head"), py::arg("head_dim"))
+             py::arg("page_size"), py::arg("n_kv_head"), py::arg("head_dim"),
+             py::arg("dtype") = motifcl::DType::F32)
         .def_readwrite("k_pages", &motifcl::nn::PagedKVCache::k_pages)
         .def_readwrite("v_pages", &motifcl::nn::PagedKVCache::v_pages)
+        .def_readwrite("k_scales", &motifcl::nn::PagedKVCache::k_scales)
+        .def_readwrite("v_scales", &motifcl::nn::PagedKVCache::v_scales)
         .def_readwrite("page_table", &motifcl::nn::PagedKVCache::page_table)
         .def_readwrite("batch_size", &motifcl::nn::PagedKVCache::batch_size)
         .def_readwrite("max_seq_len", &motifcl::nn::PagedKVCache::max_seq_len)
@@ -458,6 +467,7 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readwrite("tokens_seen", &motifcl::nn::PagedKVCache::tokens_seen)
         .def_readwrite("n_kv_head", &motifcl::nn::PagedKVCache::n_kv_head)
         .def_readwrite("head_dim", &motifcl::nn::PagedKVCache::head_dim)
+        .def_readwrite("dtype", &motifcl::nn::PagedKVCache::dtype)
         .def("capacity", &motifcl::nn::PagedKVCache::capacity)
         .def("reset", &motifcl::nn::PagedKVCache::reset);
 
@@ -695,9 +705,10 @@ PYBIND11_MODULE(_motifcl, m) {
         }, py::arg("token_ids"), py::arg("mask"), py::arg("caches"))
         .def("parameters", &motifcl::nn::ModernGPTModel::parameters, py::return_value_policy::reference)
         .def("create_kv_cache", &motifcl::nn::ModernGPTModel::create_kv_cache,
-             py::arg("backend"), py::arg("batch_size"))
+             py::arg("backend"), py::arg("batch_size"), py::arg("dtype") = motifcl::DType::F32)
         .def("create_paged_kv_cache", &motifcl::nn::ModernGPTModel::create_paged_kv_cache,
-             py::arg("backend"), py::arg("batch_size"), py::arg("page_size") = 256)
+             py::arg("backend"), py::arg("batch_size"), py::arg("page_size") = 256,
+             py::arg("dtype") = motifcl::DType::F32)
         .def("create_delta_state_cache", &motifcl::nn::ModernGPTModel::create_delta_state_cache,
              py::arg("backend"), py::arg("batch_size"), py::arg("state_dim") = 0)
         .def("set_layer_attention_window", &motifcl::nn::ModernGPTModel::set_layer_attention_window,
@@ -826,6 +837,7 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readwrite("gpu_greedy_sampling", &motifcl::nn::GenerateOptions::gpu_greedy_sampling)
         .def_readwrite("use_paged_kv_cache", &motifcl::nn::GenerateOptions::use_paged_kv_cache)
         .def_readwrite("kv_page_size", &motifcl::nn::GenerateOptions::kv_page_size)
+        .def_readwrite("kv_cache_dtype", &motifcl::nn::GenerateOptions::kv_cache_dtype)
         .def_readwrite("seed", &motifcl::nn::GenerateOptions::seed);
 
     py::enum_<motifcl::nn::HFArchitecture>(m, "HFArchitecture")
@@ -953,10 +965,23 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("load_gemma_hf_weights", &motifcl::nn::load_gemma_hf_weights,
           py::arg("backend"), py::arg("model"), py::arg("safetensors_paths"), py::arg("config"),
           py::arg("strict") = false, py::arg("trainable") = false);
-    m.def("generate", &motifcl::nn::generate,
+    m.def("generate",
+          [](motifcl::Backend& backend,
+             motifcl::nn::ModernGPTModel& model,
+             const std::vector<std::int32_t>& prompt_tokens,
+             const motifcl::nn::GenerateOptions& options) {
+              return motifcl::nn::generate(backend, model, prompt_tokens, options);
+          },
           py::arg("backend"), py::arg("model"), py::arg("prompt_tokens"),
           py::arg("options") = motifcl::nn::GenerateOptions{});
-    m.def("generate_text", &motifcl::nn::generate_text,
+    m.def("generate_text",
+          [](motifcl::Backend& backend,
+             motifcl::nn::ModernGPTModel& model,
+             const motifcl::nn::GemmaTokenizer& tokenizer,
+             const std::string& prompt,
+             const motifcl::nn::GenerateOptions& options) {
+              return motifcl::nn::generate_text(backend, model, tokenizer, prompt, options);
+          },
           py::arg("backend"), py::arg("model"), py::arg("tokenizer"), py::arg("prompt"),
           py::arg("options") = motifcl::nn::GenerateOptions{});
     m.def("generate_batch", &motifcl::nn::generate_batch,
@@ -1017,10 +1042,24 @@ PYBIND11_MODULE(_motifcl, m) {
           py::arg("model"));
     m.def("load_hf_tokenizer", &motifcl::nn::load_hf_tokenizer,
           py::arg("model_dir_or_vocab_path"), py::arg("config"));
-    m.def("generate_hf_text", &motifcl::nn::generate_hf_text,
+    m.def("generate_hf_text",
+          [](motifcl::Backend& backend,
+             motifcl::nn::ModernGPTModel& model,
+             const motifcl::nn::HFTokenizer& tokenizer,
+             const std::string& prompt,
+             const motifcl::nn::GenerateOptions& options) {
+              return motifcl::nn::generate_hf_text(backend, model, tokenizer, prompt, options);
+          },
           py::arg("backend"), py::arg("model"), py::arg("tokenizer"), py::arg("prompt"),
           py::arg("options") = motifcl::nn::GenerateOptions{});
-    m.def("generate_hf_hybrid_text", &motifcl::nn::generate_hf_hybrid_text,
+    m.def("generate_hf_hybrid_text",
+          [](motifcl::Backend& backend,
+             motifcl::nn::HybridGPTModel& model,
+             const motifcl::nn::HFTokenizer& tokenizer,
+             const std::string& prompt,
+             const motifcl::nn::GenerateOptions& options) {
+              return motifcl::nn::generate_hf_hybrid_text(backend, model, tokenizer, prompt, options);
+          },
           py::arg("backend"), py::arg("model"), py::arg("tokenizer"), py::arg("prompt"),
           py::arg("options") = motifcl::nn::GenerateOptions{});
     m.def("generate_hf_batch_text", &motifcl::nn::generate_hf_batch_text,

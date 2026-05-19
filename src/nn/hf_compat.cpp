@@ -3001,6 +3001,8 @@ std::string generate_hf_hybrid_text(Backend& backend,
                                     const TextTokenCallback& token_callback) {
     MCL_CHECK(options.max_new_tokens >= 0, "GenerateOptions max_new_tokens must be non-negative");
     MCL_CHECK(options.kv_page_size > 0, "GenerateOptions kv_page_size must be positive");
+    MCL_CHECK(options.kv_cache_dtype == DType::F32,
+              "generate_hf_hybrid_text compressed KV cache is not implemented for HybridGPTModel yet");
     autograd::NoGradGuard no_grad;
     auto tokens = tokenizer.encode(prompt, options.add_bos, false);
     if (tokens.empty() && options.add_bos) tokens.push_back(options.bos_token_id);

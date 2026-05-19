@@ -35,6 +35,7 @@ STDOUT_LOG = STATE_DIR / "server.out.log"
 STDERR_LOG = STATE_DIR / "server.err.log"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 11435
+DEFAULT_AUTO_CTX_SIZE = 8192
 
 
 def configure_stdio() -> None:
@@ -51,6 +52,21 @@ configure_stdio()
 
 def log(message: str) -> None:
     print(f"[motifcl] {message}", flush=True)
+
+
+def experimental_runtime_notes(args: argparse.Namespace) -> list[str]:
+    notes: list[str] = []
+    if getattr(args, "paged_kv", False):
+        notes.append(f"experimental paged KV cache enabled explicitly (--paged-kv, page_size={args.kv_page_size})")
+    kv_dtype = str(getattr(args, "kv_cache_dtype", "f32")).lower()
+    if kv_dtype not in {"", "f32"}:
+        notes.append(f"experimental compressed KV cache enabled explicitly (--kv-cache-dtype={kv_dtype})")
+    return notes
+
+
+def warn_experimental_runtime(args: argparse.Namespace) -> None:
+    for note in experimental_runtime_notes(args):
+        log(f"warning: {note}; keep it behind measured runs and stable fallback")
 
 
 def path_entries(value: str | None = None) -> list[str]:
@@ -205,6 +221,61 @@ def infer_chat_template(model: Path, name: str, requested: str | None) -> str | 
     return None
 
 
+def auto_ctx_limit() -> int:
+    raw = os.environ.get("MOTIFCL_CTX_AUTO_MAX", "").strip()
+    if not raw:
+        return DEFAULT_AUTO_CTX_SIZE
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_AUTO_CTX_SIZE
+    return value if value > 0 else DEFAULT_AUTO_CTX_SIZE
+
+
+def model_context_length(model: Path, runner: Path, arch: str | None = None) -> int | None:
+    cmd = [str(runner), "--model", str(model), "--inspect"]
+    if arch:
+        cmd += ["--arch", arch]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(ROOT),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30.0,
+            check=False,
+        )
+    except Exception:
+        return None
+    match = re.search(r"^\s*context_length:\s*(\d+)\s*$", proc.stdout or "", flags=re.MULTILINE)
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def resolve_ctx_size(value: str | int | None, model: Path, runner: Path, arch: str | None = None) -> int:
+    native = model_context_length(model, runner, arch) or DEFAULT_AUTO_CTX_SIZE
+    raw = str(value if value is not None else "auto").strip().lower()
+    if raw in {"", "auto"}:
+        return max(1, min(native, auto_ctx_limit()))
+    if raw in {"max", "native", "model"}:
+        return native
+    try:
+        requested = int(raw)
+    except ValueError:
+        raise SystemExit("--ctx-size must be an integer, auto, or max/native/model")
+    if requested <= 0:
+        return native
+    return max(1, min(requested, native))
+
+
 def discover_models() -> list[Path]:
     roots = [
         ROOT / "build" / "models",
@@ -326,6 +397,10 @@ def stop_owned_server() -> bool:
 
 
 def server_command(args: argparse.Namespace, model: Path, runner: Path, name: str) -> list[str]:
+    ctx_size = int(getattr(args, "resolved_ctx_size", args.ctx_size))
+    chat_template = getattr(args, "resolved_chat_template", None)
+    if chat_template is None:
+        chat_template = infer_chat_template(model, name, getattr(args, "chat_template", "auto"))
     cmd = [
         sys.executable,
         str(SERVER),
@@ -334,7 +409,7 @@ def server_command(args: argparse.Namespace, model: Path, runner: Path, name: st
         "--runner", str(runner),
         "--host", str(args.host),
         "--port", str(args.port),
-        "--ctx-size", str(args.ctx_size),
+        "--ctx-size", str(ctx_size),
         "--max-new-tokens", str(args.max_new_tokens),
         "--temperature", str(args.temperature),
         "--top-k", str(args.top_k),
@@ -346,7 +421,6 @@ def server_command(args: argparse.Namespace, model: Path, runner: Path, name: st
         cmd += ["--arch", args.arch]
     if args.tokenizer:
         cmd += ["--tokenizer", args.tokenizer]
-    chat_template = infer_chat_template(model, name, getattr(args, "chat_template", "auto"))
     if chat_template:
         cmd += ["--chat-template", chat_template]
     if args.random_init:
@@ -359,6 +433,11 @@ def server_command(args: argparse.Namespace, model: Path, runner: Path, name: st
         cmd.append("--disable-adaptive-prefill")
     if args.cpu_sampling:
         cmd.append("--cpu-sampling")
+    if getattr(args, "paged_kv", False):
+        cmd.append("--paged-kv")
+        cmd += ["--kv-page-size", str(args.kv_page_size)]
+    if getattr(args, "kv_cache_dtype", "f32"):
+        cmd += ["--kv-cache-dtype", str(args.kv_cache_dtype)]
     if args.no_warmup:
         cmd.append("--no-warmup")
     if args.quiet:
@@ -368,24 +447,65 @@ def server_command(args: argparse.Namespace, model: Path, runner: Path, name: st
     return cmd
 
 
+def desired_server_config(args: argparse.Namespace, model: Path, runner: Path, name: str) -> dict[str, Any]:
+    ctx_size = resolve_ctx_size(getattr(args, "ctx_size", "auto"), model, runner, getattr(args, "arch", None))
+    chat_template = infer_chat_template(model, name, getattr(args, "chat_template", "auto"))
+    kv_cache_dtype = str(getattr(args, "kv_cache_dtype", "f32"))
+    args.resolved_ctx_size = ctx_size
+    args.resolved_chat_template = chat_template
+    return {
+        "model": name,
+        "model_path": str(model),
+        "ctx_size": ctx_size,
+        "max_new_tokens": int(args.max_new_tokens),
+        "temperature": float(args.temperature),
+        "top_k": int(args.top_k),
+        "top_p": float(args.top_p),
+        "chat_template": chat_template,
+        "paged_kv": bool(getattr(args, "paged_kv", False)),
+        "kv_page_size": int(getattr(args, "kv_page_size", 256)),
+        "kv_cache_dtype": kv_cache_dtype,
+    }
+
+
+def server_config_matches(current: dict[str, Any], desired: dict[str, Any]) -> tuple[bool, str]:
+    for key, wanted in desired.items():
+        got = current.get(key)
+        if key == "model_path" and got is None:
+            continue
+        if isinstance(wanted, float):
+            try:
+                same = abs(float(got) - wanted) < 1e-6
+            except Exception:
+                same = False
+        else:
+            same = got == wanted
+        if not same:
+            return False, f"{key}: current={got!r} desired={wanted!r}"
+    return True, ""
+
+
 def ensure_up(args: argparse.Namespace, model_value: str | None = None) -> dict[str, Any]:
     model = resolve_model(model_value or getattr(args, "model", None))
     name = args.name or model_name_from_path(model)
+    runner = ensure_runner(args)
+    desired = desired_server_config(args, model, runner, name)
+    warn_experimental_runtime(args)
     current = health(args.host, args.port)
     if current and current.get("ok"):
-        if current.get("model") == name:
+        same, reason = server_config_matches(current, desired)
+        if same:
             log(f"already ready: http://{args.host}:{args.port} model={name}")
-            return {"model": name, "model_path": str(model), "already_running": True}
+            return {"model": name, "model_path": str(model), "ctx_size": desired["ctx_size"], "already_running": True}
         state = read_state()
         if int(state.get("port") or 0) == args.port and state.get("pid"):
-            log(f"restarting launcher-owned server on port {args.port}: {current.get('model')} -> {name}")
+            log(f"restarting launcher-owned server on port {args.port}: {reason}")
             stop_owned_server()
         else:
             raise SystemExit(
-                f"port {args.port} already serves model={current.get('model')}; use --port or stop that server first"
+                f"port {args.port} already serves a different config ({reason}); use --port or stop that server first"
             )
 
-    runner = ensure_runner(args)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     out = STDOUT_LOG.open("ab")
     err = STDERR_LOG.open("ab")
@@ -412,6 +532,12 @@ def ensure_up(args: argparse.Namespace, model_value: str | None = None) -> dict[
         "model": name,
         "model_path": str(model),
         "runner": str(runner),
+        "ctx_size": desired["ctx_size"],
+        "max_new_tokens": desired["max_new_tokens"],
+        "chat_template": desired["chat_template"],
+        "paged_kv": desired["paged_kv"],
+        "kv_page_size": desired["kv_page_size"],
+        "kv_cache_dtype": desired["kv_cache_dtype"],
         "command": cmd,
         "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "stdout_log": str(STDOUT_LOG),
@@ -419,8 +545,9 @@ def ensure_up(args: argparse.Namespace, model_value: str | None = None) -> dict[
     })
     ready = wait_ready(args.host, args.port, args.startup_timeout + max(5.0, args.warmup_tokens * 5.0))
     log(f"ready: http://{args.host}:{args.port} model={ready.get('model')}")
+    log(f"ctx_size={ready.get('ctx_size', desired['ctx_size'])} paged_kv={ready.get('paged_kv', desired['paged_kv'])} kv_cache_dtype={ready.get('kv_cache_dtype', desired['kv_cache_dtype'])}")
     log(f"logs: {STDERR_LOG}")
-    return {"model": name, "model_path": str(model), "pid": proc.pid}
+    return {"model": name, "model_path": str(model), "ctx_size": desired["ctx_size"], "pid": proc.pid}
 
 
 def command_up(args: argparse.Namespace) -> int:
@@ -432,8 +559,10 @@ def command_serve(args: argparse.Namespace) -> int:
     model = resolve_model(args.model)
     name = args.name or model_name_from_path(model)
     runner = ensure_runner(args)
+    desired_server_config(args, model, runner, name)
+    warn_experimental_runtime(args)
     cmd = server_command(args, model, runner, name)
-    log(f"serving foreground: http://{args.host}:{args.port} model={name}")
+    log(f"serving foreground: http://{args.host}:{args.port} model={name} ctx_size={args.resolved_ctx_size}")
     return subprocess.call(cmd, cwd=str(ROOT))
 
 
@@ -447,7 +576,7 @@ def command_status(args: argparse.Namespace) -> int:
     current = health(args.host, args.port)
     state = read_state()
     if current and current.get("ok"):
-        log(f"ready: http://{args.host}:{args.port} model={current.get('model')} worker_alive={current.get('worker_alive')}")
+        log(f"ready: http://{args.host}:{args.port} model={current.get('model')} worker_alive={current.get('worker_alive')} ctx_size={current.get('ctx_size')} paged_kv={current.get('paged_kv')} kv_cache_dtype={current.get('kv_cache_dtype')}")
     else:
         log(f"not responding on http://{args.host}:{args.port}")
     if state:
@@ -464,6 +593,29 @@ def command_list(_: argparse.Namespace) -> int:
         name = model_name_from_path(path)
         rel = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
         print(f"{idx}. {name}\t{rel}")
+    return 0
+
+
+def command_inspect(args: argparse.Namespace) -> int:
+    model = resolve_model(args.model)
+    name = args.name or model_name_from_path(model)
+    runner = ensure_runner(args)
+    native = model_context_length(model, runner, getattr(args, "arch", None))
+    resolved = resolve_ctx_size(getattr(args, "ctx_size", "auto"), model, runner, getattr(args, "arch", None))
+    rel = model.relative_to(ROOT) if model.is_relative_to(ROOT) else model
+    log(f"model={name}")
+    log(f"path={rel}")
+    log(f"native_context_length={native if native is not None else 'unknown'}")
+    log(f"auto_ctx_limit={auto_ctx_limit()}")
+    log(f"resolved_ctx_size={resolved}")
+    if native and resolved < native:
+        log("use `motifcl run --ctx-size max` for the model-native window; keep `auto` for the safer 8K default")
+    if getattr(args, "paged_kv", False):
+        log(f"paged_kv=on kv_page_size={args.kv_page_size}")
+    else:
+        log("paged_kv=off (enable with --paged-kv only for measured long-context runs)")
+    log(f"kv_cache_dtype={args.kv_cache_dtype}")
+    warn_experimental_runtime(args)
     return 0
 
 
@@ -580,7 +732,8 @@ def add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--jobs", type=int, default=min(os.cpu_count() or 4, 8))
     p.add_argument("--no-build", action="store_true")
     p.add_argument("--rebuild", action="store_true")
-    p.add_argument("--ctx-size", type=int, default=512)
+    p.add_argument("--ctx-size", default="auto",
+                   help="context window: auto (default 8K or model max if smaller), max/native/model, or integer")
     p.add_argument("--max-new-tokens", type=int, default=128)
     p.add_argument("--temperature", type=float, default=0.0, help="server default temperature")
     p.add_argument("--top-k", type=int, default=0, help="server default top_k")
@@ -594,6 +747,10 @@ def add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--force-prefill", action="store_true")
     p.add_argument("--disable-adaptive-prefill", action="store_true")
     p.add_argument("--cpu-sampling", action="store_true")
+    p.add_argument("--paged-kv", action="store_true", help="experimental paged KV cache path")
+    p.add_argument("--kv-page-size", type=int, default=256, help="paged KV page size")
+    p.add_argument("--kv-cache-dtype", default="f32", choices=["f32", "q8", "q8_0", "q4", "q4_0"],
+                   help="experimental compressed regular KV cache dtype")
     p.add_argument("--extra-arg", action="append")
     p.add_argument("--startup-timeout", type=float, default=300.0)
     p.add_argument("--warmup-tokens", type=int, default=1)
@@ -642,6 +799,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_cmd = sub.add_parser("list", help="list discovered local GGUF models")
     list_cmd.set_defaults(func=command_list)
+
+    inspect = sub.add_parser("inspect", help="show resolved context settings for a local model")
+    add_common(inspect)
+    inspect.add_argument("model", nargs="?", help="model path or discovered alias; default: newest local GGUF")
+    inspect.set_defaults(func=command_inspect)
 
     install = sub.add_parser("install", help="install `motifcl` into the user PATH")
     install.add_argument("--bin-dir", type=Path, default=default_shim_dir())

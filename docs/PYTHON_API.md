@@ -93,6 +93,8 @@ logits = model.forward(tokens)
 print(logits.shape)
 
 caches = model.create_kv_cache(b, batch_size=1)
+# Experimental compressed KV cache for measurement only:
+# caches = model.create_kv_cache(b, batch_size=1, dtype=mcl.DType.Q8_0)
 step_logits = model.forward_with_cache(mcl.tensor_i32(b, [1, 1], [1]), caches)
 print(step_logits.shape, caches[0].length)
 ```

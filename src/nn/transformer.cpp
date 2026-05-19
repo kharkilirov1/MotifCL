@@ -1109,29 +1109,57 @@ Tensor gated_delta_recurrent(const Tensor& q,
 }
 }
 
-KVCache::KVCache(Backend& backend, int64_t batch, int64_t max_seq, int n_kv, int head_dim_value)
-    : k(Tensor::empty(backend, {batch * max_seq, n_kv * head_dim_value}, DType::F32)),
-      v(Tensor::empty(backend, {batch * max_seq, n_kv * head_dim_value}, DType::F32)),
+KVCache::KVCache(Backend& backend, int64_t batch, int64_t max_seq, int n_kv, int head_dim_value,
+                 DType dtype_value)
+    : k(Tensor::empty(backend, {batch * max_seq, n_kv * head_dim_value}, dtype_value)),
+      v(Tensor::empty(backend, {batch * max_seq, n_kv * head_dim_value}, dtype_value)),
       batch_size(batch),
       max_seq_len(max_seq),
       n_kv_head(n_kv),
-      head_dim(head_dim_value) {
+      head_dim(head_dim_value),
+      dtype(dtype_value) {
     MCL_CHECK(batch > 0 && max_seq > 0 && n_kv > 0 && head_dim_value > 0, "KVCache invalid dimensions");
+    MCL_CHECK(dtype_value == DType::F32 || dtype_value == DType::Q8_0 || dtype_value == DType::Q4_0,
+              "KVCache dtype must be f32, q8_0, or q4_0");
+    const int64_t rows = batch * max_seq;
+    const int64_t channels = static_cast<int64_t>(n_kv) * head_dim_value;
+    if (dtype_value == DType::Q4_0) {
+        MCL_CHECK((channels % 2) == 0, "Q4_0 KVCache requires an even KV channel count");
+    }
+    if (dtype_value == DType::Q8_0 || dtype_value == DType::Q4_0) {
+        k_scales = Tensor::empty(backend, {rows}, DType::F32);
+        v_scales = Tensor::empty(backend, {rows}, DType::F32);
+        k._set_quant_scales(k_scales, 0, 0);
+        v._set_quant_scales(v_scales, 0, 0);
+    }
 }
 
 PagedKVCache::PagedKVCache(Backend& backend, int64_t batch, int64_t max_seq, int64_t page_size_value,
-                           int n_kv, int head_dim_value)
+                           int n_kv, int head_dim_value, DType dtype_value)
     : batch_size(batch),
       max_seq_len(max_seq),
       page_size(page_size_value),
       page_count((max_seq + page_size_value - 1) / page_size_value),
       n_kv_head(n_kv),
-      head_dim(head_dim_value) {
+      head_dim(head_dim_value),
+      dtype(dtype_value) {
     MCL_CHECK(batch > 0 && max_seq > 0 && page_size_value > 0 && n_kv > 0 && head_dim_value > 0,
               "PagedKVCache invalid dimensions");
+    MCL_CHECK(dtype_value == DType::F32 || dtype_value == DType::Q8_0 || dtype_value == DType::Q4_0,
+              "PagedKVCache dtype must be f32, q8_0, or q4_0");
     const int64_t channels = static_cast<int64_t>(n_kv) * head_dim_value;
-    k_pages = Tensor::empty(backend, {batch * page_count * page_size, channels}, DType::F32);
-    v_pages = Tensor::empty(backend, {batch * page_count * page_size, channels}, DType::F32);
+    if (dtype_value == DType::Q4_0) {
+        MCL_CHECK((channels % 2) == 0, "Q4_0 PagedKVCache requires an even KV channel count");
+    }
+    const int64_t rows = batch * page_count * page_size;
+    k_pages = Tensor::empty(backend, {rows, channels}, dtype_value);
+    v_pages = Tensor::empty(backend, {rows, channels}, dtype_value);
+    if (dtype_value == DType::Q8_0 || dtype_value == DType::Q4_0) {
+        k_scales = Tensor::empty(backend, {rows}, DType::F32);
+        v_scales = Tensor::empty(backend, {rows}, DType::F32);
+        k_pages._set_quant_scales(k_scales, 0, 0);
+        v_pages._set_quant_scales(v_scales, 0, 0);
+    }
     std::vector<std::int32_t> table(static_cast<std::size_t>(batch * page_count));
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t p = 0; p < page_count; ++p) {
@@ -2340,6 +2368,7 @@ Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input_replay(
         token_count == 1 &&
         kv_cache.k.valid() &&
         kv_cache.v.valid() &&
+        kv_cache.dtype == DType::F32 &&
         offset >= 0 &&
         offset + seq_len <= kv_cache.max_seq_len &&
         packed_per_layer_input != nullptr &&
@@ -3400,24 +3429,25 @@ std::vector<Parameter*> ModernGPTModel::parameters() {
     return result;
 }
 
-std::vector<KVCache> ModernGPTModel::create_kv_cache(Backend& backend, int64_t batch_size) const {
+std::vector<KVCache> ModernGPTModel::create_kv_cache(Backend& backend, int64_t batch_size, DType dtype) const {
     std::vector<KVCache> caches;
     caches.reserve(static_cast<std::size_t>(config.n_layer));
     for (int i = 0; i < config.n_layer; ++i) {
         const auto& attn = blocks[static_cast<std::size_t>(i)]->attention();
-        caches.emplace_back(backend, batch_size, config.block_size, attn.n_kv_head(), attn.head_dim());
+        caches.emplace_back(backend, batch_size, config.block_size, attn.n_kv_head(), attn.head_dim(), dtype);
     }
     return caches;
 }
 
 std::vector<PagedKVCache> ModernGPTModel::create_paged_kv_cache(Backend& backend,
                                                                 int64_t batch_size,
-                                                                int64_t page_size) const {
+                                                                int64_t page_size,
+                                                                DType dtype) const {
     std::vector<PagedKVCache> caches;
     caches.reserve(static_cast<std::size_t>(config.n_layer));
     for (int i = 0; i < config.n_layer; ++i) {
         const auto& attn = blocks[static_cast<std::size_t>(i)]->attention();
-        caches.emplace_back(backend, batch_size, config.block_size, page_size, attn.n_kv_head(), attn.head_dim());
+        caches.emplace_back(backend, batch_size, config.block_size, page_size, attn.n_kv_head(), attn.head_dim(), dtype);
     }
     return caches;
 }

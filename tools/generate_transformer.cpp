@@ -4,6 +4,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -35,7 +36,7 @@ void usage() {
         << "  --top-k N                default: 0\n"
         << "  --top-p FLOAT            default: 1.0\n"
         << "  --quant none|q8|q4       quantize Linear/lm_head weights for no-grad inference\n"
-        << "  --ctx-size N             cap runtime context/cache length below model max context\n"
+        << "  --ctx-size N|auto|max    cap runtime context/cache length below model max context\n"
         << "  --no-prefill             force prompt token-by-token instead of one cached prefill\n"
         << "  --force-prefill          force one cached [T] prefill and disable adaptive prefill\n"
         << "  --disable-adaptive-prefill\n"
@@ -44,6 +45,8 @@ void usage() {
         << "                            default: 24; env override: MOTIFCL_ADAPTIVE_STREAMING_PREFILL_MAX_TOKENS\n"
         << "  --paged-kv               use paged KV cache for single-prompt generation\n"
         << "  --kv-page-size N         paged KV page size (default: 256)\n"
+        << "  --kv-cache-dtype f32|q8|q4\n"
+        << "                            experimental compressed KV cache dtype\n"
         << "  --repl                   keep model loaded and read one prompt per stdin line\n"
         << "  --jsonl-repl             persistent machine REPL: read JSON/plain lines, supports stream=true deltas\n"
         << "  --completion-only        print only newly generated text, not prompt+completion\n"
@@ -64,6 +67,62 @@ std::string lower_ascii(std::string value) {
 
 std::string extension_lower(const std::filesystem::path& path) {
     return lower_ascii(path.extension().string());
+}
+
+int auto_ctx_limit() {
+    const char* raw = std::getenv("MOTIFCL_CTX_AUTO_MAX");
+    if (!raw || !*raw) return 8192;
+    try {
+        const int value = std::stoi(raw);
+        return value > 0 ? value : 8192;
+    } catch (...) {
+        return 8192;
+    }
+}
+
+int resolve_ctx_size_arg(const std::string& arg, int native_ctx_size) {
+    const auto lower_ctx = lower_ascii(arg);
+    if (lower_ctx.empty() || lower_ctx == "auto") {
+        return std::min(native_ctx_size, auto_ctx_limit());
+    }
+    if (lower_ctx == "max" || lower_ctx == "native" || lower_ctx == "model") {
+        return native_ctx_size;
+    }
+    try {
+        const int requested = std::stoi(arg);
+        if (requested <= 0) return native_ctx_size;
+        return std::min(native_ctx_size, requested);
+    } catch (...) {
+        std::cerr << "--ctx-size must be an integer, auto, or max/native/model\n";
+        std::exit(2);
+    }
+}
+
+motifcl::DType parse_kv_cache_dtype(const std::string& value) {
+    const auto lower = lower_ascii(value);
+    if (lower == "f32" || lower == "float" || lower == "none") return motifcl::DType::F32;
+    if (lower == "q8" || lower == "q8_0") return motifcl::DType::Q8_0;
+    if (lower == "q4" || lower == "q4_0") return motifcl::DType::Q4_0;
+    std::cerr << "--kv-cache-dtype must be f32, q8, or q4\n";
+    std::exit(2);
+}
+
+const char* kv_cache_dtype_name(motifcl::DType dtype) {
+    if (dtype == motifcl::DType::Q8_0) return "q8";
+    if (dtype == motifcl::DType::Q4_0) return "q4";
+    return "f32";
+}
+
+void warn_experimental_runtime(const motifcl::nn::GenerateOptions& options) {
+    if (options.use_paged_kv_cache) {
+        std::cerr << "warning: experimental paged KV cache enabled explicitly (--paged-kv, page_size="
+                  << options.kv_page_size << "); keep it behind measured runs and stable fallback\n";
+    }
+    if (options.kv_cache_dtype != motifcl::DType::F32) {
+        std::cerr << "warning: experimental compressed KV cache enabled explicitly (--kv-cache-dtype="
+                  << kv_cache_dtype_name(options.kv_cache_dtype)
+                  << "); keep it behind measured runs and stable fallback\n";
+    }
 }
 
 std::vector<std::string> find_safetensors(const std::filesystem::path& dir) {
@@ -314,7 +373,7 @@ int main(int argc, char** argv) {
     bool completion_only = false;
     bool dump_rendered_prompt = false;
     bool dump_token_ids = false;
-    int ctx_size = 0;
+    std::string ctx_size_arg;
     motifcl::nn::GenerateOptions options;
 
     for (int i = 1; i < argc; ++i) {
@@ -346,7 +405,7 @@ int main(int argc, char** argv) {
         else if (arg == "--top-k") options.top_k = std::stoi(require_value("--top-k"));
         else if (arg == "--top-p") options.top_p = std::stof(require_value("--top-p"));
         else if (arg == "--quant") quant = require_value("--quant");
-        else if (arg == "--ctx-size") ctx_size = std::stoi(require_value("--ctx-size"));
+        else if (arg == "--ctx-size") ctx_size_arg = require_value("--ctx-size");
         else if (arg == "--no-prefill") options.prefill_prompt = false;
         else if (arg == "--force-prefill") {
             options.prefill_prompt = true;
@@ -358,6 +417,7 @@ int main(int argc, char** argv) {
         }
         else if (arg == "--paged-kv") options.use_paged_kv_cache = true;
         else if (arg == "--kv-page-size") options.kv_page_size = std::stoi(require_value("--kv-page-size"));
+        else if (arg == "--kv-cache-dtype") options.kv_cache_dtype = parse_kv_cache_dtype(require_value("--kv-cache-dtype"));
         else if (arg == "--repl") repl = true;
         else if (arg == "--jsonl-repl") {
             jsonl_repl = true;
@@ -390,6 +450,8 @@ int main(int argc, char** argv) {
         print_architecture_registry();
         return 0;
     }
+
+    warn_experimental_runtime(options);
 
     if (!model_path.empty()) {
         const std::filesystem::path model_arg(model_path);
@@ -440,7 +502,9 @@ int main(int argc, char** argv) {
     auto cfg = !gguf_path.empty()
         ? motifcl::nn::load_hf_transformer_config_gguf(gguf_path, arch)
         : motifcl::nn::load_hf_transformer_config_json(config_path, arch);
-    if (ctx_size > 0) cfg.transformer.block_size = std::min(cfg.transformer.block_size, ctx_size);
+    if (!ctx_size_arg.empty()) {
+        cfg.transformer.block_size = resolve_ctx_size_arg(ctx_size_arg, cfg.transformer.block_size);
+    }
     const auto format = !gguf_path.empty()
         ? motifcl::nn::HFModelFormat::GGUF
         : motifcl::nn::HFModelFormat::HuggingFaceDirectory;

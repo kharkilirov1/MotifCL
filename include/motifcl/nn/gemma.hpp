@@ -184,6 +184,7 @@ struct GenerateOptions {
     bool gpu_greedy_sampling = true;
     bool use_paged_kv_cache = false;
     int kv_page_size = 256;
+    DType kv_cache_dtype = DType::F32;
     std::uint32_t seed = 1234;
 };
 

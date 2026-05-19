@@ -128,6 +128,47 @@ int main() {
         }
 
         {
+            motifcl::autograd::NoGradGuard no_grad;
+            constexpr int KT = 96;
+            constexpr int NH = 2;
+            constexpr int NKH = 1;
+            constexpr int HD = 4;
+            constexpr int QC = NH * HD;
+            constexpr int KVC = NKH * HD;
+            std::vector<float> qh(QC);
+            std::vector<float> kh(KT * KVC);
+            std::vector<float> vh(KT * KVC);
+            for (std::size_t i = 0; i < qh.size(); ++i) {
+                qh[i] = 0.02f * static_cast<float>(static_cast<int>(i % 7) - 3);
+            }
+            for (std::size_t i = 0; i < kh.size(); ++i) {
+                kh[i] = 0.01f * static_cast<float>(static_cast<int>(i % 11) - 5);
+                vh[i] = 0.015f * static_cast<float>(static_cast<int>(i % 13) - 6);
+            }
+            auto q = motifcl::Tensor::from_cpu(backend, {1, QC}, motifcl::DType::F32, qh.data());
+            auto kf = motifcl::Tensor::from_cpu(backend, {KT, KVC}, motifcl::DType::F32, kh.data());
+            auto vf = motifcl::Tensor::from_cpu(backend, {KT, KVC}, motifcl::DType::F32, vh.data());
+            auto ref = motifcl::grouped_query_attention(q, kf, vf, NH, NKH, true, 1, 1, KT, KT - 1)
+                           .to_vector<float>();
+
+            set_test_env("MOTIFCL_FORCE_GQA_DECODE_SCORES", "1");
+            motifcl::nn::KVCache q8_cache(backend, 1, KT, NKH, HD, motifcl::DType::Q8_0);
+            motifcl::kv_cache_append(kf, vf, q8_cache.k, q8_cache.v, 1, KT, KT, 0);
+            auto q8 = motifcl::grouped_query_attention(q, q8_cache.k, q8_cache.v, NH, NKH, true, 1, 1, KT, KT - 1)
+                          .to_vector<float>();
+            require_close_vec(q8, ref, 2e-3f);
+
+            motifcl::nn::KVCache q4_cache(backend, 1, KT, NKH, HD, motifcl::DType::Q4_0);
+            motifcl::kv_cache_append(kf, vf, q4_cache.k, q4_cache.v, 1, KT, KT, 0);
+            auto q4 = motifcl::grouped_query_attention(q, q4_cache.k, q4_cache.v, NH, NKH, true, 1, 1, KT, KT - 1)
+                          .to_vector<float>();
+            for (float value : q4) {
+                if (!std::isfinite(value)) return 1;
+            }
+            set_test_env("MOTIFCL_FORCE_GQA_DECODE_SCORES", "");
+        }
+
+        {
             constexpr int NB = 1;
             constexpr int QT = 3;
             constexpr int KT = 3;
@@ -440,6 +481,17 @@ int main() {
             if (paged.size() != 1 || paged[0].page_size != 3 || paged[0].page_count != 3) return 1;
             if (paged[0].k_pages.shape() != motifcl::Shape({18, 16})) return 1;
             if (paged[0].v_pages.shape() != motifcl::Shape({18, 16})) return 1;
+            if (paged[0].dtype != motifcl::DType::F32) return 1;
+            auto paged_q8 = model.create_paged_kv_cache(backend, 2, 3, motifcl::DType::Q8_0);
+            if (paged_q8[0].dtype != motifcl::DType::Q8_0 ||
+                paged_q8[0].k_pages.dtype() != motifcl::DType::Q8_0 ||
+                !paged_q8[0].k_pages.has_quant_scales() ||
+                paged_q8[0].k_scales.shape() != motifcl::Shape({18})) return 1;
+            auto paged_q4 = model.create_paged_kv_cache(backend, 2, 3, motifcl::DType::Q4_0);
+            if (paged_q4[0].dtype != motifcl::DType::Q4_0 ||
+                paged_q4[0].k_pages.dtype() != motifcl::DType::Q4_0 ||
+                !paged_q4[0].k_pages.has_quant_scales() ||
+                paged_q4[0].k_scales.shape() != motifcl::Shape({18})) return 1;
             auto table = paged[0].page_table.to_vector<std::int32_t>();
             if (table != std::vector<std::int32_t>({0, 1, 2, 3, 4, 5})) return 1;
             paged[0].length = 5;
@@ -541,7 +593,26 @@ int main() {
                 if (last_logits.shape() != motifcl::Shape({1, cfg.vocab_size}) ||
                     full_caches[0].length != 4 || last_caches[0].length != 4) return 1;
                 auto full_last = motifcl::slice_rows(full_cached, 3, 4);
-                require_close_vec(last_logits.to_vector<float>(), full_last.to_vector<float>(), 1e-4f);
+                const auto f32_last = last_logits.to_vector<float>();
+                require_close_vec(f32_last, full_last.to_vector<float>(), 1e-4f);
+
+                auto q8_caches = model.create_kv_cache(backend, 1, motifcl::DType::Q8_0);
+                auto q8_logits = model.forward_with_cache_last_logits(tokens, q8_caches);
+                if (q8_logits.shape() != motifcl::Shape({1, cfg.vocab_size}) ||
+                    q8_caches[0].length != 4 ||
+                    q8_caches[0].k.dtype() != motifcl::DType::Q8_0 ||
+                    !q8_caches[0].k.has_quant_scales()) return 1;
+                require_close_vec(q8_logits.to_vector<float>(), f32_last, 5e-2f);
+
+                auto q4_caches = model.create_kv_cache(backend, 1, motifcl::DType::Q4_0);
+                auto q4_logits = model.forward_with_cache_last_logits(tokens, q4_caches);
+                if (q4_logits.shape() != motifcl::Shape({1, cfg.vocab_size}) ||
+                    q4_caches[0].length != 4 ||
+                    q4_caches[0].k.dtype() != motifcl::DType::Q4_0 ||
+                    !q4_caches[0].k.has_quant_scales()) return 1;
+                for (float value : q4_logits.to_vector<float>()) {
+                    if (!std::isfinite(value)) return 1;
+                }
             }
 
             {
@@ -553,7 +624,26 @@ int main() {
                 if (last_logits.shape() != motifcl::Shape({1, cfg.vocab_size}) ||
                     paged_full[0].tokens_seen != 4 || paged_last[0].tokens_seen != 4) return 1;
                 auto full_last = motifcl::slice_rows(full_cached, 3, 4);
-                require_close_vec(last_logits.to_vector<float>(), full_last.to_vector<float>(), 1e-4f);
+                const auto paged_f32_last = last_logits.to_vector<float>();
+                require_close_vec(paged_f32_last, full_last.to_vector<float>(), 1e-4f);
+
+                auto paged_q8 = model.create_paged_kv_cache(backend, 1, 2, motifcl::DType::Q8_0);
+                auto paged_q8_last = model.forward_with_cache_last_logits(tokens, paged_q8);
+                if (paged_q8_last.shape() != motifcl::Shape({1, cfg.vocab_size}) ||
+                    paged_q8[0].tokens_seen != 4 ||
+                    paged_q8[0].k_pages.dtype() != motifcl::DType::Q8_0 ||
+                    !paged_q8[0].k_pages.has_quant_scales()) return 1;
+                require_close_vec(paged_q8_last.to_vector<float>(), paged_f32_last, 5e-2f);
+
+                auto paged_q4 = model.create_paged_kv_cache(backend, 1, 2, motifcl::DType::Q4_0);
+                auto paged_q4_last = model.forward_with_cache_last_logits(tokens, paged_q4);
+                if (paged_q4_last.shape() != motifcl::Shape({1, cfg.vocab_size}) ||
+                    paged_q4[0].tokens_seen != 4 ||
+                    paged_q4[0].k_pages.dtype() != motifcl::DType::Q4_0 ||
+                    !paged_q4[0].k_pages.has_quant_scales()) return 1;
+                for (float value : paged_q4_last.to_vector<float>()) {
+                    if (!std::isfinite(value)) return 1;
+                }
             }
 
             auto caches = model.create_kv_cache(backend, 1);
@@ -563,6 +653,35 @@ int main() {
             auto step2 = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, ids.data() + 1);
             auto step_logits2 = model.decode_step(step2, caches);
             if (step_logits2.shape() != motifcl::Shape({1, cfg.vocab_size}) || caches[0].length != 2) return 1;
+
+            {
+                motifcl::autograd::NoGradGuard no_grad;
+                const auto f32_step2 = step_logits2.to_vector<float>();
+
+                auto q8_step_caches = model.create_kv_cache(backend, 1, motifcl::DType::Q8_0);
+                auto q8_step_logits1 = model.forward_with_cache(step1, q8_step_caches);
+                if (q8_step_logits1.shape() != motifcl::Shape({1, 1, cfg.vocab_size}) ||
+                    q8_step_caches[0].length != 1 ||
+                    q8_step_caches[0].k.dtype() != motifcl::DType::Q8_0 ||
+                    !q8_step_caches[0].k.has_quant_scales()) return 1;
+                auto q8_step_logits2 = model.decode_step(step2, q8_step_caches);
+                if (q8_step_logits2.shape() != motifcl::Shape({1, cfg.vocab_size}) ||
+                    q8_step_caches[0].length != 2) return 1;
+                require_close_vec(q8_step_logits2.to_vector<float>(), f32_step2, 5e-2f);
+
+                auto q4_step_caches = model.create_kv_cache(backend, 1, motifcl::DType::Q4_0);
+                auto q4_step_logits1 = model.forward_with_cache(step1, q4_step_caches);
+                if (q4_step_logits1.shape() != motifcl::Shape({1, 1, cfg.vocab_size}) ||
+                    q4_step_caches[0].length != 1 ||
+                    q4_step_caches[0].k.dtype() != motifcl::DType::Q4_0 ||
+                    !q4_step_caches[0].k.has_quant_scales()) return 1;
+                auto q4_step_logits2 = model.decode_step(step2, q4_step_caches);
+                if (q4_step_logits2.shape() != motifcl::Shape({1, cfg.vocab_size}) ||
+                    q4_step_caches[0].length != 2) return 1;
+                for (float value : q4_step_logits2.to_vector<float>()) {
+                    if (!std::isfinite(value)) return 1;
+                }
+            }
 
             auto masked_caches = model.create_kv_cache(backend, 1);
             std::vector<std::int32_t> cache_mask_host(static_cast<std::size_t>(cfg.block_size), 0);

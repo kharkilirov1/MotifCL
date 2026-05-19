@@ -94,14 +94,18 @@ class KVCache {
 public:
     Tensor k;
     Tensor v;
+    Tensor k_scales;
+    Tensor v_scales;
     int64_t batch_size = 0;
     int64_t max_seq_len = 0;
     int64_t length = 0;
     int n_kv_head = 0;
     int head_dim = 0;
+    DType dtype = DType::F32;
 
     KVCache() = default;
-    KVCache(Backend& backend, int64_t batch, int64_t max_seq, int n_kv_head, int head_dim);
+    KVCache(Backend& backend, int64_t batch, int64_t max_seq, int n_kv_head, int head_dim,
+            DType dtype = DType::F32);
     void reset() { length = 0; }
 };
 
@@ -109,6 +113,8 @@ class PagedKVCache {
 public:
     Tensor k_pages;
     Tensor v_pages;
+    Tensor k_scales;
+    Tensor v_scales;
     Tensor page_table;
     int64_t batch_size = 0;
     int64_t max_seq_len = 0;
@@ -117,10 +123,11 @@ public:
     int64_t length = 0;
     int n_kv_head = 0;
     int head_dim = 0;
+    DType dtype = DType::F32;
 
     PagedKVCache() = default;
     PagedKVCache(Backend& backend, int64_t batch, int64_t max_seq, int64_t page_size,
-                 int n_kv_head, int head_dim);
+                 int n_kv_head, int head_dim, DType dtype = DType::F32);
     int64_t capacity() const { return page_count * page_size; }
     int64_t tokens_seen = 0;
     void reset() { length = 0; tokens_seen = 0; }
@@ -513,9 +520,11 @@ public:
                                                std::vector<KVCache*>& caches, int64_t cache_length_after,
                                                bool causal = false);
     std::vector<Parameter*> parameters() override;
-    std::vector<KVCache> create_kv_cache(Backend& backend, int64_t batch_size) const;
+    std::vector<KVCache> create_kv_cache(Backend& backend, int64_t batch_size,
+                                         DType dtype = DType::F32) const;
     std::vector<PagedKVCache> create_paged_kv_cache(Backend& backend, int64_t batch_size,
-                                                    int64_t page_size = 256) const;
+                                                    int64_t page_size = 256,
+                                                    DType dtype = DType::F32) const;
     std::vector<DeltaStateCache> create_delta_state_cache(Backend& backend, int64_t batch_size,
                                                           int state_dim = 0) const;
     void set_layer_attention_window(int layer, int window);

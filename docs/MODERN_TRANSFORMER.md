@@ -95,7 +95,7 @@ masked_logits = model.forward_masked(tokens, mask)
 
 ## KV-cache inference
 
-For incremental decode, create one cache per layer through `ModernGPTModel::create_kv_cache` in C++ or `model.create_kv_cache(...)` in Python, or construct `KVCache` directly for standalone attention tests.
+For incremental decode, create one cache per layer through `ModernGPTModel::create_kv_cache` in C++ or `model.create_kv_cache(...)` in Python, or construct `KVCache` directly for standalone attention tests. The regular cache defaults to F32; experimental row-wise compressed KV baselines can be requested with `DType::Q8_0` or `DType::Q4_0` and should stay benchmark-gated.
 
 `ModernSelfAttention::forward_with_cache(x, cache, batch, seq)` appends the new K/V rows and uses `rope(..., token_offset=old_cache_length)` so rotary positions line up with the total decoded length.
 `ModernGPTModel::forward_with_cache(token_ids, caches)` runs the whole model over only the new tokens and updates every layer cache.

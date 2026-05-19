@@ -2324,6 +2324,132 @@ __kernel void kv_cache_append_f32(__global const float* new_k,
     cache_v[dst] = new_v[gid];
 }
 
+__kernel void kv_cache_append_q8_0_rowwise(__global const float* new_k,
+                                           __global const float* new_v,
+                                           __global char* cache_k,
+                                           __global char* cache_v,
+                                           __global float* k_scales,
+                                           __global float* v_scales,
+                                           int batch,
+                                           int new_tokens,
+                                           int max_tokens,
+                                           int kv_channels,
+                                           int start_pos,
+                                           __local float* scratch) {
+    int row = get_group_id(0);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int rows = batch * new_tokens;
+    if (row >= rows) return;
+    int t = row % new_tokens;
+    int b = row / new_tokens;
+    int src_base = row * kv_channels;
+    int dst_row = b * max_tokens + start_pos + t;
+    int dst_base = dst_row * kv_channels;
+
+    __local float* k_red = scratch;
+    __local float* v_red = scratch + local_size;
+    float k_max = 0.0f;
+    float v_max = 0.0f;
+    for (int c = lid; c < kv_channels; c += local_size) {
+        k_max = fmax(k_max, fabs(new_k[src_base + c]));
+        v_max = fmax(v_max, fabs(new_v[src_base + c]));
+    }
+    k_red[lid] = k_max;
+    v_red[lid] = v_max;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            k_red[lid] = fmax(k_red[lid], k_red[lid + stride]);
+            v_red[lid] = fmax(v_red[lid], v_red[lid + stride]);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float k_scale = k_red[0] <= 0.0f ? 1.0f : k_red[0] / 127.0f;
+    float v_scale = v_red[0] <= 0.0f ? 1.0f : v_red[0] / 127.0f;
+    if (lid == 0) {
+        k_scales[dst_row] = k_scale;
+        v_scales[dst_row] = v_scale;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int c = lid; c < kv_channels; c += local_size) {
+        int qk = (int)rint(new_k[src_base + c] / k_scale);
+        int qv = (int)rint(new_v[src_base + c] / v_scale);
+        qk = min(127, max(-127, qk));
+        qv = min(127, max(-127, qv));
+        cache_k[dst_base + c] = (char)qk;
+        cache_v[dst_base + c] = (char)qv;
+    }
+}
+
+__kernel void kv_cache_append_q4_0_rowwise(__global const float* new_k,
+                                           __global const float* new_v,
+                                           __global uchar* cache_k,
+                                           __global uchar* cache_v,
+                                           __global float* k_scales,
+                                           __global float* v_scales,
+                                           int batch,
+                                           int new_tokens,
+                                           int max_tokens,
+                                           int kv_channels,
+                                           int start_pos,
+                                           __local float* scratch) {
+    int row = get_group_id(0);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int rows = batch * new_tokens;
+    if (row >= rows) return;
+    int t = row % new_tokens;
+    int b = row / new_tokens;
+    int src_base = row * kv_channels;
+    int dst_row = b * max_tokens + start_pos + t;
+    int dst_base = dst_row * kv_channels;
+
+    __local float* k_red = scratch;
+    __local float* v_red = scratch + local_size;
+    float k_max = 0.0f;
+    float v_max = 0.0f;
+    for (int c = lid; c < kv_channels; c += local_size) {
+        k_max = fmax(k_max, fabs(new_k[src_base + c]));
+        v_max = fmax(v_max, fabs(new_v[src_base + c]));
+    }
+    k_red[lid] = k_max;
+    v_red[lid] = v_max;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            k_red[lid] = fmax(k_red[lid], k_red[lid + stride]);
+            v_red[lid] = fmax(v_red[lid], v_red[lid + stride]);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float k_scale = k_red[0] <= 0.0f ? 1.0f : k_red[0] / 7.0f;
+    float v_scale = v_red[0] <= 0.0f ? 1.0f : v_red[0] / 7.0f;
+    if (lid == 0) {
+        k_scales[dst_row] = k_scale;
+        v_scales[dst_row] = v_scale;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    int packed_cols = kv_channels >> 1;
+    for (int pc = lid; pc < packed_cols; pc += local_size) {
+        int c0 = pc << 1;
+        int c1 = c0 + 1;
+        int qk0 = (int)rint(new_k[src_base + c0] / k_scale);
+        int qv0 = (int)rint(new_v[src_base + c0] / v_scale);
+        int qk1 = (int)rint(new_k[src_base + c1] / k_scale);
+        int qv1 = (int)rint(new_v[src_base + c1] / v_scale);
+        qk0 = min(7, max(-7, qk0));
+        qv0 = min(7, max(-7, qv0));
+        qk1 = min(7, max(-7, qk1));
+        qv1 = min(7, max(-7, qv1));
+        uchar k_byte = (uchar)((qk0 + 8) | ((qk1 + 8) << 4));
+        uchar v_byte = (uchar)((qv0 + 8) | ((qv1 + 8) << 4));
+        int packed_idx = (dst_base >> 1) + pc;
+        cache_k[packed_idx] = k_byte;
+        cache_v[packed_idx] = v_byte;
+    }
+}
+
 __kernel void kv_cache_append_positions_f32(__global const float* new_k,
                                             __global const float* new_v,
                                             __global const int* positions,
@@ -2371,6 +2497,146 @@ __kernel void paged_kv_cache_append_f32(__global const float* new_k,
     int dst = (phys_page * page_size + slot) * kv_channels + c;
     cache_k_pages[dst] = new_k[gid];
     cache_v_pages[dst] = new_v[gid];
+}
+
+__kernel void paged_kv_cache_append_q8_0_rowwise(__global const float* new_k,
+                                                 __global const float* new_v,
+                                                 __global const int* page_table,
+                                                 __global char* cache_k_pages,
+                                                 __global char* cache_v_pages,
+                                                 __global float* k_scales,
+                                                 __global float* v_scales,
+                                                 int batch,
+                                                 int new_tokens,
+                                                 int page_size,
+                                                 int page_count,
+                                                 int kv_channels,
+                                                 int start_pos,
+                                                 __local float* scratch) {
+    int row = get_group_id(0);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int rows = batch * new_tokens;
+    if (row >= rows) return;
+    int t = row % new_tokens;
+    int b = row / new_tokens;
+    int abs_pos = start_pos + t;
+    int logical_page = (abs_pos / page_size) % page_count;
+    int slot = abs_pos - (abs_pos / page_size) * page_size;
+    int phys_page = page_table[b * page_count + logical_page];
+    if (phys_page < 0) return;
+    int dst_row = phys_page * page_size + slot;
+    int src_base = row * kv_channels;
+    int dst_base = dst_row * kv_channels;
+
+    __local float* k_red = scratch;
+    __local float* v_red = scratch + local_size;
+    float k_max = 0.0f;
+    float v_max = 0.0f;
+    for (int c = lid; c < kv_channels; c += local_size) {
+        k_max = fmax(k_max, fabs(new_k[src_base + c]));
+        v_max = fmax(v_max, fabs(new_v[src_base + c]));
+    }
+    k_red[lid] = k_max;
+    v_red[lid] = v_max;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            k_red[lid] = fmax(k_red[lid], k_red[lid + stride]);
+            v_red[lid] = fmax(v_red[lid], v_red[lid + stride]);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float k_scale = k_red[0] <= 0.0f ? 1.0f : k_red[0] / 127.0f;
+    float v_scale = v_red[0] <= 0.0f ? 1.0f : v_red[0] / 127.0f;
+    if (lid == 0) {
+        k_scales[dst_row] = k_scale;
+        v_scales[dst_row] = v_scale;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int c = lid; c < kv_channels; c += local_size) {
+        int qk = (int)rint(new_k[src_base + c] / k_scale);
+        int qv = (int)rint(new_v[src_base + c] / v_scale);
+        qk = min(127, max(-127, qk));
+        qv = min(127, max(-127, qv));
+        cache_k_pages[dst_base + c] = (char)qk;
+        cache_v_pages[dst_base + c] = (char)qv;
+    }
+}
+
+__kernel void paged_kv_cache_append_q4_0_rowwise(__global const float* new_k,
+                                                 __global const float* new_v,
+                                                 __global const int* page_table,
+                                                 __global uchar* cache_k_pages,
+                                                 __global uchar* cache_v_pages,
+                                                 __global float* k_scales,
+                                                 __global float* v_scales,
+                                                 int batch,
+                                                 int new_tokens,
+                                                 int page_size,
+                                                 int page_count,
+                                                 int kv_channels,
+                                                 int start_pos,
+                                                 __local float* scratch) {
+    int row = get_group_id(0);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int rows = batch * new_tokens;
+    if (row >= rows) return;
+    int t = row % new_tokens;
+    int b = row / new_tokens;
+    int abs_pos = start_pos + t;
+    int logical_page = (abs_pos / page_size) % page_count;
+    int slot = abs_pos - (abs_pos / page_size) * page_size;
+    int phys_page = page_table[b * page_count + logical_page];
+    if (phys_page < 0) return;
+    int dst_row = phys_page * page_size + slot;
+    int src_base = row * kv_channels;
+    int dst_base = dst_row * kv_channels;
+
+    __local float* k_red = scratch;
+    __local float* v_red = scratch + local_size;
+    float k_max = 0.0f;
+    float v_max = 0.0f;
+    for (int c = lid; c < kv_channels; c += local_size) {
+        k_max = fmax(k_max, fabs(new_k[src_base + c]));
+        v_max = fmax(v_max, fabs(new_v[src_base + c]));
+    }
+    k_red[lid] = k_max;
+    v_red[lid] = v_max;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            k_red[lid] = fmax(k_red[lid], k_red[lid + stride]);
+            v_red[lid] = fmax(v_red[lid], v_red[lid + stride]);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float k_scale = k_red[0] <= 0.0f ? 1.0f : k_red[0] / 7.0f;
+    float v_scale = v_red[0] <= 0.0f ? 1.0f : v_red[0] / 7.0f;
+    if (lid == 0) {
+        k_scales[dst_row] = k_scale;
+        v_scales[dst_row] = v_scale;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    int packed_cols = kv_channels >> 1;
+    for (int pc = lid; pc < packed_cols; pc += local_size) {
+        int c0 = pc << 1;
+        int c1 = c0 + 1;
+        int qk0 = (int)rint(new_k[src_base + c0] / k_scale);
+        int qv0 = (int)rint(new_v[src_base + c0] / v_scale);
+        int qk1 = (int)rint(new_k[src_base + c1] / k_scale);
+        int qv1 = (int)rint(new_v[src_base + c1] / v_scale);
+        qk0 = min(7, max(-7, qk0));
+        qv0 = min(7, max(-7, qv0));
+        qk1 = min(7, max(-7, qk1));
+        qv1 = min(7, max(-7, qv1));
+        uchar k_byte = (uchar)((qk0 + 8) | ((qk1 + 8) << 4));
+        uchar v_byte = (uchar)((qv0 + 8) | ((qv1 + 8) << 4));
+        int packed_idx = (dst_base >> 1) + pc;
+        cache_k_pages[packed_idx] = k_byte;
+        cache_v_pages[packed_idx] = v_byte;
+    }
 }
 
 __kernel void paged_grouped_query_attention_f32(__global const float* q,
@@ -2447,6 +2713,462 @@ __kernel void paged_grouped_query_attention_f32(__global const float* q,
         float prob = exp(score * scale - max_score);
         denom += prob;
         acc += prob * v_pages[(phys_page * page_size + slot) * kv_channels + kv_head_offset + d];
+    }
+    out[gid] = denom > 0.0f ? acc / denom : 0.0f;
+}
+
+inline float kv_q8_value(__global const char* x, __global const float* scales, int row, int idx) {
+    return ((float)x[idx]) * scales[row];
+}
+
+inline float kv_q4_value(__global const uchar* x, __global const float* scales, int row, int idx) {
+    uchar packed = x[idx >> 1];
+    uchar code = (idx & 1) ? ((packed >> 4) & 15) : (packed & 15);
+    return ((float)(((int)code) - 8)) * scales[row];
+}
+
+__kernel void paged_grouped_query_attention_q8_0_f32(__global const float* q,
+                                                     __global const char* k_pages,
+                                                     __global const char* v_pages,
+                                                     __global const int* page_table,
+                                                     __global const float* k_scales,
+                                                     __global const float* v_scales,
+                                                     __global float* out,
+                                                     int batch,
+                                                     int query_tokens,
+                                                     int key_tokens,
+                                                     int n_head,
+                                                     int n_kv_head,
+                                                     int head_dim,
+                                                     int causal,
+                                                     int query_abs_start,
+                                                     int key_abs_start,
+                                                     int page_size,
+                                                     int page_count,
+                                                     int sliding_window,
+                                                     float scale) {
+    int gid = get_global_id(0);
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int total = batch * query_tokens * q_channels;
+    if (gid >= total) return;
+    int d = gid % head_dim;
+    int c = gid % q_channels;
+    int query_token = (gid / q_channels) % query_tokens;
+    int b = gid / (query_tokens * q_channels);
+    int q_head = c / head_dim;
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_base = (b * query_tokens + query_token) * q_channels + q_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int abs_query = query_abs_start + query_token;
+    int min_key = key_abs_start;
+    if (sliding_window > 0) {
+        int window_min = abs_query - sliding_window + 1;
+        if (window_min > min_key) min_key = window_min;
+    }
+
+    float max_score = -3.402823466e+38F;
+    int valid = 0;
+    for (int kt = 0; kt < key_tokens; ++kt) {
+        int abs_key = key_abs_start + kt;
+        if (abs_key < min_key) continue;
+        if (causal && abs_key > abs_query) continue;
+        int logical_page = (abs_key / page_size) % page_count;
+        int slot = abs_key - (abs_key / page_size) * page_size;
+        int phys_page = page_table[b * page_count + logical_page];
+        if (phys_page < 0) continue;
+        int row = phys_page * page_size + slot;
+        int k_base = row * kv_channels + kv_head_offset;
+        float score = 0.0f;
+        for (int i = 0; i < head_dim; ++i) {
+            score += q[q_base + i] * kv_q8_value(k_pages, k_scales, row, k_base + i);
+        }
+        max_score = fmax(max_score, score * scale);
+        ++valid;
+    }
+    if (valid == 0) {
+        out[gid] = 0.0f;
+        return;
+    }
+
+    float denom = 0.0f;
+    float acc = 0.0f;
+    for (int kt = 0; kt < key_tokens; ++kt) {
+        int abs_key = key_abs_start + kt;
+        if (abs_key < min_key) continue;
+        if (causal && abs_key > abs_query) continue;
+        int logical_page = (abs_key / page_size) % page_count;
+        int slot = abs_key - (abs_key / page_size) * page_size;
+        int phys_page = page_table[b * page_count + logical_page];
+        if (phys_page < 0) continue;
+        int row = phys_page * page_size + slot;
+        int k_base = row * kv_channels + kv_head_offset;
+        float score = 0.0f;
+        for (int i = 0; i < head_dim; ++i) {
+            score += q[q_base + i] * kv_q8_value(k_pages, k_scales, row, k_base + i);
+        }
+        float prob = exp(score * scale - max_score);
+        denom += prob;
+        acc += prob * kv_q8_value(v_pages, v_scales, row, row * kv_channels + kv_head_offset + d);
+    }
+    out[gid] = denom > 0.0f ? acc / denom : 0.0f;
+}
+
+__kernel void paged_grouped_query_attention_q4_0_f32(__global const float* q,
+                                                     __global const uchar* k_pages,
+                                                     __global const uchar* v_pages,
+                                                     __global const int* page_table,
+                                                     __global const float* k_scales,
+                                                     __global const float* v_scales,
+                                                     __global float* out,
+                                                     int batch,
+                                                     int query_tokens,
+                                                     int key_tokens,
+                                                     int n_head,
+                                                     int n_kv_head,
+                                                     int head_dim,
+                                                     int causal,
+                                                     int query_abs_start,
+                                                     int key_abs_start,
+                                                     int page_size,
+                                                     int page_count,
+                                                     int sliding_window,
+                                                     float scale) {
+    int gid = get_global_id(0);
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int total = batch * query_tokens * q_channels;
+    if (gid >= total) return;
+    int d = gid % head_dim;
+    int c = gid % q_channels;
+    int query_token = (gid / q_channels) % query_tokens;
+    int b = gid / (query_tokens * q_channels);
+    int q_head = c / head_dim;
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_base = (b * query_tokens + query_token) * q_channels + q_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int abs_query = query_abs_start + query_token;
+    int min_key = key_abs_start;
+    if (sliding_window > 0) {
+        int window_min = abs_query - sliding_window + 1;
+        if (window_min > min_key) min_key = window_min;
+    }
+
+    float max_score = -3.402823466e+38F;
+    int valid = 0;
+    for (int kt = 0; kt < key_tokens; ++kt) {
+        int abs_key = key_abs_start + kt;
+        if (abs_key < min_key) continue;
+        if (causal && abs_key > abs_query) continue;
+        int logical_page = (abs_key / page_size) % page_count;
+        int slot = abs_key - (abs_key / page_size) * page_size;
+        int phys_page = page_table[b * page_count + logical_page];
+        if (phys_page < 0) continue;
+        int row = phys_page * page_size + slot;
+        int k_base = row * kv_channels + kv_head_offset;
+        float score = 0.0f;
+        for (int i = 0; i < head_dim; ++i) {
+            score += q[q_base + i] * kv_q4_value(k_pages, k_scales, row, k_base + i);
+        }
+        max_score = fmax(max_score, score * scale);
+        ++valid;
+    }
+    if (valid == 0) {
+        out[gid] = 0.0f;
+        return;
+    }
+
+    float denom = 0.0f;
+    float acc = 0.0f;
+    for (int kt = 0; kt < key_tokens; ++kt) {
+        int abs_key = key_abs_start + kt;
+        if (abs_key < min_key) continue;
+        if (causal && abs_key > abs_query) continue;
+        int logical_page = (abs_key / page_size) % page_count;
+        int slot = abs_key - (abs_key / page_size) * page_size;
+        int phys_page = page_table[b * page_count + logical_page];
+        if (phys_page < 0) continue;
+        int row = phys_page * page_size + slot;
+        int k_base = row * kv_channels + kv_head_offset;
+        float score = 0.0f;
+        for (int i = 0; i < head_dim; ++i) {
+            score += q[q_base + i] * kv_q4_value(k_pages, k_scales, row, k_base + i);
+        }
+        float prob = exp(score * scale - max_score);
+        denom += prob;
+        acc += prob * kv_q4_value(v_pages, v_scales, row, row * kv_channels + kv_head_offset + d);
+    }
+    out[gid] = denom > 0.0f ? acc / denom : 0.0f;
+}
+
+__kernel void paged_grouped_query_attention_prefill_wg_f32(__global const float* q,
+                                                           __global const float* k_pages,
+                                                           __global const float* v_pages,
+                                                           __global const int* page_table,
+                                                           __global float* out,
+                                                           int batch,
+                                                           int query_tokens,
+                                                           int key_tokens,
+                                                           int n_head,
+                                                           int n_kv_head,
+                                                           int head_dim,
+                                                           int causal,
+                                                           int query_abs_start,
+                                                           int key_abs_start,
+                                                           int page_size,
+                                                           int page_count,
+                                                           int sliding_window,
+                                                           float scale,
+                                                           __local float* scratch) {
+    int group_id = get_group_id(0);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int query_token = group_id % query_tokens;
+    int head_batch = group_id / query_tokens;
+    int q_head = head_batch % n_head;
+    int b = head_batch / n_head;
+    if (b >= batch) return;
+
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_base = (b * query_tokens + query_token) * q_channels + q_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int abs_query = query_abs_start + query_token;
+
+    int min_key = key_abs_start;
+    if (sliding_window > 0) {
+        int window_min = abs_query - sliding_window + 1;
+        if (window_min > min_key) min_key = window_min;
+    }
+    int max_key = key_abs_start + key_tokens - 1;
+    if (causal && abs_query < max_key) max_key = abs_query;
+    int valid = max_key >= min_key ? (max_key - min_key + 1) : 0;
+
+    if (valid <= 0) {
+        int out_base_zero = (b * query_tokens + query_token) * q_channels + q_head * head_dim;
+        for (int d = lid; d < head_dim; d += local_size) out[out_base_zero + d] = 0.0f;
+        return;
+    }
+
+    __local float* scores = scratch;
+    __local float* red = scratch + valid;
+
+    for (int idx = lid; idx < valid; idx += local_size) {
+        int abs_key = min_key + idx;
+        int logical_page = (abs_key / page_size) % page_count;
+        int slot = abs_key - (abs_key / page_size) * page_size;
+        int phys_page = page_table[b * page_count + logical_page];
+        float acc_dot = 0.0f;
+        if (phys_page >= 0) {
+            int k_base = (phys_page * page_size + slot) * kv_channels + kv_head_offset;
+            int i = 0;
+            for (; i + 3 < head_dim; i += 4) {
+                float4 qv = vload4(0, q + q_base + i);
+                float4 kv = vload4(0, k_pages + k_base + i);
+                acc_dot += dot(qv, kv);
+            }
+            for (; i < head_dim; ++i) acc_dot += q[q_base + i] * k_pages[k_base + i];
+            scores[idx] = acc_dot * scale;
+        } else {
+            scores[idx] = -3.402823466e+38F;
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    float local_max = -3.402823466e+38F;
+    for (int idx = lid; idx < valid; idx += local_size) {
+        local_max = fmax(local_max, scores[idx]);
+    }
+    red[lid] = local_max;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) red[lid] = fmax(red[lid], red[lid + stride]);
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float max_score = red[0];
+
+    float local_denom = 0.0f;
+    for (int idx = lid; idx < valid; idx += local_size) {
+        float p = 0.0f;
+        if (scores[idx] > -3.0e+38F) p = exp(scores[idx] - max_score);
+        scores[idx] = p;
+        local_denom += p;
+    }
+    red[lid] = local_denom;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) red[lid] += red[lid + stride];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float denom = red[0];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    int out_base = (b * query_tokens + query_token) * q_channels + q_head * head_dim;
+    for (int d = lid; d < head_dim; d += local_size) {
+        float acc = 0.0f;
+        if (denom > 0.0f) {
+            for (int idx = 0; idx < valid; ++idx) {
+                float p = scores[idx];
+                if (p != 0.0f) {
+                    int abs_key = min_key + idx;
+                    int logical_page = (abs_key / page_size) % page_count;
+                    int slot = abs_key - (abs_key / page_size) * page_size;
+                    int phys_page = page_table[b * page_count + logical_page];
+                    if (phys_page >= 0) {
+                        acc += p * v_pages[(phys_page * page_size + slot) * kv_channels + kv_head_offset + d];
+                    }
+                }
+            }
+            acc /= denom;
+        }
+        out[out_base + d] = acc;
+    }
+}
+
+__kernel void grouped_query_attention_q8_0_f32(__global const float* q,
+                                               __global const char* k,
+                                               __global const char* v,
+                                               __global const float* k_scales,
+                                               __global const float* v_scales,
+                                               __global float* out,
+                                               int batch,
+                                               int query_tokens,
+                                               int key_tokens,
+                                               int n_head,
+                                               int n_kv_head,
+                                               int head_dim,
+                                               int causal,
+                                               int query_offset,
+                                               int key_stride,
+                                               int sliding_window,
+                                               float scale) {
+    int gid = get_global_id(0);
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int total = batch * query_tokens * q_channels;
+    if (gid >= total) return;
+    int d = gid % head_dim;
+    int c = gid % q_channels;
+    int query_token = (gid / q_channels) % query_tokens;
+    int b = gid / (query_tokens * q_channels);
+    int q_head = c / head_dim;
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_base = (b * query_tokens + query_token) * q_channels + q_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int abs_query = query_offset + query_token;
+    int min_key = sliding_window > 0 ? abs_query - sliding_window + 1 : 0;
+    if (min_key < 0) min_key = 0;
+
+    float max_score = -3.402823466e+38F;
+    int valid = 0;
+    for (int kt = 0; kt < key_tokens; ++kt) {
+        if (causal && kt > abs_query) continue;
+        if (kt < min_key) continue;
+        int row = b * key_stride + kt;
+        int k_base = row * kv_channels + kv_head_offset;
+        float score = 0.0f;
+        for (int i = 0; i < head_dim; ++i) {
+            score += q[q_base + i] * kv_q8_value(k, k_scales, row, k_base + i);
+        }
+        max_score = fmax(max_score, score * scale);
+        ++valid;
+    }
+    if (valid == 0) {
+        out[gid] = 0.0f;
+        return;
+    }
+
+    float denom = 0.0f;
+    float acc = 0.0f;
+    for (int kt = 0; kt < key_tokens; ++kt) {
+        if (causal && kt > abs_query) continue;
+        if (kt < min_key) continue;
+        int row = b * key_stride + kt;
+        int k_base = row * kv_channels + kv_head_offset;
+        float score = 0.0f;
+        for (int i = 0; i < head_dim; ++i) {
+            score += q[q_base + i] * kv_q8_value(k, k_scales, row, k_base + i);
+        }
+        float prob = exp(score * scale - max_score);
+        denom += prob;
+        acc += prob * kv_q8_value(v, v_scales, row, row * kv_channels + kv_head_offset + d);
+    }
+    out[gid] = denom > 0.0f ? acc / denom : 0.0f;
+}
+
+__kernel void grouped_query_attention_q4_0_f32(__global const float* q,
+                                               __global const uchar* k,
+                                               __global const uchar* v,
+                                               __global const float* k_scales,
+                                               __global const float* v_scales,
+                                               __global float* out,
+                                               int batch,
+                                               int query_tokens,
+                                               int key_tokens,
+                                               int n_head,
+                                               int n_kv_head,
+                                               int head_dim,
+                                               int causal,
+                                               int query_offset,
+                                               int key_stride,
+                                               int sliding_window,
+                                               float scale) {
+    int gid = get_global_id(0);
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int total = batch * query_tokens * q_channels;
+    if (gid >= total) return;
+    int d = gid % head_dim;
+    int c = gid % q_channels;
+    int query_token = (gid / q_channels) % query_tokens;
+    int b = gid / (query_tokens * q_channels);
+    int q_head = c / head_dim;
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_base = (b * query_tokens + query_token) * q_channels + q_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int abs_query = query_offset + query_token;
+    int min_key = sliding_window > 0 ? abs_query - sliding_window + 1 : 0;
+    if (min_key < 0) min_key = 0;
+
+    float max_score = -3.402823466e+38F;
+    int valid = 0;
+    for (int kt = 0; kt < key_tokens; ++kt) {
+        if (causal && kt > abs_query) continue;
+        if (kt < min_key) continue;
+        int row = b * key_stride + kt;
+        int k_base = row * kv_channels + kv_head_offset;
+        float score = 0.0f;
+        for (int i = 0; i < head_dim; ++i) {
+            score += q[q_base + i] * kv_q4_value(k, k_scales, row, k_base + i);
+        }
+        max_score = fmax(max_score, score * scale);
+        ++valid;
+    }
+    if (valid == 0) {
+        out[gid] = 0.0f;
+        return;
+    }
+
+    float denom = 0.0f;
+    float acc = 0.0f;
+    for (int kt = 0; kt < key_tokens; ++kt) {
+        if (causal && kt > abs_query) continue;
+        if (kt < min_key) continue;
+        int row = b * key_stride + kt;
+        int k_base = row * kv_channels + kv_head_offset;
+        float score = 0.0f;
+        for (int i = 0; i < head_dim; ++i) {
+            score += q[q_base + i] * kv_q4_value(k, k_scales, row, k_base + i);
+        }
+        float prob = exp(score * scale - max_score);
+        denom += prob;
+        acc += prob * kv_q4_value(v, v_scales, row, row * kv_channels + kv_head_offset + d);
     }
     out[gid] = denom > 0.0f ? acc / denom : 0.0f;
 }
@@ -2769,6 +3491,410 @@ __kernel void grouped_query_attention_decode_f32(__global const float* q,
         }
         out[out_base + d] = acc;
     }
+}
+
+__kernel void grouped_query_attention_decode_q8_0_f32(__global const float* q,
+                                                      __global const char* k,
+                                                      __global const char* v,
+                                                      __global const float* k_scales,
+                                                      __global const float* v_scales,
+                                                      __global float* out,
+                                                      int batch,
+                                                      int key_tokens,
+                                                      int key_stride,
+                                                      int n_head,
+                                                      int n_kv_head,
+                                                      int head_dim,
+                                                      int query_offset,
+                                                      int sliding_window,
+                                                      float scale,
+                                                      __local float* scratch) {
+    int group_id = get_group_id(0);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int q_head = group_id % n_head;
+    int b = group_id / n_head;
+    if (b >= batch) return;
+
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_base = b * q_channels + q_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int abs_query = query_offset;
+    int min_key = sliding_window > 0 ? abs_query - sliding_window + 1 : 0;
+    if (min_key < 0) min_key = 0;
+    int max_key = abs_query < key_tokens ? abs_query : (key_tokens - 1);
+
+    __local float* scores = scratch;
+    __local float* red = scratch + key_tokens;
+
+    for (int kt = lid; kt < key_tokens; kt += local_size) {
+        float score = -3.402823466e+38F;
+        if (kt >= min_key && kt <= max_key) {
+            int row = b * key_stride + kt;
+            int k_base = row * kv_channels + kv_head_offset;
+            float acc_dot = 0.0f;
+            int i = 0;
+            for (; i + 3 < head_dim; i += 4) {
+                float4 qv = vload4(0, q + q_base + i);
+                float4 kv = (float4)(
+                    kv_q8_value(k, k_scales, row, k_base + i + 0),
+                    kv_q8_value(k, k_scales, row, k_base + i + 1),
+                    kv_q8_value(k, k_scales, row, k_base + i + 2),
+                    kv_q8_value(k, k_scales, row, k_base + i + 3));
+                acc_dot += dot(qv, kv);
+            }
+            for (; i < head_dim; ++i) acc_dot += q[q_base + i] * kv_q8_value(k, k_scales, row, k_base + i);
+            score = acc_dot * scale;
+        }
+        scores[kt] = score;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    float local_max = -3.402823466e+38F;
+    for (int kt = lid; kt < key_tokens; kt += local_size) {
+        local_max = fmax(local_max, scores[kt]);
+    }
+    red[lid] = local_max;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) red[lid] = fmax(red[lid], red[lid + stride]);
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    const float max_score = red[0];
+
+    float local_denom = 0.0f;
+    for (int kt = lid; kt < key_tokens; kt += local_size) {
+        float p = 0.0f;
+        if (scores[kt] > -3.0e+38F) p = exp(scores[kt] - max_score);
+        scores[kt] = p;
+        local_denom += p;
+    }
+    red[lid] = local_denom;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) red[lid] += red[lid + stride];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    const float denom = red[0];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    int out_base = b * q_channels + q_head * head_dim;
+    for (int d = lid; d < head_dim; d += local_size) {
+        float acc = 0.0f;
+        if (denom > 0.0f) {
+            for (int kt = min_key; kt <= max_key; ++kt) {
+                const float p = scores[kt];
+                if (p != 0.0f) {
+                    int row = b * key_stride + kt;
+                    acc += p * kv_q8_value(v, v_scales, row, row * kv_channels + kv_head_offset + d);
+                }
+            }
+            acc /= denom;
+        }
+        out[out_base + d] = acc;
+    }
+}
+
+__kernel void grouped_query_attention_decode_q4_0_f32(__global const float* q,
+                                                      __global const uchar* k,
+                                                      __global const uchar* v,
+                                                      __global const float* k_scales,
+                                                      __global const float* v_scales,
+                                                      __global float* out,
+                                                      int batch,
+                                                      int key_tokens,
+                                                      int key_stride,
+                                                      int n_head,
+                                                      int n_kv_head,
+                                                      int head_dim,
+                                                      int query_offset,
+                                                      int sliding_window,
+                                                      float scale,
+                                                      __local float* scratch) {
+    int group_id = get_group_id(0);
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
+    int q_head = group_id % n_head;
+    int b = group_id / n_head;
+    if (b >= batch) return;
+
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_base = b * q_channels + q_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int abs_query = query_offset;
+    int min_key = sliding_window > 0 ? abs_query - sliding_window + 1 : 0;
+    if (min_key < 0) min_key = 0;
+    int max_key = abs_query < key_tokens ? abs_query : (key_tokens - 1);
+
+    __local float* scores = scratch;
+    __local float* red = scratch + key_tokens;
+
+    for (int kt = lid; kt < key_tokens; kt += local_size) {
+        float score = -3.402823466e+38F;
+        if (kt >= min_key && kt <= max_key) {
+            int row = b * key_stride + kt;
+            int k_base = row * kv_channels + kv_head_offset;
+            float acc_dot = 0.0f;
+            int i = 0;
+            for (; i + 3 < head_dim; i += 4) {
+                float4 qv = vload4(0, q + q_base + i);
+                float4 kv = (float4)(
+                    kv_q4_value(k, k_scales, row, k_base + i + 0),
+                    kv_q4_value(k, k_scales, row, k_base + i + 1),
+                    kv_q4_value(k, k_scales, row, k_base + i + 2),
+                    kv_q4_value(k, k_scales, row, k_base + i + 3));
+                acc_dot += dot(qv, kv);
+            }
+            for (; i < head_dim; ++i) acc_dot += q[q_base + i] * kv_q4_value(k, k_scales, row, k_base + i);
+            score = acc_dot * scale;
+        }
+        scores[kt] = score;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    float local_max = -3.402823466e+38F;
+    for (int kt = lid; kt < key_tokens; kt += local_size) {
+        local_max = fmax(local_max, scores[kt]);
+    }
+    red[lid] = local_max;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) red[lid] = fmax(red[lid], red[lid + stride]);
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    const float max_score = red[0];
+
+    float local_denom = 0.0f;
+    for (int kt = lid; kt < key_tokens; kt += local_size) {
+        float p = 0.0f;
+        if (scores[kt] > -3.0e+38F) p = exp(scores[kt] - max_score);
+        scores[kt] = p;
+        local_denom += p;
+    }
+    red[lid] = local_denom;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride) red[lid] += red[lid + stride];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    const float denom = red[0];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    int out_base = b * q_channels + q_head * head_dim;
+    for (int d = lid; d < head_dim; d += local_size) {
+        float acc = 0.0f;
+        if (denom > 0.0f) {
+            for (int kt = min_key; kt <= max_key; ++kt) {
+                const float p = scores[kt];
+                if (p != 0.0f) {
+                    int row = b * key_stride + kt;
+                    acc += p * kv_q4_value(v, v_scales, row, row * kv_channels + kv_head_offset + d);
+                }
+            }
+            acc /= denom;
+        }
+        out[out_base + d] = acc;
+    }
+}
+
+__kernel void grouped_query_attention_decode_scores_q8_0_f32(__global const float* q,
+                                                             __global const char* k,
+                                                             __global const float* k_scales,
+                                                             __global float* scores,
+                                                             int batch,
+                                                             int key_tokens,
+                                                             int key_stride,
+                                                             int n_head,
+                                                             int n_kv_head,
+                                                             int head_dim,
+                                                             int query_offset,
+                                                             int sliding_window,
+                                                             float scale) {
+    int gid = get_global_id(0);
+    int total = batch * n_head * key_tokens;
+    if (gid >= total) return;
+    int kt = gid % key_tokens;
+    int q_head = (gid / key_tokens) % n_head;
+    int b = gid / (key_tokens * n_head);
+
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int q_base = b * q_channels + q_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int abs_query = query_offset;
+    int min_key = sliding_window > 0 ? abs_query - sliding_window + 1 : 0;
+    if (min_key < 0) min_key = 0;
+    int max_key = abs_query < key_tokens ? abs_query : (key_tokens - 1);
+
+    float score = -3.402823466e+38F;
+    if (kt >= min_key && kt <= max_key) {
+        int row = b * key_stride + kt;
+        int k_base = row * kv_channels + kv_head_offset;
+        float acc = 0.0f;
+        int i = 0;
+        for (; i + 3 < head_dim; i += 4) {
+            float4 qv = vload4(0, q + q_base + i);
+            float4 kv = (float4)(
+                kv_q8_value(k, k_scales, row, k_base + i + 0),
+                kv_q8_value(k, k_scales, row, k_base + i + 1),
+                kv_q8_value(k, k_scales, row, k_base + i + 2),
+                kv_q8_value(k, k_scales, row, k_base + i + 3));
+            acc += dot(qv, kv);
+        }
+        for (; i < head_dim; ++i) acc += q[q_base + i] * kv_q8_value(k, k_scales, row, k_base + i);
+        score = acc * scale;
+    }
+    scores[(b * n_head + q_head) * key_tokens + kt] = score;
+}
+
+__kernel void grouped_query_attention_decode_apply_q8_0_f32(__global const float* scores,
+                                                            __global const char* v,
+                                                            __global const float* v_scales,
+                                                            __global float* out,
+                                                            int batch,
+                                                            int key_tokens,
+                                                            int key_stride,
+                                                            int n_head,
+                                                            int n_kv_head,
+                                                            int head_dim,
+                                                            int query_offset,
+                                                            int sliding_window) {
+    int gid = get_global_id(0);
+    int total = batch * n_head * head_dim;
+    if (gid >= total) return;
+    int d = gid % head_dim;
+    int q_head = (gid / head_dim) % n_head;
+    int b = gid / (head_dim * n_head);
+
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int score_base = (b * n_head + q_head) * key_tokens;
+    int abs_query = query_offset;
+    int min_key = sliding_window > 0 ? abs_query - sliding_window + 1 : 0;
+    if (min_key < 0) min_key = 0;
+    int max_key = abs_query < key_tokens ? abs_query : (key_tokens - 1);
+
+    float max_score = -3.402823466e+38F;
+    for (int kt = min_key; kt <= max_key; ++kt) {
+        max_score = fmax(max_score, scores[score_base + kt]);
+    }
+    float denom = 0.0f;
+    float acc = 0.0f;
+    for (int kt = min_key; kt <= max_key; ++kt) {
+        float p = exp(scores[score_base + kt] - max_score);
+        denom += p;
+        int row = b * key_stride + kt;
+        acc += p * kv_q8_value(v, v_scales, row, row * kv_channels + kv_head_offset + d);
+    }
+    out[b * q_channels + q_head * head_dim + d] = denom > 0.0f ? acc / denom : 0.0f;
+}
+
+__kernel void grouped_query_attention_decode_scores_q4_0_f32(__global const float* q,
+                                                             __global const uchar* k,
+                                                             __global const float* k_scales,
+                                                             __global float* scores,
+                                                             int batch,
+                                                             int key_tokens,
+                                                             int key_stride,
+                                                             int n_head,
+                                                             int n_kv_head,
+                                                             int head_dim,
+                                                             int query_offset,
+                                                             int sliding_window,
+                                                             float scale) {
+    int gid = get_global_id(0);
+    int total = batch * n_head * key_tokens;
+    if (gid >= total) return;
+    int kt = gid % key_tokens;
+    int q_head = (gid / key_tokens) % n_head;
+    int b = gid / (key_tokens * n_head);
+
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int q_base = b * q_channels + q_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int abs_query = query_offset;
+    int min_key = sliding_window > 0 ? abs_query - sliding_window + 1 : 0;
+    if (min_key < 0) min_key = 0;
+    int max_key = abs_query < key_tokens ? abs_query : (key_tokens - 1);
+
+    float score = -3.402823466e+38F;
+    if (kt >= min_key && kt <= max_key) {
+        int row = b * key_stride + kt;
+        int k_base = row * kv_channels + kv_head_offset;
+        float acc = 0.0f;
+        int i = 0;
+        for (; i + 3 < head_dim; i += 4) {
+            float4 qv = vload4(0, q + q_base + i);
+            float4 kv = (float4)(
+                kv_q4_value(k, k_scales, row, k_base + i + 0),
+                kv_q4_value(k, k_scales, row, k_base + i + 1),
+                kv_q4_value(k, k_scales, row, k_base + i + 2),
+                kv_q4_value(k, k_scales, row, k_base + i + 3));
+            acc += dot(qv, kv);
+        }
+        for (; i < head_dim; ++i) acc += q[q_base + i] * kv_q4_value(k, k_scales, row, k_base + i);
+        score = acc * scale;
+    }
+    scores[(b * n_head + q_head) * key_tokens + kt] = score;
+}
+
+__kernel void grouped_query_attention_decode_apply_q4_0_f32(__global const float* scores,
+                                                            __global const uchar* v,
+                                                            __global const float* v_scales,
+                                                            __global float* out,
+                                                            int batch,
+                                                            int key_tokens,
+                                                            int key_stride,
+                                                            int n_head,
+                                                            int n_kv_head,
+                                                            int head_dim,
+                                                            int query_offset,
+                                                            int sliding_window) {
+    int gid = get_global_id(0);
+    int total = batch * n_head * head_dim;
+    if (gid >= total) return;
+    int d = gid % head_dim;
+    int q_head = (gid / head_dim) % n_head;
+    int b = gid / (head_dim * n_head);
+
+    int group = n_head / n_kv_head;
+    int kv_head = q_head / group;
+    int q_channels = n_head * head_dim;
+    int kv_channels = n_kv_head * head_dim;
+    int kv_head_offset = kv_head * head_dim;
+    int score_base = (b * n_head + q_head) * key_tokens;
+    int abs_query = query_offset;
+    int min_key = sliding_window > 0 ? abs_query - sliding_window + 1 : 0;
+    if (min_key < 0) min_key = 0;
+    int max_key = abs_query < key_tokens ? abs_query : (key_tokens - 1);
+
+    float max_score = -3.402823466e+38F;
+    for (int kt = min_key; kt <= max_key; ++kt) {
+        max_score = fmax(max_score, scores[score_base + kt]);
+    }
+    float denom = 0.0f;
+    float acc = 0.0f;
+    for (int kt = min_key; kt <= max_key; ++kt) {
+        float p = exp(scores[score_base + kt] - max_score);
+        denom += p;
+        int row = b * key_stride + kt;
+        acc += p * kv_q4_value(v, v_scales, row, row * kv_channels + kv_head_offset + d);
+    }
+    out[b * q_channels + q_head * head_dim + d] = denom > 0.0f ? acc / denom : 0.0f;
 }
 
 __kernel void grouped_query_attention_backward_f32(__global const float* q,

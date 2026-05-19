@@ -53,6 +53,21 @@ def _json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _experimental_runtime_notes(args: argparse.Namespace) -> list[str]:
+    notes: list[str] = []
+    if getattr(args, "paged_kv", False):
+        notes.append(f"experimental paged KV cache enabled explicitly (--paged-kv, page_size={args.kv_page_size})")
+    kv_dtype = str(getattr(args, "kv_cache_dtype", "f32")).lower()
+    if kv_dtype not in {"", "f32"}:
+        notes.append(f"experimental compressed KV cache enabled explicitly (--kv-cache-dtype={kv_dtype})")
+    return notes
+
+
+def _warn_experimental_runtime(args: argparse.Namespace) -> None:
+    for note in _experimental_runtime_notes(args):
+        print(f"warning: {note}; keep it behind measured runs and stable fallback", file=sys.stderr)
+
+
 def _ollama_options(body: dict[str, Any]) -> dict[str, Any]:
     opts = body.get("options") if isinstance(body.get("options"), dict) else {}
     out: dict[str, Any] = {}
@@ -145,6 +160,11 @@ class MotifCLWorker:
             cmd.append("--disable-adaptive-prefill")
         if self.args.cpu_sampling:
             cmd.append("--cpu-sampling")
+        if self.args.paged_kv:
+            cmd.append("--paged-kv")
+            cmd += ["--kv-page-size", str(self.args.kv_page_size)]
+        if self.args.kv_cache_dtype:
+            cmd += ["--kv-cache-dtype", str(self.args.kv_cache_dtype)]
         for extra in self.args.extra_arg or []:
             cmd.append(extra)
         return cmd
@@ -277,6 +297,15 @@ class MotifCLHandler(BaseHTTPRequestHandler):
                 "model": self.model_name,
                 "worker_alive": self.worker.alive(),
                 "chat_template": self.worker.args.chat_template or None,
+                "model_path": str(self.worker.args.model),
+                "ctx_size": self.worker.args.ctx_size,
+                "max_new_tokens": self.worker.args.max_new_tokens,
+                "temperature": self.worker.args.temperature,
+                "top_k": self.worker.args.top_k,
+                "top_p": self.worker.args.top_p,
+                "paged_kv": self.worker.args.paged_kv,
+                "kv_page_size": self.worker.args.kv_page_size,
+                "kv_cache_dtype": self.worker.args.kv_cache_dtype,
             })
             return
         if self.path == "/api/version":
@@ -470,7 +499,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--runner", type=Path, default=_default_runner())
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=11435)
-    parser.add_argument("--ctx-size", type=int, default=512)
+    parser.add_argument("--ctx-size", type=int, default=8192)
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=0)
@@ -483,6 +512,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--force-prefill", action="store_true")
     parser.add_argument("--disable-adaptive-prefill", action="store_true")
     parser.add_argument("--cpu-sampling", action="store_true")
+    parser.add_argument("--paged-kv", action="store_true")
+    parser.add_argument("--kv-page-size", type=int, default=256)
+    parser.add_argument("--kv-cache-dtype", default="f32", choices=["f32", "q8", "q8_0", "q4", "q4_0"])
     parser.add_argument("--extra-arg", action="append", help="Raw extra argument passed to motifcl_generate_transformer")
     parser.add_argument("--startup-timeout", type=float, default=300.0)
     parser.add_argument("--warmup-prompt", default="Hello")
@@ -497,6 +529,7 @@ def main(argv: list[str]) -> int:
     args.runner = Path(args.runner).resolve()
     if not args.runner.exists():
         raise SystemExit(f"runner not found: {args.runner}")
+    _warn_experimental_runtime(args)
     model_name = args.name or Path(args.model).stem or "motifcl-local"
     worker = MotifCLWorker(args)
     if not args.no_warmup and args.warmup_tokens > 0:

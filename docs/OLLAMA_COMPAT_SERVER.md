@@ -70,7 +70,7 @@ python tools/motifcl_ollama_server.py \
   --model ./model.gguf \
   --name motifcl-local:latest \
   --port 11435 \
-  --ctx-size 512 \
+  --ctx-size 8192 \
   --max-new-tokens 128
 ```
 
@@ -80,8 +80,18 @@ Useful flags:
 - `--name` — public API model name; defaults to the model path stem.
 - `--runner` — explicit `motifcl_generate_transformer` binary.
 - `--ctx-size`, `--max-new-tokens`, `--temperature`, `--top-k`, `--top-p` — default generation options.
+  The one-command `motifcl` launcher accepts `--ctx-size auto` (default, 8K cap unless the model is smaller),
+  `--ctx-size max`/`native` (use GGUF/HF model context length), or an integer.  Gemma 4 E2B GGUF advertises
+  `context_length=131072`; `motifcl run --ctx-size max` uses that native window, while plain `motifcl run`
+  starts at a safer 8K default.
+  Use `motifcl inspect` to see the resolved context before starting a hot server.
 - `--arch`, `--tokenizer`, `--random-init` — forwarded to the runner.
 - `--no-prefill`, `--force-prefill`, `--disable-adaptive-prefill`, `--cpu-sampling` — forwarded inference toggles.
+- `--paged-kv`, `--kv-page-size N` — experimental paged KV path for long-context profiling. It is not the default
+  yet; enable it only for measured long-context runs.
+- `--kv-cache-dtype f32|q8|q4` — experimental compressed regular KV cache baseline. It reduces KV storage and now
+  has q8/q4 decode attention fast paths, but remains benchmark-only until long-context prompt/decode and quality
+  gates pass across models.
 - `--extra-arg ARG` — pass a raw extra runner argument; repeatable.
 - `--startup-timeout SECONDS` — maximum wait for `REPL ready` before warning/failing.
 - `--warmup-prompt TEXT`, `--warmup-tokens N`, `--no-warmup` — startup warmup control.
