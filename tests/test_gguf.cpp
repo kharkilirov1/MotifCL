@@ -279,6 +279,9 @@ int main() {
         write_le<std::uint64_t>(out, 0u);
         write_raw_tensor_info(out, "x", {1}, 0xffffffffu, 0);
         pad_to_alignment(out, 32);
+        std::vector<std::uint8_t> payload(32, 0);
+        out.write(reinterpret_cast<const char*>(payload.data()),
+                  static_cast<std::streamsize>(payload.size()));
     }
     require_motifcl_error([&] { (void)motifcl::gguf::File::open(bad_tensor_type_path.string()); },
                           "GGUF unknown tensor type was accepted");
@@ -293,6 +296,9 @@ int main() {
         write_le<std::uint64_t>(out, 0u);
         write_raw_tensor_info(out, "bad_q4", {31}, static_cast<std::uint32_t>(motifcl::gguf::TensorType::Q4_0), 0);
         pad_to_alignment(out, 32);
+        const auto q4_block = quant_q4_0_block();
+        out.write(reinterpret_cast<const char*>(q4_block.data()),
+                  static_cast<std::streamsize>(q4_block.size()));
     }
     require_motifcl_error([&] { (void)motifcl::gguf::File::open(bad_qblock_shape_path.string()); },
                           "GGUF incomplete quant block shape was accepted");

@@ -39,8 +39,8 @@ def main() -> int:
     parser.add_argument("--require-baseline-field", action="append", default=[])
     args = parser.parse_args()
 
-    baseline = Path(args.baseline)
-    candidate = Path(args.candidate)
+    baseline = Path(args.baseline).expanduser().resolve()
+    candidate = Path(args.candidate).expanduser().resolve()
     if not baseline.exists():
         raise SystemExit(f"baseline artifact not found: {baseline}")
     if not candidate.exists():

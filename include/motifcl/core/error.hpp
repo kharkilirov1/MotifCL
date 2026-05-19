@@ -4,6 +4,10 @@
 #include <stdexcept>
 #include <string>
 
+#ifndef CL_PLATFORM_NOT_FOUND_KHR
+#define CL_PLATFORM_NOT_FOUND_KHR -1001
+#endif
+
 namespace motifcl {
 
 class Error : public std::runtime_error {
