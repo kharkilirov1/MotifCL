@@ -406,6 +406,7 @@ int main() {
             motifcl::nn::ModernGPTModel ple_model(backend, ple_cfg);
             std::int32_t token_value = 3;
             auto token = motifcl::Tensor::from_cpu(backend, {1}, motifcl::DType::I32, &token_value);
+            motifcl::autograd::NoGradGuard no_grad;
             set_test_env("MOTIFCL_DISABLE_FUSED_PLE_M1", "1");
             set_test_env("MOTIFCL_DISABLE_FUSED_PLE_GATE_M1", "1");
             auto ref_cache = ple_model.create_kv_cache(backend, 1);
@@ -443,6 +444,7 @@ int main() {
             motifcl::nn::ModernSelfAttention attn(backend, cfg);
             motifcl::nn::KVCache cache(backend, 1, cfg.block_size, cfg.n_kv_head, cfg.n_embd / cfg.n_head);
             auto x1 = motifcl::Tensor::randn(backend, {1, cfg.n_embd}, 0.02f);
+            motifcl::autograd::NoGradGuard no_grad;
             auto y1 = attn.forward_with_cache(x1, cache, 1, 1);
             if (cache.length != 1 || y1.shape() != motifcl::Shape({1, cfg.n_embd})) return 1;
             auto x2 = motifcl::Tensor::randn(backend, {1, cfg.n_embd}, 0.02f);
@@ -571,6 +573,7 @@ int main() {
             motifcl::nn::ModernGPTModel model(backend, cfg);
             auto paged = model.create_paged_kv_cache(backend, 1, 2);
             std::vector<std::int32_t> ids = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+            motifcl::autograd::NoGradGuard no_grad;
             for (std::size_t i = 0; i < ids.size(); ++i) {
                 auto token = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, ids.data() + i);
                 auto logits = model.forward_with_cache(token, paged);
@@ -705,16 +708,16 @@ int main() {
                 }
             }
 
-            auto caches = model.create_kv_cache(backend, 1);
-            auto step1 = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, ids.data());
-            auto step_logits1 = model.forward_with_cache(step1, caches);
-            if (step_logits1.shape() != motifcl::Shape({1, 1, cfg.vocab_size}) || caches[0].length != 1) return 1;
-            auto step2 = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, ids.data() + 1);
-            auto step_logits2 = model.decode_step(step2, caches);
-            if (step_logits2.shape() != motifcl::Shape({1, cfg.vocab_size}) || caches[0].length != 2) return 1;
-
             {
                 motifcl::autograd::NoGradGuard no_grad;
+                auto caches = model.create_kv_cache(backend, 1);
+                auto step1 = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, ids.data());
+                auto step_logits1 = model.forward_with_cache(step1, caches);
+                if (step_logits1.shape() != motifcl::Shape({1, 1, cfg.vocab_size}) || caches[0].length != 1) return 1;
+                auto step2 = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, ids.data() + 1);
+                auto step_logits2 = model.decode_step(step2, caches);
+                if (step_logits2.shape() != motifcl::Shape({1, cfg.vocab_size}) || caches[0].length != 2) return 1;
+
                 const auto f32_step2 = step_logits2.to_vector<float>();
 
                 auto q8_step_caches = model.create_kv_cache(backend, 1, motifcl::DType::Q8_0);
@@ -740,18 +743,18 @@ int main() {
                 for (float value : q4_step_logits2.to_vector<float>()) {
                     if (!std::isfinite(value)) return 1;
                 }
-            }
 
-            auto masked_caches = model.create_kv_cache(backend, 1);
-            std::vector<std::int32_t> cache_mask_host(static_cast<std::size_t>(cfg.block_size), 0);
-            auto cache_mask = motifcl::Tensor::from_cpu(backend, {1, 1, cfg.block_size}, motifcl::DType::I32, cache_mask_host.data());
-            auto masked_step_logits = model.forward_with_cache_masked(step1, cache_mask, masked_caches);
-            if (masked_step_logits.shape() != motifcl::Shape({1, 1, cfg.vocab_size}) || masked_caches[0].length != 1) return 1;
-            auto masked_q8_caches = model.create_kv_cache(backend, 1, motifcl::DType::Q8_0);
-            require_motifcl_error([&]() {
-                (void)model.forward_with_cache_masked(step1, cache_mask, masked_q8_caches);
-            });
-            if (masked_q8_caches[0].length != 0) return 1;
+                auto masked_caches = model.create_kv_cache(backend, 1);
+                std::vector<std::int32_t> cache_mask_host(static_cast<std::size_t>(cfg.block_size), 0);
+                auto cache_mask = motifcl::Tensor::from_cpu(backend, {1, 1, cfg.block_size}, motifcl::DType::I32, cache_mask_host.data());
+                auto masked_step_logits = model.forward_with_cache_masked(step1, cache_mask, masked_caches);
+                if (masked_step_logits.shape() != motifcl::Shape({1, 1, cfg.vocab_size}) || masked_caches[0].length != 1) return 1;
+                auto masked_q8_caches = model.create_kv_cache(backend, 1, motifcl::DType::Q8_0);
+                require_motifcl_error([&]() {
+                    (void)model.forward_with_cache_masked(step1, cache_mask, masked_q8_caches);
+                });
+                if (masked_q8_caches[0].length != 0) return 1;
+            }
         }
     } catch (const std::exception& e) {
         return motifcl_test::handle_exception(e);

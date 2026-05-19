@@ -200,7 +200,8 @@ def test_python_modern_transformer_api_smoke():
 
     attn = mcl.ModernSelfAttention(backend, cfg)
     cache = mcl.KVCache(backend, 1, cfg.block_size, cfg.n_kv_head, cfg.n_embd // cfg.n_head)
-    y_cache = attn.forward_with_cache(mcl.randn(backend, [1, cfg.n_embd]), cache, 1, 1)
+    with mcl.no_grad():
+        y_cache = attn.forward_with_cache(mcl.randn(backend, [1, cfg.n_embd]), cache, 1, 1)
     assert y_cache.shape == [1, cfg.n_embd]
     assert cache.length == 1
 
@@ -211,12 +212,14 @@ def test_python_modern_transformer_api_smoke():
     masked_logits = model.forward_masked(tokens, mask)
     assert masked_logits.shape == [1, 4, cfg.vocab_size]
     caches = model.create_kv_cache(backend, 1)
-    step_logits = model.forward_with_cache(mcl.tensor_i32(backend, [1, 1], [1]), caches)
+    with mcl.no_grad():
+        step_logits = model.forward_with_cache(mcl.tensor_i32(backend, [1, 1], [1]), caches)
     assert step_logits.shape == [1, 1, cfg.vocab_size]
     assert caches[0].length == 1
     masked_caches = model.create_kv_cache(backend, 1)
     cache_mask = mcl.tensor_i32(backend, [1, 1, cfg.block_size], [0] * cfg.block_size)
-    masked_step = model.forward_with_cache_masked(mcl.tensor_i32(backend, [1, 1], [1]), cache_mask, masked_caches)
+    with mcl.no_grad():
+        masked_step = model.forward_with_cache_masked(mcl.tensor_i32(backend, [1, 1], [1]), cache_mask, masked_caches)
     assert masked_step.shape == [1, 1, cfg.vocab_size]
     assert masked_caches[0].length == 1
     assert len(model.parameters()) > 0

@@ -964,12 +964,12 @@ Tensor grouped_query_attention(const Tensor& q, const Tensor& k, const Tensor& v
         s.key_stride == s.key_tokens && query_offset == 0) {
         return multihead_attention(q, k, v, n_head, causal, batch_size, s.query_tokens);
     }
-    if (can_use_grouped_query_decode_wg(q.backend(), s.query_tokens, s.key_tokens, causal)) {
+    const bool needs_grad = autograd::is_enabled() && (q.requires_grad() || k.requires_grad() || v.requires_grad());
+    if (!needs_grad && can_use_grouped_query_decode_wg(q.backend(), s.query_tokens, s.key_tokens, causal)) {
         return grouped_query_attention_decode_wg(q, k, v, n_head, n_kv_head, 0,
                                                  s.batch, s.key_tokens, s.key_stride,
                                                  query_offset, s.head_dim, scale_value);
     }
-    const bool needs_grad = autograd::is_enabled() && (q.requires_grad() || k.requires_grad() || v.requires_grad());
     if (!needs_grad && can_use_grouped_query_prefill_wg(q.backend(), s.query_tokens, s.key_tokens, 0, causal)) {
         return grouped_query_attention_prefill_wg(q, k, v, n_head, n_kv_head, 0,
                                                   causal,
@@ -1019,12 +1019,12 @@ Tensor grouped_query_attention_windowed(const Tensor& q, const Tensor& k, const 
         return grouped_query_attention_quantized(q, k, v, n_head, n_kv_head, sliding_window,
                                                  causal, s, query_offset, scale_value);
     }
-    if (can_use_grouped_query_decode_wg(q.backend(), s.query_tokens, s.key_tokens, causal)) {
+    const bool needs_grad = autograd::is_enabled() && (q.requires_grad() || k.requires_grad() || v.requires_grad());
+    if (!needs_grad && can_use_grouped_query_decode_wg(q.backend(), s.query_tokens, s.key_tokens, causal)) {
         return grouped_query_attention_decode_wg(q, k, v, n_head, n_kv_head, sliding_window,
                                                  s.batch, s.key_tokens, s.key_stride,
                                                  query_offset, s.head_dim, scale_value);
     }
-    const bool needs_grad = autograd::is_enabled() && (q.requires_grad() || k.requires_grad() || v.requires_grad());
     if (!needs_grad && can_use_grouped_query_prefill_wg(q.backend(), s.query_tokens, s.key_tokens, sliding_window, causal)) {
         return grouped_query_attention_prefill_wg(q, k, v, n_head, n_kv_head, sliding_window,
                                                   causal,
