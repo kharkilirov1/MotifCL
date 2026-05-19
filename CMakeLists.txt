@@ -24,6 +24,37 @@ if(NOT OpenCL_FOUND)
         find_library(MOTIFCL_OPENCL_LIBRARY
             NAMES OpenCL OpenCL.lib
         )
+        if(NOT MOTIFCL_OPENCL_LIBRARY)
+            if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+                if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|AARCH64|aarch64")
+                    set(_motifcl_opencl_machine ARM64)
+                else()
+                    set(_motifcl_opencl_machine x64)
+                endif()
+            else()
+                set(_motifcl_opencl_machine x86)
+            endif()
+            set(_motifcl_opencl_implib "${CMAKE_BINARY_DIR}/OpenCL.lib")
+            set(_motifcl_msvc_lib_tool "${CMAKE_AR}")
+            if(NOT _motifcl_msvc_lib_tool OR _motifcl_msvc_lib_tool MATCHES "NOTFOUND")
+                get_filename_component(_motifcl_msvc_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+                find_program(_motifcl_msvc_lib_tool NAMES lib.exe HINTS "${_motifcl_msvc_bin}")
+            endif()
+            if(NOT _motifcl_msvc_lib_tool OR _motifcl_msvc_lib_tool MATCHES "NOTFOUND")
+                message(FATAL_ERROR "MSVC lib.exe not found; cannot generate OpenCL import library.")
+            endif()
+            execute_process(
+                COMMAND "${_motifcl_msvc_lib_tool}" /nologo
+                        "/def:${CMAKE_CURRENT_SOURCE_DIR}/cmake/OpenCL.def"
+                        "/machine:${_motifcl_opencl_machine}"
+                        "/out:${_motifcl_opencl_implib}"
+                RESULT_VARIABLE _motifcl_opencl_implib_result
+            )
+            if(NOT _motifcl_opencl_implib_result EQUAL 0)
+                message(FATAL_ERROR "Failed to generate MSVC OpenCL import library from cmake/OpenCL.def")
+            endif()
+            set(MOTIFCL_OPENCL_LIBRARY "${_motifcl_opencl_implib}" CACHE FILEPATH "OpenCL ICD loader import library" FORCE)
+        endif()
     elseif(WIN32 AND NOT MOTIFCL_OPENCL_LIBRARY)
         foreach(_motifcl_opencl_candidate
                 "$ENV{SystemRoot}/System32/OpenCL.dll"
