@@ -13,6 +13,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -25,19 +27,36 @@ def main() -> int:
         print("clang-tidy not found; skipping smoke gate")
         return 0
 
-    compile_commands = args.build_dir / "compile_commands.json"
+    build_dir = args.build_dir if args.build_dir.is_absolute() else ROOT / args.build_dir
+    compile_commands = build_dir / "compile_commands.json"
     if not compile_commands.exists():
         raise SystemExit(f"missing {compile_commands}; configure with CMAKE_EXPORT_COMPILE_COMMANDS=ON")
+
+    files = [
+        str((Path(file) if Path(file).is_absolute() else ROOT / file).resolve())
+        for file in args.files
+    ]
+    # Keep the smoke gate resilient when clang-tidy cannot match a source file
+    # to the compile database on a hosted runner: the checked translation units
+    # only need the public include tree and bundled OpenCL headers.
+    extra_args = [
+        f"-I{ROOT / 'include'}",
+        "-isystem",
+        str(ROOT / "third_party" / "opencl"),
+        "-DCL_TARGET_OPENCL_VERSION=120",
+        "-std=c++17",
+    ]
 
     cmd = [
         clang_tidy,
         "-p",
-        str(args.build_dir),
+        str(build_dir),
         "--checks=clang-diagnostic-*,clang-analyzer-*",
         "--warnings-as-errors=clang-diagnostic-*",
         "--quiet",
-        *args.files,
+        *files,
         "--",
+        *extra_args,
     ]
     print("running:", " ".join(cmd))
     return subprocess.call(cmd)
