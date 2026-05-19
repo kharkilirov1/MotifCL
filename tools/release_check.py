@@ -58,7 +58,7 @@ def build_and_test_python(parallel: str, *, hf_run: bool) -> None:
 def run_perf_gate() -> None:
     run([
         sys.executable,
-        "tools/perf_regression.py",
+        "tools/perf_truth_gate.py",
         "baselines/ellesmere.json",
         "baselines/ellesmere.json",
         "--tolerance",
@@ -78,6 +78,11 @@ def run_perf_gate() -> None:
 
 def run_static_cleanup_checks() -> None:
     run([sys.executable, "-m", "compileall", "-q", "python/motifcl"])
+    run([sys.executable, "-m", "py_compile",
+         "tools/ci_gate.py", "tools/check_kernel_contracts.py",
+         "tools/perf_truth_gate.py", "tools/release_check.py",
+         "tools/motifcl_cli.py", "tools/motifcl_ollama_server.py"])
+    run([sys.executable, "tools/check_kernel_contracts.py"])
     run(["git", "diff", "--check"])
 
 

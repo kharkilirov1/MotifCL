@@ -5,6 +5,50 @@ on:
   pull_request:
 
 jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build/runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ocl-icd-opencl-dev pocl-opencl-icd
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python build dependencies
+        run: |
+          python -m pip install --upgrade pip pytest build pybind11
+
+      - name: Check OpenCL kernel contracts
+        run: python tools/check_kernel_contracts.py
+
+      - name: Configure release
+        run: cmake --preset release
+
+      - name: Build release
+        run: cmake --build --preset release --parallel 2
+
+      - name: Full CTest release
+        run: ctest --test-dir build/release --output-on-failure
+
+      - name: Configure Python
+        run: cmake --preset python
+
+      - name: Build Python
+        run: cmake --build --preset python --parallel 2
+
+      - name: Pytest
+        env:
+          PYTHONPATH: ${{ github.workspace }}/build/python
+        run: python -m pytest tests/python -q
+
+      - name: Release check without duplicated dev/python builds
+        run: python tools/release_check.py --parallel 2 --skip-dev --skip-python --skip-consumer
+
   cpp:
     strategy:
       fail-fast: false
