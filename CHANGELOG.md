@@ -24,6 +24,15 @@
   `ModernGPTModel` projections/LM head with safe packed transpose/repack; and accepting `.gguf` files through
   `motifcl_generate_transformer --model`.
 
+## 1.1.1 - 2026-05-20
+
+- Hardened quantized tensor metadata validation so serialized `.mclt` and checkpoint-loaded scale tensors must cover the target tensor shape before any GPU kernel can consume them.
+- Added per-callsite CPU-side validation contracts for quantized matmul, attention, KV-cache, paged attention, and quant tensor dispatch paths.
+- Added malformed-artifact regression coverage for `.mclt`, GGUF metadata/tensor tables, and quantized checkpoint payloads so invalid inputs fail with controlled `motifcl::Error` paths instead of crash/OOB behavior.
+- Added explicit experimental/stable boundaries for compressed KV and microkernel backend selection; `native`/`asm` backends remain opt-in fallback paths until correctness and perf gates pass.
+- Added GitHub Actions release gate covering kernel contracts, release build, full CTest, Python build/pytest, release check, sanitizer, and platform build smoke.
+- Fixed backend teardown ordering by draining the OpenCL queue before clearing pooled buffers and releasing backend lifetime state.
+
 ## 1.1.0 - 2026-05-10
 
 - Added generic HF-style modern decoder compatibility APIs: `HFArchitecture`,
