@@ -542,6 +542,95 @@ const std::array<std::uint32_t, 97>& smoke_compute_spirv() {
     return words;
 }
 
+const std::array<std::uint32_t, 664>& f32_matmul_1x4x4_spirv() {
+    static const std::array<std::uint32_t, 664> words = {
+        0x07230203, 0x00010000, 0x00000000, 0x0000007e, 0x00000000, 0x00020011, 0x00000001, 0x0003000e,
+        0x00000000, 0x00000001, 0x0005000f, 0x00000005, 0x00000003, 0x6e69616d, 0x00000000, 0x00060010,
+        0x00000003, 0x00000011, 0x00000001, 0x00000001, 0x00000001, 0x00040047, 0x00000017, 0x00000006,
+        0x00000004, 0x00050048, 0x00000018, 0x00000000, 0x00000023, 0x00000000, 0x00030047, 0x00000018,
+        0x00000003, 0x00040047, 0x0000001b, 0x00000022, 0x00000000, 0x00040047, 0x0000001b, 0x00000021,
+        0x00000000, 0x00040047, 0x0000001c, 0x00000022, 0x00000000, 0x00040047, 0x0000001c, 0x00000021,
+        0x00000001, 0x00040047, 0x0000001d, 0x00000022, 0x00000000, 0x00040047, 0x0000001d, 0x00000021,
+        0x00000002, 0x00020013, 0x00000001, 0x00030021, 0x00000002, 0x00000001, 0x00030016, 0x00000005,
+        0x00000020, 0x00040015, 0x00000006, 0x00000020, 0x00000000, 0x0004002b, 0x00000006, 0x00000007,
+        0x00000000, 0x0004002b, 0x00000006, 0x00000008, 0x00000001, 0x0004002b, 0x00000006, 0x00000009,
+        0x00000002, 0x0004002b, 0x00000006, 0x0000000a, 0x00000003, 0x0004002b, 0x00000006, 0x0000000b,
+        0x00000004, 0x0004002b, 0x00000006, 0x0000000c, 0x00000005, 0x0004002b, 0x00000006, 0x0000000d,
+        0x00000006, 0x0004002b, 0x00000006, 0x0000000e, 0x00000007, 0x0004002b, 0x00000006, 0x0000000f,
+        0x00000008, 0x0004002b, 0x00000006, 0x00000010, 0x00000009, 0x0004002b, 0x00000006, 0x00000011,
+        0x0000000a, 0x0004002b, 0x00000006, 0x00000012, 0x0000000b, 0x0004002b, 0x00000006, 0x00000013,
+        0x0000000c, 0x0004002b, 0x00000006, 0x00000014, 0x0000000d, 0x0004002b, 0x00000006, 0x00000015,
+        0x0000000e, 0x0004002b, 0x00000006, 0x00000016, 0x0000000f, 0x0003001d, 0x00000017, 0x00000005,
+        0x0003001e, 0x00000018, 0x00000017, 0x00040020, 0x00000019, 0x00000002, 0x00000018, 0x00040020,
+        0x0000001a, 0x00000002, 0x00000005, 0x0004003b, 0x00000019, 0x0000001b, 0x00000002, 0x0004003b,
+        0x00000019, 0x0000001c, 0x00000002, 0x0004003b, 0x00000019, 0x0000001d, 0x00000002, 0x00050036,
+        0x00000001, 0x00000003, 0x00000000, 0x00000002, 0x000200f8, 0x00000004, 0x00060041, 0x0000001a,
+        0x0000001e, 0x0000001b, 0x00000007, 0x00000007, 0x0004003d, 0x00000005, 0x0000001f, 0x0000001e,
+        0x00060041, 0x0000001a, 0x00000020, 0x0000001c, 0x00000007, 0x00000007, 0x0004003d, 0x00000005,
+        0x00000021, 0x00000020, 0x00050085, 0x00000005, 0x00000022, 0x0000001f, 0x00000021, 0x00060041,
+        0x0000001a, 0x00000023, 0x0000001b, 0x00000007, 0x00000008, 0x0004003d, 0x00000005, 0x00000024,
+        0x00000023, 0x00060041, 0x0000001a, 0x00000025, 0x0000001c, 0x00000007, 0x0000000b, 0x0004003d,
+        0x00000005, 0x00000026, 0x00000025, 0x00050085, 0x00000005, 0x00000027, 0x00000024, 0x00000026,
+        0x00050081, 0x00000005, 0x00000028, 0x00000022, 0x00000027, 0x00060041, 0x0000001a, 0x00000029,
+        0x0000001b, 0x00000007, 0x00000009, 0x0004003d, 0x00000005, 0x0000002a, 0x00000029, 0x00060041,
+        0x0000001a, 0x0000002b, 0x0000001c, 0x00000007, 0x0000000f, 0x0004003d, 0x00000005, 0x0000002c,
+        0x0000002b, 0x00050085, 0x00000005, 0x0000002d, 0x0000002a, 0x0000002c, 0x00050081, 0x00000005,
+        0x0000002e, 0x00000028, 0x0000002d, 0x00060041, 0x0000001a, 0x0000002f, 0x0000001b, 0x00000007,
+        0x0000000a, 0x0004003d, 0x00000005, 0x00000030, 0x0000002f, 0x00060041, 0x0000001a, 0x00000031,
+        0x0000001c, 0x00000007, 0x00000013, 0x0004003d, 0x00000005, 0x00000032, 0x00000031, 0x00050085,
+        0x00000005, 0x00000033, 0x00000030, 0x00000032, 0x00050081, 0x00000005, 0x00000034, 0x0000002e,
+        0x00000033, 0x00060041, 0x0000001a, 0x00000035, 0x0000001d, 0x00000007, 0x00000007, 0x0003003e,
+        0x00000035, 0x00000034, 0x00060041, 0x0000001a, 0x00000036, 0x0000001b, 0x00000007, 0x00000007,
+        0x0004003d, 0x00000005, 0x00000037, 0x00000036, 0x00060041, 0x0000001a, 0x00000038, 0x0000001c,
+        0x00000007, 0x00000008, 0x0004003d, 0x00000005, 0x00000039, 0x00000038, 0x00050085, 0x00000005,
+        0x0000003a, 0x00000037, 0x00000039, 0x00060041, 0x0000001a, 0x0000003b, 0x0000001b, 0x00000007,
+        0x00000008, 0x0004003d, 0x00000005, 0x0000003c, 0x0000003b, 0x00060041, 0x0000001a, 0x0000003d,
+        0x0000001c, 0x00000007, 0x0000000c, 0x0004003d, 0x00000005, 0x0000003e, 0x0000003d, 0x00050085,
+        0x00000005, 0x0000003f, 0x0000003c, 0x0000003e, 0x00050081, 0x00000005, 0x00000040, 0x0000003a,
+        0x0000003f, 0x00060041, 0x0000001a, 0x00000041, 0x0000001b, 0x00000007, 0x00000009, 0x0004003d,
+        0x00000005, 0x00000042, 0x00000041, 0x00060041, 0x0000001a, 0x00000043, 0x0000001c, 0x00000007,
+        0x00000010, 0x0004003d, 0x00000005, 0x00000044, 0x00000043, 0x00050085, 0x00000005, 0x00000045,
+        0x00000042, 0x00000044, 0x00050081, 0x00000005, 0x00000046, 0x00000040, 0x00000045, 0x00060041,
+        0x0000001a, 0x00000047, 0x0000001b, 0x00000007, 0x0000000a, 0x0004003d, 0x00000005, 0x00000048,
+        0x00000047, 0x00060041, 0x0000001a, 0x00000049, 0x0000001c, 0x00000007, 0x00000014, 0x0004003d,
+        0x00000005, 0x0000004a, 0x00000049, 0x00050085, 0x00000005, 0x0000004b, 0x00000048, 0x0000004a,
+        0x00050081, 0x00000005, 0x0000004c, 0x00000046, 0x0000004b, 0x00060041, 0x0000001a, 0x0000004d,
+        0x0000001d, 0x00000007, 0x00000008, 0x0003003e, 0x0000004d, 0x0000004c, 0x00060041, 0x0000001a,
+        0x0000004e, 0x0000001b, 0x00000007, 0x00000007, 0x0004003d, 0x00000005, 0x0000004f, 0x0000004e,
+        0x00060041, 0x0000001a, 0x00000050, 0x0000001c, 0x00000007, 0x00000009, 0x0004003d, 0x00000005,
+        0x00000051, 0x00000050, 0x00050085, 0x00000005, 0x00000052, 0x0000004f, 0x00000051, 0x00060041,
+        0x0000001a, 0x00000053, 0x0000001b, 0x00000007, 0x00000008, 0x0004003d, 0x00000005, 0x00000054,
+        0x00000053, 0x00060041, 0x0000001a, 0x00000055, 0x0000001c, 0x00000007, 0x0000000d, 0x0004003d,
+        0x00000005, 0x00000056, 0x00000055, 0x00050085, 0x00000005, 0x00000057, 0x00000054, 0x00000056,
+        0x00050081, 0x00000005, 0x00000058, 0x00000052, 0x00000057, 0x00060041, 0x0000001a, 0x00000059,
+        0x0000001b, 0x00000007, 0x00000009, 0x0004003d, 0x00000005, 0x0000005a, 0x00000059, 0x00060041,
+        0x0000001a, 0x0000005b, 0x0000001c, 0x00000007, 0x00000011, 0x0004003d, 0x00000005, 0x0000005c,
+        0x0000005b, 0x00050085, 0x00000005, 0x0000005d, 0x0000005a, 0x0000005c, 0x00050081, 0x00000005,
+        0x0000005e, 0x00000058, 0x0000005d, 0x00060041, 0x0000001a, 0x0000005f, 0x0000001b, 0x00000007,
+        0x0000000a, 0x0004003d, 0x00000005, 0x00000060, 0x0000005f, 0x00060041, 0x0000001a, 0x00000061,
+        0x0000001c, 0x00000007, 0x00000015, 0x0004003d, 0x00000005, 0x00000062, 0x00000061, 0x00050085,
+        0x00000005, 0x00000063, 0x00000060, 0x00000062, 0x00050081, 0x00000005, 0x00000064, 0x0000005e,
+        0x00000063, 0x00060041, 0x0000001a, 0x00000065, 0x0000001d, 0x00000007, 0x00000009, 0x0003003e,
+        0x00000065, 0x00000064, 0x00060041, 0x0000001a, 0x00000066, 0x0000001b, 0x00000007, 0x00000007,
+        0x0004003d, 0x00000005, 0x00000067, 0x00000066, 0x00060041, 0x0000001a, 0x00000068, 0x0000001c,
+        0x00000007, 0x0000000a, 0x0004003d, 0x00000005, 0x00000069, 0x00000068, 0x00050085, 0x00000005,
+        0x0000006a, 0x00000067, 0x00000069, 0x00060041, 0x0000001a, 0x0000006b, 0x0000001b, 0x00000007,
+        0x00000008, 0x0004003d, 0x00000005, 0x0000006c, 0x0000006b, 0x00060041, 0x0000001a, 0x0000006d,
+        0x0000001c, 0x00000007, 0x0000000e, 0x0004003d, 0x00000005, 0x0000006e, 0x0000006d, 0x00050085,
+        0x00000005, 0x0000006f, 0x0000006c, 0x0000006e, 0x00050081, 0x00000005, 0x00000070, 0x0000006a,
+        0x0000006f, 0x00060041, 0x0000001a, 0x00000071, 0x0000001b, 0x00000007, 0x00000009, 0x0004003d,
+        0x00000005, 0x00000072, 0x00000071, 0x00060041, 0x0000001a, 0x00000073, 0x0000001c, 0x00000007,
+        0x00000012, 0x0004003d, 0x00000005, 0x00000074, 0x00000073, 0x00050085, 0x00000005, 0x00000075,
+        0x00000072, 0x00000074, 0x00050081, 0x00000005, 0x00000076, 0x00000070, 0x00000075, 0x00060041,
+        0x0000001a, 0x00000077, 0x0000001b, 0x00000007, 0x0000000a, 0x0004003d, 0x00000005, 0x00000078,
+        0x00000077, 0x00060041, 0x0000001a, 0x00000079, 0x0000001c, 0x00000007, 0x00000016, 0x0004003d,
+        0x00000005, 0x0000007a, 0x00000079, 0x00050085, 0x00000005, 0x0000007b, 0x00000078, 0x0000007a,
+        0x00050081, 0x00000005, 0x0000007c, 0x00000076, 0x0000007b, 0x00060041, 0x0000001a, 0x0000007d,
+        0x0000001d, 0x00000007, 0x0000000a, 0x0003003e, 0x0000007d, 0x0000007c, 0x000100fd, 0x00010038
+    };
+    return words;
+}
+
 std::uint32_t find_host_visible_coherent_memory_type(const VkPhysicalDeviceMemoryProperties& memory_properties,
                                                      std::uint32_t memory_type_bits) {
     constexpr std::uint32_t kInvalid = 0xffffffffu;
@@ -679,35 +768,59 @@ VulkanProbeResult probe_vulkan_runtime() {
     return result;
 }
 
-VulkanSmokeComputeResult run_vulkan_smoke_compute() {
-    VulkanSmokeComputeResult result;
 
-    DynamicLibrary loader;
-    if (!open_vulkan_loader(loader)) {
-        result.error = "Vulkan loader not found";
+namespace {
+
+struct VulkanStorageBufferSpec {
+    const void* initial_data = nullptr;
+    std::size_t nbytes = 0;
+};
+
+struct VulkanStorageBufferComputeResult {
+    bool success = false;
+    std::string device_name;
+    std::string error;
+    std::vector<std::vector<std::uint8_t>> outputs;
+};
+
+VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
+    const std::uint32_t* spirv,
+    std::size_t spirv_word_count,
+    const std::vector<VulkanStorageBufferSpec>& buffer_specs,
+    const std::vector<std::size_t>& output_buffer_indices) {
+    VulkanStorageBufferComputeResult result;
+
+    auto fail = [&](const std::string& message) {
+        result.error = message;
         return result;
+    };
+    if (!spirv || spirv_word_count == 0) return fail("Vulkan compute shader is empty");
+    if (buffer_specs.empty()) return fail("Vulkan compute requires at least one storage buffer");
+    if (buffer_specs.size() > 16) return fail("Vulkan compute smoke supports at most 16 storage buffers");
+    for (std::size_t i = 0; i < buffer_specs.size(); ++i) {
+        if (buffer_specs[i].nbytes == 0) return fail("Vulkan compute storage buffer must be non-empty");
+    }
+    for (const auto output_index : output_buffer_indices) {
+        if (output_index >= buffer_specs.size()) return fail("Vulkan compute output index is out of range");
     }
 
-    auto get_proc = load_symbol<PFN_vkGetInstanceProcAddr>(loader, "vkGetInstanceProcAddr");
-    if (!get_proc) {
-        result.error = "Vulkan loader is missing vkGetInstanceProcAddr";
-        return result;
-    }
+    DynamicLibrary library;
+    if (!open_vulkan_loader(library)) return fail("Vulkan loader not found");
+
+    auto get_proc = load_symbol<PFN_vkGetInstanceProcAddr>(library, "vkGetInstanceProcAddr");
+    if (!get_proc) return fail("vkGetInstanceProcAddr not found");
 
     auto create_instance = load_instance_function<PFN_vkCreateInstance>(get_proc, nullptr, "vkCreateInstance");
-    if (!create_instance) create_instance = load_symbol<PFN_vkCreateInstance>(loader, "vkCreateInstance");
-    if (!create_instance) {
-        result.error = "Vulkan loader is missing vkCreateInstance";
-        return result;
-    }
+    if (!create_instance) create_instance = load_symbol<PFN_vkCreateInstance>(library, "vkCreateInstance");
+    if (!create_instance) return fail("Vulkan loader is missing vkCreateInstance");
 
     const VkApplicationInfo app_info{
         VK_STRUCTURE_TYPE_APPLICATION_INFO,
         nullptr,
+        "MotifCL Vulkan buffer compute smoke",
+        1,
         "MotifCL",
-        vk_make_api_version(0, 0, 1, 0),
-        "MotifCL",
-        vk_make_api_version(0, 0, 1, 0),
+        1,
         vk_make_api_version(0, 1, 0, 0),
     };
     const VkInstanceCreateInfo create_info{
@@ -720,51 +833,49 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
         0,
         nullptr,
     };
-
     VkInstance instance = nullptr;
     if (create_instance(&create_info, nullptr, &instance) != VK_SUCCESS || !instance) {
-        result.error = "vkCreateInstance failed";
-        return result;
+        return fail("vkCreateInstance failed");
     }
 
     auto destroy_instance = load_instance_function<PFN_vkDestroyInstance>(get_proc, instance, "vkDestroyInstance");
+    if (!destroy_instance) destroy_instance = load_symbol<PFN_vkDestroyInstance>(library, "vkDestroyInstance");
+    if (!destroy_instance) return fail("Vulkan loader is missing vkDestroyInstance");
+
     auto enumerate_physical_devices =
         load_instance_function<PFN_vkEnumeratePhysicalDevices>(get_proc, instance, "vkEnumeratePhysicalDevices");
     auto get_physical_device_properties =
         load_instance_function<PFN_vkGetPhysicalDeviceProperties>(get_proc, instance, "vkGetPhysicalDeviceProperties");
-    auto get_queue_family_properties =
-        load_instance_function<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
-            get_proc, instance, "vkGetPhysicalDeviceQueueFamilyProperties");
-    auto get_memory_properties =
-        load_instance_function<PFN_vkGetPhysicalDeviceMemoryProperties>(
-            get_proc, instance, "vkGetPhysicalDeviceMemoryProperties");
+    auto get_queue_family_properties = load_instance_function<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+        get_proc, instance, "vkGetPhysicalDeviceQueueFamilyProperties");
+    auto get_memory_properties = load_instance_function<PFN_vkGetPhysicalDeviceMemoryProperties>(
+        get_proc, instance, "vkGetPhysicalDeviceMemoryProperties");
     auto create_device = load_instance_function<PFN_vkCreateDevice>(get_proc, instance, "vkCreateDevice");
     auto get_device_proc = load_instance_function<PFN_vkGetDeviceProcAddr>(get_proc, instance, "vkGetDeviceProcAddr");
 
-    auto fail = [&](const std::string& message) {
+    auto fail_with_instance = [&](const std::string& message) {
         result.error = message;
-        if (destroy_instance) destroy_instance(instance, nullptr);
+        destroy_instance(instance, nullptr);
         return result;
     };
-
     if (!enumerate_physical_devices || !get_queue_family_properties || !get_memory_properties ||
         !create_device || !get_device_proc) {
-        return fail("Vulkan instance is missing required device creation functions");
+        return fail_with_instance("Vulkan instance is missing required compute setup functions");
     }
 
     std::uint32_t physical_device_count = 0;
     if (enumerate_physical_devices(instance, &physical_device_count, nullptr) != VK_SUCCESS ||
         physical_device_count == 0) {
-        return fail("No Vulkan physical devices found");
+        return fail_with_instance("No Vulkan physical devices found");
     }
-    std::vector<VkPhysicalDevice> physical_devices(physical_device_count, nullptr);
+    std::vector<VkPhysicalDevice> physical_devices(physical_device_count);
     if (enumerate_physical_devices(instance, &physical_device_count, physical_devices.data()) != VK_SUCCESS) {
-        return fail("vkEnumeratePhysicalDevices device list failed");
+        return fail_with_instance("Failed to enumerate Vulkan physical devices");
     }
 
     VkPhysicalDevice selected_physical_device = nullptr;
     std::uint32_t selected_queue_family = 0;
-    for (VkPhysicalDevice physical_device : physical_devices) {
+    for (auto physical_device : physical_devices) {
         std::uint32_t queue_family_count = 0;
         get_queue_family_properties(physical_device, &queue_family_count, nullptr);
         std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
@@ -781,7 +892,7 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
         }
         if (selected_physical_device) break;
     }
-    if (!selected_physical_device) return fail("No Vulkan compute queue family found");
+    if (!selected_physical_device) return fail_with_instance("No Vulkan compute queue family found");
 
     if (get_physical_device_properties) {
         struct alignas(8) PropertiesStorage {
@@ -819,7 +930,7 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
     };
     VkDevice device = nullptr;
     if (create_device(selected_physical_device, &device_create_info, nullptr, &device) != VK_SUCCESS || !device) {
-        return fail("vkCreateDevice failed");
+        return fail_with_instance("vkCreateDevice failed");
     }
 
     auto load_device = [&](auto tag, const char* name) {
@@ -863,8 +974,9 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
     auto queue_submit = load_device(PFN_vkQueueSubmit{}, "vkQueueSubmit");
     auto queue_wait_idle = load_device(PFN_vkQueueWaitIdle{}, "vkQueueWaitIdle");
 
-    VkBuffer buffer = nullptr;
-    VkDeviceMemory memory = nullptr;
+    const std::size_t buffer_count = buffer_specs.size();
+    std::vector<VkBuffer> buffers(buffer_count, nullptr);
+    std::vector<VkDeviceMemory> memories(buffer_count, nullptr);
     VkDescriptorSetLayout descriptor_set_layout = nullptr;
     VkDescriptorPool descriptor_pool = nullptr;
     VkPipelineLayout pipeline_layout = nullptr;
@@ -882,11 +994,19 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
             if (destroy_descriptor_set_layout && descriptor_set_layout) {
                 destroy_descriptor_set_layout(device, descriptor_set_layout, nullptr);
             }
-            if (destroy_buffer && buffer) destroy_buffer(device, buffer, nullptr);
-            if (free_memory && memory) free_memory(device, memory, nullptr);
+            if (destroy_buffer) {
+                for (auto buffer : buffers) {
+                    if (buffer) destroy_buffer(device, buffer, nullptr);
+                }
+            }
+            if (free_memory) {
+                for (auto memory : memories) {
+                    if (memory) free_memory(device, memory, nullptr);
+                }
+            }
             if (destroy_device) destroy_device(device, nullptr);
         }
-        if (destroy_instance) destroy_instance(instance, nullptr);
+        destroy_instance(instance, nullptr);
     };
 
     auto fail_with_cleanup = [&](const std::string& message) {
@@ -913,53 +1033,72 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
     get_device_queue(device, selected_queue_family, 0, &queue);
     if (!queue) return fail_with_cleanup("vkGetDeviceQueue returned null");
 
-    const VkBufferCreateInfo buffer_create_info{
-        VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        nullptr,
-        0,
-        sizeof(float),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VK_SHARING_MODE_EXCLUSIVE,
-        0,
-        nullptr,
-    };
-    if (create_buffer(device, &buffer_create_info, nullptr, &buffer) != VK_SUCCESS || !buffer) {
-        return fail_with_cleanup("vkCreateBuffer failed");
+    for (std::size_t i = 0; i < buffer_count; ++i) {
+        const VkBufferCreateInfo buffer_create_info{
+            VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            nullptr,
+            0,
+            static_cast<VkDeviceSize>(buffer_specs[i].nbytes),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_SHARING_MODE_EXCLUSIVE,
+            0,
+            nullptr,
+        };
+        if (create_buffer(device, &buffer_create_info, nullptr, &buffers[i]) != VK_SUCCESS || !buffers[i]) {
+            return fail_with_cleanup("vkCreateBuffer failed");
+        }
+
+        VkMemoryRequirements memory_requirements{};
+        get_buffer_memory_requirements(device, buffers[i], &memory_requirements);
+        const std::uint32_t memory_type =
+            find_host_visible_coherent_memory_type(memory_properties, memory_requirements.memoryTypeBits);
+        if (memory_type == 0xffffffffu) {
+            return fail_with_cleanup("No host-visible coherent Vulkan memory type for storage buffer");
+        }
+        const VkMemoryAllocateInfo allocate_info{
+            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            nullptr,
+            memory_requirements.size,
+            memory_type,
+        };
+        if (allocate_memory(device, &allocate_info, nullptr, &memories[i]) != VK_SUCCESS || !memories[i]) {
+            return fail_with_cleanup("vkAllocateMemory failed");
+        }
+        if (bind_buffer_memory(device, buffers[i], memories[i], 0) != VK_SUCCESS) {
+            return fail_with_cleanup("vkBindBufferMemory failed");
+        }
+
+        void* mapped = nullptr;
+        if (map_memory(device, memories[i], 0, static_cast<VkDeviceSize>(buffer_specs[i].nbytes), 0, &mapped) !=
+                VK_SUCCESS ||
+            !mapped) {
+            return fail_with_cleanup("vkMapMemory failed while initializing storage buffer");
+        }
+        if (buffer_specs[i].initial_data) {
+            std::memcpy(mapped, buffer_specs[i].initial_data, buffer_specs[i].nbytes);
+        } else {
+            std::memset(mapped, 0, buffer_specs[i].nbytes);
+        }
+        unmap_memory(device, memories[i]);
     }
 
-    VkMemoryRequirements memory_requirements{};
-    get_buffer_memory_requirements(device, buffer, &memory_requirements);
-    const std::uint32_t memory_type =
-        find_host_visible_coherent_memory_type(memory_properties, memory_requirements.memoryTypeBits);
-    if (memory_type == 0xffffffffu) {
-        return fail_with_cleanup("No host-visible coherent Vulkan memory type for smoke buffer");
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
+    bindings.reserve(buffer_count);
+    for (std::size_t i = 0; i < buffer_count; ++i) {
+        bindings.push_back(VkDescriptorSetLayoutBinding{
+            static_cast<std::uint32_t>(i),
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            1,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            nullptr,
+        });
     }
-    const VkMemoryAllocateInfo allocate_info{
-        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        nullptr,
-        memory_requirements.size,
-        memory_type,
-    };
-    if (allocate_memory(device, &allocate_info, nullptr, &memory) != VK_SUCCESS || !memory) {
-        return fail_with_cleanup("vkAllocateMemory failed");
-    }
-    if (bind_buffer_memory(device, buffer, memory, 0) != VK_SUCCESS) {
-        return fail_with_cleanup("vkBindBufferMemory failed");
-    }
-
-    const VkDescriptorSetLayoutBinding binding{
-        0,
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        1,
-        VK_SHADER_STAGE_COMPUTE_BIT,
-        nullptr,
-    };
     const VkDescriptorSetLayoutCreateInfo descriptor_set_layout_info{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         nullptr,
         0,
-        1,
-        &binding,
+        static_cast<std::uint32_t>(bindings.size()),
+        bindings.data(),
     };
     if (create_descriptor_set_layout(device, &descriptor_set_layout_info, nullptr, &descriptor_set_layout) !=
             VK_SUCCESS ||
@@ -967,7 +1106,7 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
         return fail_with_cleanup("vkCreateDescriptorSetLayout failed");
     }
 
-    const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+    const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, static_cast<std::uint32_t>(buffer_count)};
     const VkDescriptorPoolCreateInfo descriptor_pool_info{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         nullptr,
@@ -994,20 +1133,31 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
         return fail_with_cleanup("vkAllocateDescriptorSets failed");
     }
 
-    const VkDescriptorBufferInfo descriptor_buffer_info{buffer, 0, sizeof(float)};
-    const VkWriteDescriptorSet write_descriptor{
-        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        nullptr,
-        descriptor_set,
-        0,
-        0,
-        1,
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        nullptr,
-        &descriptor_buffer_info,
-        nullptr,
-    };
-    update_descriptor_sets(device, 1, &write_descriptor, 0, nullptr);
+    std::vector<VkDescriptorBufferInfo> descriptor_buffer_infos;
+    std::vector<VkWriteDescriptorSet> write_descriptors;
+    descriptor_buffer_infos.reserve(buffer_count);
+    write_descriptors.reserve(buffer_count);
+    for (std::size_t i = 0; i < buffer_count; ++i) {
+        descriptor_buffer_infos.push_back(VkDescriptorBufferInfo{
+            buffers[i],
+            0,
+            static_cast<VkDeviceSize>(buffer_specs[i].nbytes),
+        });
+        write_descriptors.push_back(VkWriteDescriptorSet{
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            descriptor_set,
+            static_cast<std::uint32_t>(i),
+            0,
+            1,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            nullptr,
+            &descriptor_buffer_infos.back(),
+            nullptr,
+        });
+    }
+    update_descriptor_sets(device, static_cast<std::uint32_t>(write_descriptors.size()), write_descriptors.data(),
+                           0, nullptr);
 
     const VkPipelineLayoutCreateInfo pipeline_layout_info{
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1023,13 +1173,12 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
         return fail_with_cleanup("vkCreatePipelineLayout failed");
     }
 
-    const auto& shader = smoke_compute_spirv();
     const VkShaderModuleCreateInfo shader_module_info{
         VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         nullptr,
         0,
-        shader.size() * sizeof(std::uint32_t),
-        shader.data(),
+        spirv_word_count * sizeof(std::uint32_t),
+        spirv,
     };
     if (create_shader_module(device, &shader_module_info, nullptr, &shader_module) != VK_SUCCESS || !shader_module) {
         return fail_with_cleanup("vkCreateShaderModule failed");
@@ -1116,18 +1265,86 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
         return fail_with_cleanup("vkQueueWaitIdle failed");
     }
 
-    void* mapped = nullptr;
-    if (map_memory(device, memory, 0, sizeof(float), 0, &mapped) != VK_SUCCESS || !mapped) {
-        return fail_with_cleanup("vkMapMemory failed");
-    }
-    std::memcpy(&result.output, mapped, sizeof(float));
-    unmap_memory(device, memory);
-    if (result.output != 42.0f) {
-        return fail_with_cleanup("Vulkan smoke compute returned unexpected output");
+    result.outputs.clear();
+    result.outputs.reserve(output_buffer_indices.size());
+    for (const auto output_index : output_buffer_indices) {
+        const auto nbytes = buffer_specs[output_index].nbytes;
+        std::vector<std::uint8_t> output(nbytes);
+        void* mapped = nullptr;
+        if (map_memory(device, memories[output_index], 0, static_cast<VkDeviceSize>(nbytes), 0, &mapped) !=
+                VK_SUCCESS ||
+            !mapped) {
+            return fail_with_cleanup("vkMapMemory failed while reading storage buffer");
+        }
+        std::memcpy(output.data(), mapped, nbytes);
+        unmap_memory(device, memories[output_index]);
+        result.outputs.push_back(std::move(output));
     }
 
     result.success = true;
     cleanup();
+    return result;
+}
+
+} // namespace
+
+VulkanSmokeComputeResult run_vulkan_smoke_compute() {
+    VulkanSmokeComputeResult result;
+    float output = 0.0f;
+    const auto& shader = smoke_compute_spirv();
+    const std::vector<VulkanStorageBufferSpec> buffers = {{nullptr, sizeof(output)}};
+    const auto run = run_vulkan_storage_buffer_compute(shader.data(), shader.size(), buffers, {0});
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    if (run.success && run.outputs.size() == 1 && run.outputs[0].size() == sizeof(output)) {
+        std::memcpy(&result.output, run.outputs[0].data(), sizeof(result.output));
+        if (result.output != 42.0f) {
+            result.success = false;
+            result.error = "Vulkan smoke compute returned unexpected output";
+        }
+    } else if (run.success) {
+        result.success = false;
+        result.error = "Vulkan smoke compute returned malformed output";
+    }
+    return result;
+}
+
+VulkanF32MatmulSmokeResult run_vulkan_f32_matmul_smoke() {
+    VulkanF32MatmulSmokeResult result;
+    const std::array<float, 4> a = {1.0f, 2.0f, 3.0f, 4.0f};
+    const std::array<float, 16> b = {
+        1.0f, 2.0f, 3.0f, 4.0f,
+        5.0f, 6.0f, 7.0f, 8.0f,
+        9.0f, 10.0f, 11.0f, 12.0f,
+        13.0f, 14.0f, 15.0f, 16.0f,
+    };
+    const std::array<float, 4> expected = {90.0f, 100.0f, 110.0f, 120.0f};
+    std::array<float, 4> c = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    const auto& shader = f32_matmul_1x4x4_spirv();
+    const std::vector<VulkanStorageBufferSpec> buffers = {
+        {a.data(), a.size() * sizeof(float)},
+        {b.data(), b.size() * sizeof(float)},
+        {c.data(), c.size() * sizeof(float)},
+    };
+    const auto run = run_vulkan_storage_buffer_compute(shader.data(), shader.size(), buffers, {2});
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    if (!run.success) return result;
+    if (run.outputs.size() != 1 || run.outputs[0].size() != c.size() * sizeof(float)) {
+        result.success = false;
+        result.error = "Vulkan f32 matmul smoke returned malformed output";
+        return result;
+    }
+
+    result.output.resize(c.size());
+    std::memcpy(result.output.data(), run.outputs[0].data(), run.outputs[0].size());
+    if (!std::equal(result.output.begin(), result.output.end(), expected.begin())) {
+        result.success = false;
+        result.error = "Vulkan f32 matmul smoke returned unexpected output";
+    }
     return result;
 }
 

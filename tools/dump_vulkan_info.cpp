@@ -38,6 +38,16 @@ int main() {
         std::cout << "smoke_compute_output=" << smoke.output << "\n";
         std::cout << "smoke_compute_device=" << smoke.device_name << "\n";
         if (!smoke.error.empty()) std::cout << "smoke_compute_error=" << smoke.error << "\n";
+        const auto matmul = motifcl::run_vulkan_f32_matmul_smoke();
+        std::cout << "f32_matmul_smoke_success=" << (matmul.success ? "true" : "false") << "\n";
+        std::cout << "f32_matmul_smoke_output=";
+        for (std::size_t j = 0; j < matmul.output.size(); ++j) {
+            if (j != 0) std::cout << ",";
+            std::cout << matmul.output[j];
+        }
+        std::cout << "\n";
+        std::cout << "f32_matmul_smoke_device=" << matmul.device_name << "\n";
+        if (!matmul.error.empty()) std::cout << "f32_matmul_smoke_error=" << matmul.error << "\n";
     }
     if (!probe.error.empty()) std::cout << "error=" << probe.error << "\n";
     return probe.loader_found ? 0 : 77;

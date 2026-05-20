@@ -75,6 +75,12 @@ device is available. This keeps CI/builds independent of the Vulkan SDK while
 proving whether the machine has a viable native-GPU Vulkan runtime and
 execution path.
 
+The Vulkan line also has a first fixed-shape F32 matmul smoke:
+`run_vulkan_f32_matmul_smoke()` uses three storage buffers (`A`, `B`, `C`) and
+an embedded SPIR-V compute pipeline to execute a `1x4 * 4x4 -> 1x4` multiply on
+the GPU. It verifies the output `{90, 100, 110, 120}`. This is deliberately a
+small correctness/data-path milestone, not yet a general matmul kernel.
+
 This is still not a matmul replacement. Vulkan remains unavailable as a
 Matmul/Attention/Quant descriptor until the next layer lands: validated
 storage-buffer inputs, shape/stride contracts, and correctness/perf gates
