@@ -68,11 +68,15 @@ int main() {
                        "OpenCL quant descriptor registry must not be empty");
     expect_descriptors(MicrokernelDomain::Matmul, MicrokernelBackendKind::Native,
                        "native matmul descriptor registry must not be empty");
+    expect_descriptors(MicrokernelDomain::Matmul, MicrokernelBackendKind::Vulkan,
+                       "vulkan matmul descriptor registry must expose the implemented M=1 F32 slice");
 
     ok &= expect(microkernel_backend_available(MicrokernelDomain::Matmul, MicrokernelBackendKind::OpenCL),
                  "OpenCL matmul backend must be available");
     ok &= expect(microkernel_backend_available(MicrokernelDomain::Matmul, MicrokernelBackendKind::Native),
                  "native matmul backend must be available for the implemented M=1 F32 slice");
+    ok &= expect(microkernel_backend_available(MicrokernelDomain::Matmul, MicrokernelBackendKind::Vulkan),
+                 "vulkan matmul backend must be available for the implemented M=1 F32 slice");
     ok &= expect(!microkernel_backend_available(MicrokernelDomain::Attention, MicrokernelBackendKind::Asm),
                  "asm attention backend must stay unavailable until implemented");
 
@@ -139,11 +143,11 @@ int main() {
 
     const auto vulkan_backend = select_microkernel_backend_from_value(MicrokernelDomain::Matmul, "vulkan");
     ok &= expect(vulkan_backend.requested == MicrokernelBackendKind::Vulkan &&
-                     vulkan_backend.effective == MicrokernelBackendKind::OpenCL &&
+                     vulkan_backend.effective == MicrokernelBackendKind::Vulkan &&
                      vulkan_backend.stability == MicrokernelStability::Experimental &&
-                     vulkan_backend.fallback_to_opencl &&
-                     !vulkan_backend.fallback_reason.empty(),
-                 "vulkan matmul selection must explicitly fallback until a Vulkan compute kernel lands");
+                     !vulkan_backend.fallback_to_opencl &&
+                     vulkan_backend.fallback_reason.empty(),
+                 "vulkan matmul selection must resolve to the implemented M=1 F32 backend");
 
     const auto unknown = select_microkernel_backend_from_value(MicrokernelDomain::Matmul, " mystery ");
     ok &= expect(unknown.requested == MicrokernelBackendKind::OpenCL &&

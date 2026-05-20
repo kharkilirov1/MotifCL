@@ -19,13 +19,14 @@ Current boundary:
 - `src/runtime/microkernel.cpp`
   - normalizes backend names;
   - exposes a concrete descriptor registry for the currently implemented
-    OpenCL matmul/attention/quant families;
+    OpenCL matmul/attention/quant families plus narrow opt-in Native/Vulkan
+    matmul slices;
   - reads per-domain env overrides;
   - resolves typed backend selections to available descriptors;
   - emits one warning per domain when an experimental/unknown backend is
     requested;
-  - keeps OpenCL as the effective backend until a native/ASM implementation is
-    actually wired and benchmark-gated.
+  - keeps OpenCL as the effective backend for unavailable experimental
+    domains.
 
 Opt-in selectors:
 
@@ -35,8 +36,9 @@ Opt-in selectors:
 
 The selectors are now touched by the real matmul, attention/KV-cache, and
 quantization callsites. `native`, `asm`, and `vulkan` are accepted only as
-explicit experimental requests; this build warns and falls back to OpenCL rather
-than silently taking an unimplemented path.
+explicit experimental requests. Implemented descriptor slices become effective;
+unimplemented domains warn and fall back to OpenCL rather than silently taking
+an invalid path.
 
 The typed backend structs are intentionally real but conservative: OpenCL has
 registered descriptors for the stable path. Native currently has narrow
@@ -59,9 +61,7 @@ is landed. A new backend becomes selectable only after
 `microkernel_backend_available(domain, backend)` returns true.
 
 `Vulkan` is the native GPU backend line. It is intentionally separate from the
-CPU `native`/`asm` path: selecting `MOTIFCL_MATMUL_BACKEND=vulkan` currently
-falls back to OpenCL with an explicit warning until a Vulkan compute descriptor
-lands. The repository now has a dependency-free Vulkan loader probe in
+CPU `native`/`asm` path. The repository has a dependency-free Vulkan loader probe in
 `include/motifcl/runtime/vulkan_backend.hpp` and
 `src/runtime/vulkan_backend.cpp`; it dynamically loads `vulkan-1.dll` on
 Windows or `libvulkan.so`/`libvulkan.so.1` on Linux, creates a minimal Vulkan
@@ -87,10 +87,18 @@ kernel at runtime, and executes `1xK * KxN -> 1xN` through the same
 storage-buffer compute path. The test suite exercises both malformed metadata
 rejection and a `1x3 * 3x2 -> 1x2` GPU result `{22, 28}`.
 
-This is still not a matmul replacement. Vulkan remains unavailable as a
-Matmul/Attention/Quant descriptor until the next layer lands: validated
-storage-buffer inputs, shape/stride contracts, and correctness/perf gates
-against the matching OpenCL kernels.
+`MOTIFCL_MATMUL_BACKEND=vulkan` now resolves to the narrow
+`vulkan.matmul.f32_m1` descriptor and the real `matmul()` callsite dispatches
+F32 `M=1`, no-autograd, rank-2 tensors with `K,N <= 64` through
+`run_vulkan_f32_m1_matmul()`. If Vulkan runtime/compute is unavailable the
+callsite falls back to the validated OpenCL path; strict testing can set
+`MOTIFCL_REQUIRE_VULKAN_COMPUTE=1` or `MOTIFCL_REQUIRE_VULKAN_MATMUL=1` to make
+that fallback fail loudly.
+
+This is still not a general matmul replacement. Vulkan Attention/Quant domains
+and non-M=1 or large F32 matmul shapes remain descriptor-empty or fall back to
+OpenCL until validated storage-buffer inputs, shape/stride contracts, and
+correctness/perf gates land against the matching OpenCL kernels.
 
 Policy for new fast paths:
 

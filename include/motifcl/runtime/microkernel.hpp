@@ -78,9 +78,9 @@ MatmulBackend selected_matmul_backend();
 AttentionBackend selected_attention_backend();
 QuantBackend selected_quant_backend();
 
-// Returns true for the currently compiled runtime. Experimental native/ASM
-// requests are explicit opt-ins, but until those implementations exist this
-// function emits one warning per domain and keeps OpenCL as the safe fallback.
+// Returns true when the selected backend for the domain is OpenCL. Experimental
+// backend requests are explicit opt-ins; unavailable domains emit one warning
+// and keep OpenCL as the safe fallback.
 bool microkernel_runtime_uses_opencl(MicrokernelDomain domain);
 
 } // namespace motifcl
