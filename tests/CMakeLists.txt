@@ -23,6 +23,7 @@ set(MOTIFCL_TESTS
     test_hf_modern_compat
     test_gguf
     test_microkernel
+    test_native_matmul
     test_artifact_fuzz
 )
 

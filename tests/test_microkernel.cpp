@@ -62,11 +62,13 @@ int main() {
                        "OpenCL attention descriptor registry must not be empty");
     expect_descriptors(MicrokernelDomain::Quant, MicrokernelBackendKind::OpenCL,
                        "OpenCL quant descriptor registry must not be empty");
+    expect_descriptors(MicrokernelDomain::Matmul, MicrokernelBackendKind::Native,
+                       "native matmul descriptor registry must not be empty");
 
     ok &= expect(microkernel_backend_available(MicrokernelDomain::Matmul, MicrokernelBackendKind::OpenCL),
                  "OpenCL matmul backend must be available");
-    ok &= expect(!microkernel_backend_available(MicrokernelDomain::Matmul, MicrokernelBackendKind::Native),
-                 "native matmul backend must stay unavailable until implemented");
+    ok &= expect(microkernel_backend_available(MicrokernelDomain::Matmul, MicrokernelBackendKind::Native),
+                 "native matmul backend must be available for the implemented M=1 F32 slice");
     ok &= expect(!microkernel_backend_available(MicrokernelDomain::Attention, MicrokernelBackendKind::Asm),
                  "asm attention backend must stay unavailable until implemented");
 
@@ -109,7 +111,15 @@ int main() {
                      native.stability == MicrokernelStability::Experimental &&
                      native.fallback_to_opencl &&
                      !native.fallback_reason.empty(),
-                 "native selection must explicitly fallback to OpenCL");
+                 "native attention selection must explicitly fallback to OpenCL");
+
+    const auto native_matmul = select_microkernel_backend_from_value(MicrokernelDomain::Matmul, "native");
+    ok &= expect(native_matmul.requested == MicrokernelBackendKind::Native &&
+                     native_matmul.effective == MicrokernelBackendKind::Native &&
+                     native_matmul.stability == MicrokernelStability::Experimental &&
+                     !native_matmul.fallback_to_opencl &&
+                     native_matmul.fallback_reason.empty(),
+                 "native matmul selection must resolve to the implemented native backend");
 
     const auto asm_backend = select_microkernel_backend_from_value(MicrokernelDomain::Quant, "asm");
     ok &= expect(asm_backend.requested == MicrokernelBackendKind::Asm &&

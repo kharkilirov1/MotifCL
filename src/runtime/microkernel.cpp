@@ -130,6 +130,12 @@ MicrokernelBackendKind microkernel_backend_from_name(const std::string& value, b
 
 std::vector<MicrokernelDescriptor> microkernel_descriptors(MicrokernelDomain domain,
                                                            MicrokernelBackendKind backend) {
+    if (backend == MicrokernelBackendKind::Native && domain == MicrokernelDomain::Matmul) {
+        return {
+            descriptor(domain, backend, "native.matmul.f32_m1",
+                       "opt-in host native F32 M=1 decode matmul; rank-2 same-backend tensors, no autograd, bounded M/N/K, OpenCL fallback for unsupported shapes"),
+        };
+    }
     if (backend != MicrokernelBackendKind::OpenCL) return {};
 
     switch (domain) {

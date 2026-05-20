@@ -11,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace motifcl {
 
@@ -810,6 +811,42 @@ void matmul_f32_m1_out(const Tensor& a, const Tensor& b, Tensor& out, int N, int
     autograd::record_op(kernel_name, {a.id(), b.id()}, {out.id()});
 }
 
+bool native_matmul_f32_m1_supported(const Tensor& a, const Tensor& b) {
+    return a.dtype() == DType::F32 &&
+           b.dtype() == DType::F32 &&
+           a.ndim() == 2 &&
+           b.ndim() == 2 &&
+           a.shape()[0] == 1 &&
+           a.shape()[1] == b.shape()[0] &&
+           !a.requires_grad() &&
+           !b.requires_grad();
+}
+
+Tensor matmul_native_f32_m1(const Tensor& a, const Tensor& b) {
+    require_matmul_f32(a, b);
+    validate_matmul_args(a, b, "native matmul f32 m1");
+    MCL_CHECK(a.shape()[0] == 1, "native matmul f32 m1 expects lhs M=1");
+    MCL_CHECK(!a.requires_grad() && !b.requires_grad(),
+              "native matmul f32 m1 does not support autograd; use OpenCL fallback");
+
+    const int64_t K = a.shape()[1];
+    const int64_t N = b.shape()[1];
+    auto a_host = a.to_vector<float>();
+    auto b_host = b.to_vector<float>();
+    std::vector<float> out_host(static_cast<std::size_t>(N), 0.0f);
+    for (int64_t col = 0; col < N; ++col) {
+        float acc = 0.0f;
+        for (int64_t k = 0; k < K; ++k) {
+            acc += a_host[static_cast<std::size_t>(k)] *
+                   b_host[static_cast<std::size_t>(k * N + col)];
+        }
+        out_host[static_cast<std::size_t>(col)] = acc;
+    }
+    auto out = Tensor::from_cpu(a.backend(), {1, N}, DType::F32, out_host.data());
+    autograd::record_op("matmul_native_f32_m1", {a.id(), b.id()}, {out.id()});
+    return out;
+}
+
 Tensor matmul_flags(const Tensor& a, const Tensor& b, bool trans_a, bool trans_b) {
     (void)microkernel_runtime_uses_opencl(MicrokernelDomain::Matmul);
     require_matmul_f32(a, b);
@@ -921,6 +958,10 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
         if (a.dtype() == DType::Q8_0 && b.dtype() == DType::Q4_0) return matmul_q8_q4(a, b);
         if (a.dtype() == DType::Q4_0 && b.dtype() == DType::Q8_0) return matmul_q4_q8(a, b);
         MCL_CHECK(false, "unsupported quantized matmul dtype combination");
+    }
+    if (selected_matmul_backend().kind == MicrokernelBackendKind::Native &&
+        native_matmul_f32_m1_supported(a, b)) {
+        return matmul_native_f32_m1(a, b);
     }
     auto out = matmul_flags(a, b, false, false);
     if (autograd::is_enabled() && (a.requires_grad() || b.requires_grad())) {
