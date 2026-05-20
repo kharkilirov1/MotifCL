@@ -1,5 +1,6 @@
 set(MOTIFCL_TOOLS
     dump_opencl_info
+    dump_vulkan_info
     compare_cpu_gpu
     kernel_tuner
     generate_transformer

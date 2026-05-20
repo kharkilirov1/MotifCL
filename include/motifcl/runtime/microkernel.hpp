@@ -16,6 +16,7 @@ enum class MicrokernelBackendKind {
     OpenCL,
     Native,
     Asm,
+    Vulkan,
 };
 
 enum class MicrokernelStability {

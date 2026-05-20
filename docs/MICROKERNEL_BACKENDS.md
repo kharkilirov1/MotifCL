@@ -1,8 +1,8 @@
 # Microkernel backend boundary
 
-MotifCL keeps OpenCL as the stable default backend. Native/ASM kernels should
-enter only through an explicit microkernel layer, not by rewriting model or op
-code.
+MotifCL keeps OpenCL as the stable default backend. Native CPU, ASM CPU, and
+native GPU kernels should enter only through an explicit microkernel layer, not
+by rewriting model or op code.
 
 Current boundary:
 
@@ -10,7 +10,7 @@ Current boundary:
   - `MatmulBackend`
   - `AttentionBackend`
   - `QuantBackend`
-  - backend kind: `OpenCL`, `Native`, `Asm`
+  - backend kind: `OpenCL`, `Native`, `Asm`, `Vulkan`
   - stability: `Stable`, `Experimental`
   - descriptor registry: `microkernel_descriptors(domain, backend)`
   - availability gate: `microkernel_backend_available(domain, backend)`
@@ -29,14 +29,14 @@ Current boundary:
 
 Opt-in selectors:
 
-- `MOTIFCL_MATMUL_BACKEND=opencl|native|asm`
-- `MOTIFCL_ATTENTION_BACKEND=opencl|native|asm`
-- `MOTIFCL_QUANT_BACKEND=opencl|native|asm`
+- `MOTIFCL_MATMUL_BACKEND=opencl|native|asm|vulkan`
+- `MOTIFCL_ATTENTION_BACKEND=opencl|native|asm|vulkan`
+- `MOTIFCL_QUANT_BACKEND=opencl|native|asm|vulkan`
 
 The selectors are now touched by the real matmul, attention/KV-cache, and
-quantization callsites. `native` and `asm` are accepted only as explicit
-experimental requests; this build warns and falls back to OpenCL rather than
-silently taking an unimplemented path.
+quantization callsites. `native`, `asm`, and `vulkan` are accepted only as
+explicit experimental requests; this build warns and falls back to OpenCL rather
+than silently taking an unimplemented path.
 
 The typed backend structs are intentionally real but conservative: OpenCL has
 registered descriptors for the stable path. Native currently has narrow
@@ -58,16 +58,31 @@ domains stay unavailable and descriptor-empty until a measured implementation
 is landed. A new backend becomes selectable only after
 `microkernel_backend_available(domain, backend)` returns true.
 
+`Vulkan` is the native GPU backend line. It is intentionally separate from the
+CPU `native`/`asm` path: selecting `MOTIFCL_MATMUL_BACKEND=vulkan` currently
+falls back to OpenCL with an explicit warning until a Vulkan compute descriptor
+lands. The repository now has a dependency-free Vulkan loader probe in
+`include/motifcl/runtime/vulkan_backend.hpp` and
+`src/runtime/vulkan_backend.cpp`; it dynamically loads `vulkan-1.dll` on
+Windows or `libvulkan.so`/`libvulkan.so.1` on Linux, creates a minimal Vulkan
+instance, enumerates physical devices, and exposes `motifcl_dump_vulkan_info`.
+This keeps CI/builds independent of the Vulkan SDK while proving whether the
+machine has a viable native-GPU Vulkan runtime.
+
 Policy for new fast paths:
 
 1. Keep OpenCL as the fallback.
 2. Add backend descriptors for the exact domain/backend pair.
-3. Native/ASM path is opt-in until it has correctness and performance evidence.
+3. Native/ASM/Vulkan paths are opt-in until they have correctness and
+   performance evidence.
 4. Add a per-callsite validator before every kernel launch.
 5. Add correctness coverage to CTest/pytest.
 6. Capture baseline and candidate performance artifacts.
-7. Run `tools/perf_truth_gate.py baseline.json candidate.json ...`.
-8. If candidate is slower or unstable, dispatch must fall back to OpenCL.
+7. For Vulkan GPU paths: add the SPIR-V/compute pipeline plus descriptor-set
+   validation under the Vulkan backend, then compare it against the matching
+   OpenCL kernel on the same tensor shape.
+8. Run `tools/perf_truth_gate.py baseline.json candidate.json ...`.
+9. If candidate is slower or unstable, dispatch must fall back to OpenCL.
 
 This lets us add custom kernels incrementally while preserving the existing
 runtime contract and release gate.

@@ -100,6 +100,7 @@ set(MOTIFCL_SOURCES
     src/runtime/backend.cpp
     src/runtime/microkernel.cpp
     src/runtime/native_matmul.cpp
+    src/runtime/vulkan_backend.cpp
     src/runtime/profiler.cpp
     src/tensor/storage.cpp
     src/tensor/allocator.cpp
@@ -160,7 +161,7 @@ target_compile_definitions(motifcl
         MOTIFCL_INSTALL_KERNEL_DIR="${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/motifcl/kernels"
 )
 
-target_link_libraries(motifcl PUBLIC OpenCL::OpenCL)
+target_link_libraries(motifcl PUBLIC OpenCL::OpenCL PRIVATE ${CMAKE_DL_LIBS})
 motifcl_apply_compiler_options(motifcl)
 
 add_custom_target(motifcl_copy_kernels ALL

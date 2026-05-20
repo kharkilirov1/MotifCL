@@ -86,7 +86,9 @@ MicrokernelStability microkernel_backend_stability(MicrokernelBackendKind kind) 
 }
 
 bool microkernel_backend_is_experimental(MicrokernelBackendKind kind) {
-    return kind == MicrokernelBackendKind::Native || kind == MicrokernelBackendKind::Asm;
+    return kind == MicrokernelBackendKind::Native ||
+           kind == MicrokernelBackendKind::Asm ||
+           kind == MicrokernelBackendKind::Vulkan;
 }
 
 const char* microkernel_backend_name(MicrokernelBackendKind kind) {
@@ -94,6 +96,7 @@ const char* microkernel_backend_name(MicrokernelBackendKind kind) {
     case MicrokernelBackendKind::OpenCL: return "opencl";
     case MicrokernelBackendKind::Native: return "native";
     case MicrokernelBackendKind::Asm: return "asm";
+    case MicrokernelBackendKind::Vulkan: return "vulkan";
     }
     return "unknown";
 }
@@ -124,6 +127,7 @@ MicrokernelBackendKind microkernel_backend_from_name(const std::string& value, b
     }
     if (normalized == "native" || normalized == "cpu") return MicrokernelBackendKind::Native;
     if (normalized == "asm" || normalized == "assembly") return MicrokernelBackendKind::Asm;
+    if (normalized == "vulkan" || normalized == "vk") return MicrokernelBackendKind::Vulkan;
     if (recognized) *recognized = false;
     return MicrokernelBackendKind::OpenCL;
 }
@@ -188,7 +192,7 @@ MicrokernelSelection select_microkernel_backend_from_value(MicrokernelDomain dom
         selection.fallback_to_opencl = true;
         selection.fallback_reason = std::string("Unknown ") + microkernel_domain_name(domain) +
             " microkernel backend '" + selection.requested_name + "'; falling back to opencl. Set " +
-            microkernel_env_name(domain) + "=opencl|native|asm.";
+            microkernel_env_name(domain) + "=opencl|native|asm|vulkan.";
         return selection;
     }
 

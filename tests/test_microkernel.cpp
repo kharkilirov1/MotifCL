@@ -22,6 +22,8 @@ int main() {
                  "native backend name mismatch");
     ok &= expect(std::string(microkernel_backend_name(MicrokernelBackendKind::Asm)) == "asm",
                  "asm backend name mismatch");
+    ok &= expect(std::string(microkernel_backend_name(MicrokernelBackendKind::Vulkan)) == "vulkan",
+                 "vulkan backend name mismatch");
 
     ok &= expect(!microkernel_backend_is_experimental(MicrokernelBackendKind::OpenCL),
                  "OpenCL must be stable");
@@ -29,6 +31,8 @@ int main() {
                  "native backend must be experimental");
     ok &= expect(microkernel_backend_is_experimental(MicrokernelBackendKind::Asm),
                  "asm backend must be experimental");
+    ok &= expect(microkernel_backend_is_experimental(MicrokernelBackendKind::Vulkan),
+                 "vulkan backend must be experimental until compute kernels land");
 
     ok &= expect(std::string(microkernel_domain_name(MicrokernelDomain::Matmul)) == "matmul",
                  "matmul domain name mismatch");
@@ -95,6 +99,10 @@ int main() {
                  "failed to parse native backend");
     ok &= expect(microkernel_backend_from_name("assembly", &recognized) == MicrokernelBackendKind::Asm && recognized,
                  "failed to parse assembly backend");
+    ok &= expect(microkernel_backend_from_name("vk", &recognized) == MicrokernelBackendKind::Vulkan && recognized,
+                 "failed to parse vk backend alias");
+    ok &= expect(microkernel_backend_from_name("Vulkan", &recognized) == MicrokernelBackendKind::Vulkan && recognized,
+                 "failed to parse vulkan backend");
     ok &= expect(microkernel_backend_from_name("definitely-not-real", &recognized) == MicrokernelBackendKind::OpenCL && !recognized,
                  "unknown backend must be unrecognized OpenCL fallback");
 
@@ -128,6 +136,14 @@ int main() {
                      asm_backend.fallback_to_opencl &&
                      !asm_backend.fallback_reason.empty(),
                  "asm selection must explicitly fallback to OpenCL");
+
+    const auto vulkan_backend = select_microkernel_backend_from_value(MicrokernelDomain::Matmul, "vulkan");
+    ok &= expect(vulkan_backend.requested == MicrokernelBackendKind::Vulkan &&
+                     vulkan_backend.effective == MicrokernelBackendKind::OpenCL &&
+                     vulkan_backend.stability == MicrokernelStability::Experimental &&
+                     vulkan_backend.fallback_to_opencl &&
+                     !vulkan_backend.fallback_reason.empty(),
+                 "vulkan matmul selection must explicitly fallback until a Vulkan compute kernel lands");
 
     const auto unknown = select_microkernel_backend_from_value(MicrokernelDomain::Matmul, " mystery ");
     ok &= expect(unknown.requested == MicrokernelBackendKind::OpenCL &&

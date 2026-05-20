@@ -24,6 +24,7 @@ set(MOTIFCL_TESTS
     test_gguf
     test_microkernel
     test_native_matmul
+    test_vulkan_backend
     test_artifact_fuzz
 )
 

@@ -14,6 +14,7 @@
 #include <motifcl/runtime/native_matmul.hpp>
 #include <motifcl/runtime/opencl_context.hpp>
 #include <motifcl/runtime/program.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 #include <motifcl/tensor/tensor.hpp>
 #include <motifcl/ops/basic_ops.hpp>
 #include <motifcl/ops/fp16.hpp>
