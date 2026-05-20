@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include <motifcl/runtime/microkernel.hpp>
 #include <motifcl/runtime/vulkan_backend.hpp>
@@ -31,6 +32,10 @@ int main() {
     expect(selection.fallback_to_opencl && !selection.fallback_reason.empty(),
            "Vulkan backend fallback must be explicit and explainable");
 
+    const auto invalid_matmul = run_vulkan_f32_m1_matmul({1.0f, 2.0f}, {1.0f, 2.0f, 3.0f}, 2, 2);
+    expect(!invalid_matmul.success, "Vulkan parameterized matmul must reject malformed B size");
+    expect(!invalid_matmul.error.empty(), "Vulkan parameterized matmul validation failure must explain why");
+
     if (result.available()) {
         const auto compute = run_vulkan_smoke_compute();
         expect(compute.success, "Vulkan smoke compute must succeed when a Vulkan device is available");
@@ -45,6 +50,24 @@ int main() {
             expect(matmul.output[0] == 90.0f && matmul.output[1] == 100.0f &&
                        matmul.output[2] == 110.0f && matmul.output[3] == 120.0f,
                    "Vulkan f32 matmul smoke output mismatch");
+        }
+
+        const std::vector<float> a = {1.0f, 2.0f, 3.0f};
+        const std::vector<float> b = {
+            1.0f, 2.0f,
+            3.0f, 4.0f,
+            5.0f, 6.0f,
+        };
+        const auto dynamic_matmul = run_vulkan_f32_m1_matmul(a, b, 3, 2);
+        expect(dynamic_matmul.success,
+               "Vulkan parameterized f32 M=1 matmul must succeed when a Vulkan device is available");
+        expect(dynamic_matmul.error.empty(),
+               "Vulkan parameterized f32 M=1 matmul success must not carry an error");
+        expect(dynamic_matmul.output.size() == 2,
+               "Vulkan parameterized f32 M=1 matmul must return N output values");
+        if (dynamic_matmul.output.size() == 2) {
+            expect(dynamic_matmul.output[0] == 22.0f && dynamic_matmul.output[1] == 28.0f,
+                   "Vulkan parameterized f32 M=1 matmul output mismatch");
         }
     }
 

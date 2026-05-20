@@ -80,6 +80,12 @@ The Vulkan line also has a first fixed-shape F32 matmul smoke:
 an embedded SPIR-V compute pipeline to execute a `1x4 * 4x4 -> 1x4` multiply on
 the GPU. It verifies the output `{90, 100, 110, 120}`. This is deliberately a
 small correctness/data-path milestone, not yet a general matmul kernel.
+The next step has also landed as a bounded specialized helper:
+`run_vulkan_f32_m1_matmul(a, b, k, n)` validates `A=K`, `B=K*N`, bounds `K,N`
+to a small smoke-safe specialization range, generates a tiny unrolled SPIR-V
+kernel at runtime, and executes `1xK * KxN -> 1xN` through the same
+storage-buffer compute path. The test suite exercises both malformed metadata
+rejection and a `1x3 * 3x2 -> 1x2` GPU result `{22, 28}`.
 
 This is still not a matmul replacement. Vulkan remains unavailable as a
 Matmul/Attention/Quant descriptor until the next layer lands: validated

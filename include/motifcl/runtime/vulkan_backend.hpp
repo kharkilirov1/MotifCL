@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -51,6 +52,10 @@ struct VulkanF32MatmulSmokeResult {
 
 VulkanProbeResult probe_vulkan_runtime();
 VulkanSmokeComputeResult run_vulkan_smoke_compute();
+VulkanF32MatmulSmokeResult run_vulkan_f32_m1_matmul(const std::vector<float>& a,
+                                                    const std::vector<float>& b,
+                                                    std::size_t k,
+                                                    std::size_t n);
 VulkanF32MatmulSmokeResult run_vulkan_f32_matmul_smoke();
 std::string vulkan_version_string(std::uint32_t version);
 
