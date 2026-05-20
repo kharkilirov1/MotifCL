@@ -66,8 +66,19 @@ lands. The repository now has a dependency-free Vulkan loader probe in
 `src/runtime/vulkan_backend.cpp`; it dynamically loads `vulkan-1.dll` on
 Windows or `libvulkan.so`/`libvulkan.so.1` on Linux, creates a minimal Vulkan
 instance, enumerates physical devices, and exposes `motifcl_dump_vulkan_info`.
-This keeps CI/builds independent of the Vulkan SDK while proving whether the
-machine has a viable native-GPU Vulkan runtime.
+It also contains the first real Vulkan compute smoke path:
+`run_vulkan_smoke_compute()` creates a device/queue, storage buffer,
+descriptor set, shader module, compute pipeline, command buffer, submits a
+tiny SPIR-V kernel, and verifies that the GPU wrote `42.0f` into host-visible
+memory. `motifcl_dump_vulkan_info` prints this smoke result when a Vulkan
+device is available. This keeps CI/builds independent of the Vulkan SDK while
+proving whether the machine has a viable native-GPU Vulkan runtime and
+execution path.
+
+This is still not a matmul replacement. Vulkan remains unavailable as a
+Matmul/Attention/Quant descriptor until the next layer lands: validated
+storage-buffer inputs, shape/stride contracts, and correctness/perf gates
+against the matching OpenCL kernels.
 
 Policy for new fast paths:
 

@@ -35,7 +35,15 @@ struct VulkanProbeResult {
     }
 };
 
+struct VulkanSmokeComputeResult {
+    bool success = false;
+    float output = 0.0f;
+    std::string device_name;
+    std::string error;
+};
+
 VulkanProbeResult probe_vulkan_runtime();
+VulkanSmokeComputeResult run_vulkan_smoke_compute();
 std::string vulkan_version_string(std::uint32_t version);
 
 } // namespace motifcl

@@ -32,6 +32,13 @@ int main() {
         std::cout << "device[" << i << "].device_id=0x" << std::hex << device.device_id << std::dec << "\n";
         std::cout << "device[" << i << "].api_version=" << motifcl::vulkan_version_string(device.api_version) << "\n";
     }
+    if (probe.available()) {
+        const auto smoke = motifcl::run_vulkan_smoke_compute();
+        std::cout << "smoke_compute_success=" << (smoke.success ? "true" : "false") << "\n";
+        std::cout << "smoke_compute_output=" << smoke.output << "\n";
+        std::cout << "smoke_compute_device=" << smoke.device_name << "\n";
+        if (!smoke.error.empty()) std::cout << "smoke_compute_error=" << smoke.error << "\n";
+    }
     if (!probe.error.empty()) std::cout << "error=" << probe.error << "\n";
     return probe.loader_found ? 0 : 77;
 }

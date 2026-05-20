@@ -31,5 +31,12 @@ int main() {
     expect(selection.fallback_to_opencl && !selection.fallback_reason.empty(),
            "Vulkan backend fallback must be explicit and explainable");
 
+    if (result.available()) {
+        const auto compute = run_vulkan_smoke_compute();
+        expect(compute.success, "Vulkan smoke compute must succeed when a Vulkan device is available");
+        expect(compute.error.empty(), "Vulkan smoke compute success must not carry an error");
+        expect(compute.output == 42.0f, "Vulkan smoke compute must write the shader output");
+    }
+
     return ok ? 0 : 1;
 }
