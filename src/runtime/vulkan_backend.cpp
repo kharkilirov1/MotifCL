@@ -795,6 +795,175 @@ std::vector<std::uint32_t> f32_m1_matmul_spirv(std::size_t k, std::size_t n) {
     return words;
 }
 
+std::vector<std::uint32_t> f32_matmul_spirv(std::size_t k, std::size_t n) {
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_float = 22;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_iadd = 128;
+    constexpr std::uint16_t op_imul = 132;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_fmul = 133;
+    constexpr std::uint16_t op_fadd = 129;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+
+    const auto max_constant = std::max(k, n);
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_f32 = 5;
+    const std::uint32_t id_u32 = 6;
+    const std::uint32_t id_v3u32 = 7;
+    const std::uint32_t id_ptr_input_v3u32 = 8;
+    const std::uint32_t id_global_invocation_id = 9;
+    std::uint32_t next_id = 10;
+    std::vector<std::uint32_t> constants(max_constant + 1);
+    for (std::uint32_t value = 0; value <= max_constant; ++value) constants[value] = next_id++;
+    const std::uint32_t id_runtime_array = next_id++;
+    const std::uint32_t id_buffer_struct = next_id++;
+    const std::uint32_t id_ptr_buffer = next_id++;
+    const std::uint32_t id_ptr_f32 = next_id++;
+    const std::uint32_t id_a = next_id++;
+    const std::uint32_t id_b = next_id++;
+    const std::uint32_t id_c = next_id++;
+    auto new_id = [&]() {
+        return next_id++;
+    };
+
+    std::vector<std::uint32_t> body;
+    auto emit_body = [&](std::uint16_t opcode, const std::vector<std::uint32_t>& operands) {
+        append_spirv_inst(body, opcode, operands);
+    };
+
+    const auto gid = new_id();
+    const auto col = new_id();
+    const auto row = new_id();
+    emit_body(op_load, {id_v3u32, gid, id_global_invocation_id});
+    emit_body(op_composite_extract, {id_u32, col, gid, 0});
+    emit_body(op_composite_extract, {id_u32, row, gid, 1});
+
+    std::uint32_t acc = 0;
+    for (std::uint32_t kk = 0; kk < static_cast<std::uint32_t>(k); ++kk) {
+        const auto a_row_base = new_id();
+        const auto a_index = new_id();
+        const auto b_row_base = new_id();
+        const auto b_index = new_id();
+        const auto a_ptr = new_id();
+        const auto a_val = new_id();
+        const auto b_ptr = new_id();
+        const auto b_val = new_id();
+        const auto product = new_id();
+        emit_body(op_imul, {id_u32, a_row_base, row, constants[static_cast<std::uint32_t>(k)]});
+        emit_body(op_iadd, {id_u32, a_index, a_row_base, constants[kk]});
+        emit_body(op_imul, {id_u32, b_row_base, constants[kk], constants[static_cast<std::uint32_t>(n)]});
+        emit_body(op_iadd, {id_u32, b_index, b_row_base, col});
+        emit_body(op_access_chain, {id_ptr_f32, a_ptr, id_a, constants[0], a_index});
+        emit_body(op_load, {id_f32, a_val, a_ptr});
+        emit_body(op_access_chain, {id_ptr_f32, b_ptr, id_b, constants[0], b_index});
+        emit_body(op_load, {id_f32, b_val, b_ptr});
+        emit_body(op_fmul, {id_f32, product, a_val, b_val});
+        if (acc == 0) {
+            acc = product;
+        } else {
+            const auto sum = new_id();
+            emit_body(op_fadd, {id_f32, sum, acc, product});
+            acc = sum;
+        }
+    }
+    const auto c_row_base = new_id();
+    const auto c_index = new_id();
+    const auto c_ptr = new_id();
+    emit_body(op_imul, {id_u32, c_row_base, row, constants[static_cast<std::uint32_t>(n)]});
+    emit_body(op_iadd, {id_u32, c_index, c_row_base, col});
+    emit_body(op_access_chain, {id_ptr_f32, c_ptr, id_c, constants[0], c_index});
+    emit_body(op_store, {c_ptr, acc});
+
+    std::vector<std::uint32_t> words;
+    words.reserve(180 + body.size());
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(next_id);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_a, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_a, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_b, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_b, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_c, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_c, decoration_binding, 2});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_float, {id_f32, 32});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    for (std::uint32_t value = 0; value <= max_constant; ++value) {
+        append_spirv_inst(words, op_constant, {id_u32, constants[value], value});
+    }
+    append_spirv_inst(words, op_type_runtime_array, {id_runtime_array, id_f32});
+    append_spirv_inst(words, op_type_struct, {id_buffer_struct, id_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_buffer, storage_class_uniform, id_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32, storage_class_uniform, id_f32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_a, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_b, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_c, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    words.insert(words.end(), body.begin(), body.end());
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
 std::uint32_t find_host_visible_coherent_memory_type(const VkPhysicalDeviceMemoryProperties& memory_properties,
                                                      std::uint32_t memory_type_bits) {
     constexpr std::uint32_t kInvalid = 0xffffffffu;
@@ -951,7 +1120,10 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
     const std::uint32_t* spirv,
     std::size_t spirv_word_count,
     const std::vector<VulkanStorageBufferSpec>& buffer_specs,
-    const std::vector<std::size_t>& output_buffer_indices) {
+    const std::vector<std::size_t>& output_buffer_indices,
+    std::uint32_t group_count_x = 1,
+    std::uint32_t group_count_y = 1,
+    std::uint32_t group_count_z = 1) {
     VulkanStorageBufferComputeResult result;
 
     auto fail = [&](const std::string& message) {
@@ -961,6 +1133,9 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
     if (!spirv || spirv_word_count == 0) return fail("Vulkan compute shader is empty");
     if (buffer_specs.empty()) return fail("Vulkan compute requires at least one storage buffer");
     if (buffer_specs.size() > 16) return fail("Vulkan compute smoke supports at most 16 storage buffers");
+    if (group_count_x == 0 || group_count_y == 0 || group_count_z == 0) {
+        return fail("Vulkan compute dispatch dimensions must be non-zero");
+    }
     for (std::size_t i = 0; i < buffer_specs.size(); ++i) {
         if (buffer_specs[i].nbytes == 0) return fail("Vulkan compute storage buffer must be non-empty");
     }
@@ -1406,7 +1581,7 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
     cmd_bind_pipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     cmd_bind_descriptor_sets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 1,
                              &descriptor_set, 0, nullptr);
-    cmd_dispatch(command_buffer, 1, 1, 1);
+    cmd_dispatch(command_buffer, group_count_x, group_count_y, group_count_z);
     if (end_command_buffer(command_buffer) != VK_SUCCESS) {
         return fail_with_cleanup("vkEndCommandBuffer failed");
     }
@@ -1471,6 +1646,55 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
         result.success = false;
         result.error = "Vulkan smoke compute returned malformed output";
     }
+    return result;
+}
+
+VulkanF32MatmulSmokeResult run_vulkan_f32_matmul(const std::vector<float>& a,
+                                                 const std::vector<float>& b,
+                                                 std::size_t m,
+                                                 std::size_t k,
+                                                 std::size_t n) {
+    VulkanF32MatmulSmokeResult result;
+    constexpr std::size_t kMaxSpecializedK = 256;
+    constexpr std::size_t kMaxDispatchDim = 4096;
+
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (m == 0 || k == 0 || n == 0) return fail("Vulkan f32 matmul requires non-zero M, K, and N");
+    if (k > kMaxSpecializedK) return fail("Vulkan f32 matmul currently supports K up to 256");
+    if (m > kMaxDispatchDim || n > kMaxDispatchDim) {
+        return fail("Vulkan f32 matmul dispatch currently supports M,N up to 4096");
+    }
+    if (m > std::numeric_limits<std::size_t>::max() / k) return fail("Vulkan f32 matmul M*K overflows size_t");
+    if (k > std::numeric_limits<std::size_t>::max() / n) return fail("Vulkan f32 matmul K*N overflows size_t");
+    if (m > std::numeric_limits<std::size_t>::max() / n) return fail("Vulkan f32 matmul M*N overflows size_t");
+    if (a.size() != m * k) return fail("Vulkan f32 matmul A size must equal M*K");
+    if (b.size() != k * n) return fail("Vulkan f32 matmul B size must equal K*N");
+
+    std::vector<float> c(m * n, 0.0f);
+    const auto shader = f32_matmul_spirv(k, n);
+    const std::vector<VulkanStorageBufferSpec> buffers = {
+        {a.data(), a.size() * sizeof(float)},
+        {b.data(), b.size() * sizeof(float)},
+        {c.data(), c.size() * sizeof(float)},
+    };
+    const auto run = run_vulkan_storage_buffer_compute(
+        shader.data(), shader.size(), buffers, {2},
+        static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(m), 1);
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    if (!run.success) return result;
+    if (run.outputs.size() != 1 || run.outputs[0].size() != c.size() * sizeof(float)) {
+        result.success = false;
+        result.error = "Vulkan f32 matmul returned malformed output";
+        return result;
+    }
+
+    result.output.resize(c.size());
+    std::memcpy(result.output.data(), run.outputs[0].data(), run.outputs[0].size());
     return result;
 }
 

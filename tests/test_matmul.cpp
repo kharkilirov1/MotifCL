@@ -1,5 +1,6 @@
 #include <cmath>
 #include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <iostream>
 #include <vector>
@@ -29,7 +30,14 @@ int main() {
         auto Captured = motifcl::matmul(A, B);
         (void)Captured;
         auto graph = motifcl::autograd::end_graph_capture();
-        if (graph.empty() || graph.nodes()[0].op != "matmul_register_block4_f32") return 1;
+        const bool strict_vulkan_matmul = std::getenv("MOTIFCL_REQUIRE_VULKAN_MATMUL") != nullptr;
+        if (graph.empty()) return 1;
+        if (strict_vulkan_matmul) {
+            if (graph.nodes()[0].op != "matmul_vulkan_f32") return 1;
+        } else if (graph.nodes()[0].op != "matmul_register_block4_f32" &&
+                   graph.nodes()[0].op != "matmul_vulkan_f32") {
+            return 1;
+        }
         for (int tile : {4, 8, 16}) {
             auto V = motifcl::matmul_tiled_variant(A, B, tile).to_vector<float>();
             for (int i = 0; i < 4; ++i) if (std::fabs(V[i] - ref[i]) > 1e-4f) return 1;

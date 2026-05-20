@@ -853,6 +853,23 @@ bool vulkan_matmul_f32_m1_supported(const Tensor& a, const Tensor& b) {
            !b.requires_grad();
 }
 
+bool vulkan_matmul_f32_supported(const Tensor& a, const Tensor& b) {
+    return a.dtype() == DType::F32 &&
+           b.dtype() == DType::F32 &&
+           a.ndim() == 2 &&
+           b.ndim() == 2 &&
+           a.backend_ptr() == b.backend_ptr() &&
+           a.shape()[0] > 0 &&
+           a.shape()[1] > 0 &&
+           b.shape()[1] > 0 &&
+           a.shape()[1] == b.shape()[0] &&
+           a.shape()[1] <= 256 &&
+           a.shape()[0] <= 4096 &&
+           b.shape()[1] <= 4096 &&
+           !a.requires_grad() &&
+           !b.requires_grad();
+}
+
 Tensor matmul_native_f32_m1(const Tensor& a, const Tensor& b) {
     require_matmul_f32(a, b);
     validate_matmul_args(a, b, "native matmul f32 m1");
@@ -930,6 +947,36 @@ Tensor matmul_vulkan_f32_m1_from_result(const Tensor& a,
               "vulkan matmul f32 m1 returned unexpected output size");
     auto out = Tensor::from_cpu(a.backend(), {1, b.shape()[1]}, DType::F32, result.output.data());
     autograd::record_op("matmul_vulkan_f32_m1", {a.id(), b.id()}, {out.id()});
+    return out;
+}
+
+VulkanF32MatmulSmokeResult run_vulkan_f32_tensor_matmul(const Tensor& a, const Tensor& b) {
+    require_matmul_f32(a, b);
+    validate_matmul_args(a, b, "vulkan matmul f32");
+    MCL_CHECK(a.shape()[0] > 0 && a.shape()[1] > 0 && b.shape()[1] > 0,
+              "vulkan matmul f32 expects non-empty M, K, and N");
+    MCL_CHECK(a.shape()[1] <= 256, "vulkan matmul f32 currently supports K up to 256");
+    MCL_CHECK(a.shape()[0] <= 4096 && b.shape()[1] <= 4096,
+              "vulkan matmul f32 currently supports M,N up to 4096");
+    MCL_CHECK(!a.requires_grad() && !b.requires_grad(),
+              "vulkan matmul f32 does not support autograd; use OpenCL fallback");
+
+    const auto M = static_cast<std::size_t>(a.shape()[0]);
+    const auto K = static_cast<std::size_t>(a.shape()[1]);
+    const auto N = static_cast<std::size_t>(b.shape()[1]);
+    auto a_host = a.to_vector<float>();
+    auto b_host = b.to_vector<float>();
+    return run_vulkan_f32_matmul(a_host, b_host, M, K, N);
+}
+
+Tensor matmul_vulkan_f32_from_result(const Tensor& a,
+                                     const Tensor& b,
+                                     const VulkanF32MatmulSmokeResult& result) {
+    MCL_CHECK(result.success, std::string("vulkan matmul f32 failed: ") + result.error);
+    const auto expected = static_cast<std::size_t>(a.shape()[0] * b.shape()[1]);
+    MCL_CHECK(result.output.size() == expected, "vulkan matmul f32 returned unexpected output size");
+    auto out = Tensor::from_cpu(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32, result.output.data());
+    autograd::record_op("matmul_vulkan_f32", {a.id(), b.id()}, {out.id()});
     return out;
 }
 
@@ -1055,6 +1102,13 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
         if (result.success) return matmul_vulkan_f32_m1_from_result(a, b, result);
         MCL_CHECK(!strict_vulkan_matmul_required(),
                   std::string("vulkan matmul f32 m1 failed: ") + result.error);
+    }
+    if (selected_backend.kind == MicrokernelBackendKind::Vulkan &&
+        vulkan_matmul_f32_supported(a, b)) {
+        const auto result = run_vulkan_f32_tensor_matmul(a, b);
+        if (result.success) return matmul_vulkan_f32_from_result(a, b, result);
+        MCL_CHECK(!strict_vulkan_matmul_required(),
+                  std::string("vulkan matmul f32 failed: ") + result.error);
     }
     if (selected_backend.kind == MicrokernelBackendKind::Native &&
         native_matmul_f32_m1_supported(a, b)) {

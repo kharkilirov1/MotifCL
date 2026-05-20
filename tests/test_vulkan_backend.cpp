@@ -52,6 +52,10 @@ int main() {
     const auto invalid_matmul = run_vulkan_f32_m1_matmul({1.0f, 2.0f}, {1.0f, 2.0f, 3.0f}, 2, 2);
     expect(!invalid_matmul.success, "Vulkan parameterized matmul must reject malformed B size");
     expect(!invalid_matmul.error.empty(), "Vulkan parameterized matmul validation failure must explain why");
+    const auto invalid_general_matmul =
+        run_vulkan_f32_matmul({1.0f, 2.0f}, {1.0f, 2.0f, 3.0f}, 2, 2, 2);
+    expect(!invalid_general_matmul.success, "Vulkan general matmul must reject malformed A size");
+    expect(!invalid_general_matmul.error.empty(), "Vulkan general matmul validation failure must explain why");
 
     if (result.available()) {
         const bool require_vulkan_compute = std::getenv("MOTIFCL_REQUIRE_VULKAN_COMPUTE") != nullptr;
@@ -92,6 +96,23 @@ int main() {
                    "Vulkan parameterized f32 M=1 matmul output mismatch");
         }
 
+        const std::vector<float> a2 = {
+            1.0f, 2.0f, 3.0f,
+            4.0f, 5.0f, 6.0f,
+        };
+        const auto general_matmul = run_vulkan_f32_matmul(a2, b, 2, 3, 2);
+        expect(general_matmul.success,
+               "Vulkan general f32 matmul must succeed when a Vulkan device is available");
+        expect(general_matmul.error.empty(),
+               "Vulkan general f32 matmul success must not carry an error");
+        expect(general_matmul.output.size() == 4,
+               "Vulkan general f32 matmul must return M*N output values");
+        if (general_matmul.output.size() == 4) {
+            expect(general_matmul.output[0] == 22.0f && general_matmul.output[1] == 28.0f &&
+                       general_matmul.output[2] == 49.0f && general_matmul.output[3] == 64.0f,
+                   "Vulkan general f32 matmul output mismatch");
+        }
+
         set_env("MOTIFCL_MATMUL_BACKEND", "vulkan");
         try {
             auto backend = Backend::create_opencl();
@@ -108,6 +129,20 @@ int main() {
             }
             expect(!graph.empty() && graph.nodes()[0].op == "matmul_vulkan_f32_m1",
                    "Vulkan matmul dispatch must record the Vulkan M=1 op");
+
+            auto A2 = Tensor::from_cpu(backend, {2, 3}, DType::F32, a2.data());
+            autograd::begin_graph_capture();
+            auto C2 = matmul(A2, B);
+            auto graph2 = autograd::end_graph_capture();
+            const auto c2 = C2.to_vector<float>();
+            expect(c2.size() == 4, "Vulkan general matmul dispatch must return M*N output values");
+            if (c2.size() == 4) {
+                expect(std::fabs(c2[0] - 22.0f) <= 1e-5f && std::fabs(c2[1] - 28.0f) <= 1e-5f &&
+                           std::fabs(c2[2] - 49.0f) <= 1e-5f && std::fabs(c2[3] - 64.0f) <= 1e-5f,
+                       "Vulkan general matmul dispatch output mismatch");
+            }
+            expect(!graph2.empty() && graph2.nodes()[0].op == "matmul_vulkan_f32",
+                   "Vulkan general matmul dispatch must record the Vulkan F32 op");
         } catch (const std::exception& e) {
             if (motifcl_test::is_opencl_unavailable(e)) {
                 std::cout << "Vulkan matmul dispatch smoke skipped because OpenCL tensors are unavailable: "

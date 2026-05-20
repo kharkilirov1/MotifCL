@@ -88,17 +88,26 @@ storage-buffer compute path. The test suite exercises both malformed metadata
 rejection and a `1x3 * 3x2 -> 1x2` GPU result `{22, 28}`.
 
 `MOTIFCL_MATMUL_BACKEND=vulkan` now resolves to the narrow
-`vulkan.matmul.f32_m1` descriptor and the real `matmul()` callsite dispatches
-F32 `M=1`, no-autograd, rank-2 tensors with `K,N <= 64` through
-`run_vulkan_f32_m1_matmul()`. If Vulkan runtime/compute is unavailable the
-callsite falls back to the validated OpenCL path; strict testing can set
-`MOTIFCL_REQUIRE_VULKAN_COMPUTE=1` or `MOTIFCL_REQUIRE_VULKAN_MATMUL=1` to make
-that fallback fail loudly.
+`vulkan.matmul.f32_m1` and `vulkan.matmul.f32` descriptors. The real `matmul()`
+callsite dispatches:
 
-This is still not a general matmul replacement. Vulkan Attention/Quant domains
-and non-M=1 or large F32 matmul shapes remain descriptor-empty or fall back to
-OpenCL until validated storage-buffer inputs, shape/stride contracts, and
-correctness/perf gates land against the matching OpenCL kernels.
+- F32 `M=1`, no-autograd, rank-2 tensors with `K,N <= 64` through
+  `run_vulkan_f32_m1_matmul()`.
+- General F32, no-autograd, rank-2 tensors with specialized `K <= 256` and
+  exact-dispatch `M,N <= 4096` through `run_vulkan_f32_matmul()`.
+
+The general path emits a tiny runtime SPIR-V compute shader that reads
+`GlobalInvocationId`, maps one Vulkan work item to one output cell, uses
+storage buffers for `A/B/C`, and dispatches exactly `N x M x 1`. If Vulkan
+runtime/compute is unavailable the callsite falls back to the validated OpenCL
+path; strict testing can set `MOTIFCL_REQUIRE_VULKAN_COMPUTE=1` or
+`MOTIFCL_REQUIRE_VULKAN_MATMUL=1` to make that fallback fail loudly.
+
+This is still not a full transformer replacement. Vulkan Attention/Quant
+domains, autograd, packed quant weights, and large/perf-gated production shapes
+remain descriptor-empty or fall back to OpenCL until validated storage-buffer
+inputs, shape/stride contracts, and correctness/perf gates land against the
+matching OpenCL kernels.
 
 Policy for new fast paths:
 

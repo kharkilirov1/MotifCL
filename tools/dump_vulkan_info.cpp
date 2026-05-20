@@ -63,6 +63,22 @@ int main() {
         std::cout << "\n";
         std::cout << "f32_m1_matmul_device=" << dynamic_matmul.device_name << "\n";
         if (!dynamic_matmul.error.empty()) std::cout << "f32_m1_matmul_error=" << dynamic_matmul.error << "\n";
+        const auto general_matmul = motifcl::run_vulkan_f32_matmul(
+            {1.0f, 2.0f, 3.0f,
+             4.0f, 5.0f, 6.0f},
+            {1.0f, 2.0f,
+             3.0f, 4.0f,
+             5.0f, 6.0f},
+            2, 3, 2);
+        std::cout << "f32_general_matmul_success=" << (general_matmul.success ? "true" : "false") << "\n";
+        std::cout << "f32_general_matmul_output=";
+        for (std::size_t j = 0; j < general_matmul.output.size(); ++j) {
+            if (j != 0) std::cout << ",";
+            std::cout << general_matmul.output[j];
+        }
+        std::cout << "\n";
+        std::cout << "f32_general_matmul_device=" << general_matmul.device_name << "\n";
+        if (!general_matmul.error.empty()) std::cout << "f32_general_matmul_error=" << general_matmul.error << "\n";
     }
     if (!probe.error.empty()) std::cout << "error=" << probe.error << "\n";
     return probe.loader_found ? 0 : 77;

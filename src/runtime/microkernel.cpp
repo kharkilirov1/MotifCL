@@ -146,6 +146,8 @@ std::vector<MicrokernelDescriptor> microkernel_descriptors(MicrokernelDomain dom
         return {
             descriptor(domain, backend, "vulkan.matmul.f32_m1",
                        "opt-in native-GPU Vulkan F32 M=1 decode matmul; rank-2 same-backend tensors, no autograd, bounded K/N specialization, OpenCL fallback when Vulkan compute is unavailable"),
+            descriptor(domain, backend, "vulkan.matmul.f32",
+                       "opt-in native-GPU Vulkan F32 matmul; rank-2 same-backend tensors, no autograd, bounded specialized K, exact-dispatch M/N, OpenCL fallback when Vulkan compute is unavailable"),
         };
     }
     if (backend != MicrokernelBackendKind::OpenCL) return {};
