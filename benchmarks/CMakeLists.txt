@@ -1,5 +1,6 @@
 set(MOTIFCL_BENCHMARKS
     bench_matmul
+    bench_native_matmul
     bench_matmul_gpt_shapes
     bench_modern_transformer
     bench_kquant_m1

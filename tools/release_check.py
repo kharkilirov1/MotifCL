@@ -81,6 +81,7 @@ def run_static_cleanup_checks() -> None:
     run([sys.executable, "-m", "py_compile",
          "tools/ci_gate.py", "tools/check_kernel_contracts.py",
          "tools/perf_truth_gate.py", "tools/release_check.py",
+         "tools/native_matmul_breakthrough_gate.py",
          "tools/motifcl_cli.py", "tools/motifcl_ollama_server.py"])
     run([sys.executable, "tools/check_kernel_contracts.py"])
     run(["git", "diff", "--check"])

@@ -45,6 +45,7 @@ def main() -> int:
     run([sys.executable, "-m", "py_compile",
          "tools/ci_gate.py", "tools/check_kernel_contracts.py",
          "tools/perf_truth_gate.py", "tools/release_check.py",
+         "tools/native_matmul_breakthrough_gate.py",
          "tools/motifcl_cli.py", "tools/motifcl_ollama_server.py"])
     if not args.skip_release_check:
         run([sys.executable, "tools/release_check.py", "--parallel", args.parallel, *args.release_check_extra])
