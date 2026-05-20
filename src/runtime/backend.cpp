@@ -76,6 +76,12 @@ std::string q8_int_dot_variant_name(const std::string& mode) {
     return "matmul_q8_0_dot4_f32";
 }
 
+void finish_context_noexcept(const OpenCLContext& ctx) noexcept {
+    if (ctx.queue) {
+        (void)clFinish(ctx.queue);
+    }
+}
+
 std::string generated_matmul_tiled_source(int tile, const std::string& kernel_name) {
     std::ostringstream src;
     src << "#define TILE " << tile << "\n";
@@ -235,24 +241,36 @@ Backend::Backend(OpenCLContext&& context, std::string kernel_dir)
     : ctx(std::move(context)), kernels(ctx, kernel_dir.empty() ? default_kernel_dir() : std::move(kernel_dir), &profiler) {}
 
 Backend::~Backend() {
-    if (ctx.valid()) clear_memory_pool_for_context(ctx);
+    if (ctx.valid()) {
+        finish_context_noexcept(ctx);
+        clear_memory_pool_for_context(ctx);
+    }
     if (lifetime_) lifetime_->alive = false;
 }
 
 Backend::Backend(Backend&& other) noexcept
     : ctx(std::move(other.ctx)), kernels(ctx, other.kernels.kernel_dir(), &profiler), lifetime_(std::make_shared<BackendLifetime>()) {
     if (other.lifetime_) other.lifetime_->alive = false;
-    if (ctx.valid()) clear_memory_pool_for_context(ctx);
+    if (ctx.valid()) {
+        finish_context_noexcept(ctx);
+        clear_memory_pool_for_context(ctx);
+    }
 }
 
 Backend& Backend::operator=(Backend&& other) noexcept {
     if (this != &other) {
-        if (ctx.valid()) clear_memory_pool_for_context(ctx);
+        if (ctx.valid()) {
+            finish_context_noexcept(ctx);
+            clear_memory_pool_for_context(ctx);
+        }
         if (lifetime_) lifetime_->alive = false;
         ctx = std::move(other.ctx);
         kernels = KernelCache(ctx, other.kernels.kernel_dir(), &profiler);
         if (other.lifetime_) other.lifetime_->alive = false;
-        if (ctx.valid()) clear_memory_pool_for_context(ctx);
+        if (ctx.valid()) {
+            finish_context_noexcept(ctx);
+            clear_memory_pool_for_context(ctx);
+        }
         lifetime_ = std::make_shared<BackendLifetime>();
     }
     return *this;
