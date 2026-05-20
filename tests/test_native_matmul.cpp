@@ -6,6 +6,7 @@
 
 #include <motifcl/motifcl.hpp>
 #include <motifcl/runtime/microkernel.hpp>
+#include <motifcl/runtime/native_matmul.hpp>
 
 #include "test_utils.hpp"
 
@@ -45,6 +46,18 @@ int main() {
         for (int k = 0; k < K; ++k) a[k] = static_cast<float>((k % 9) - 4) * 0.03125f;
         for (int i = 0; i < K * N; ++i) b[i] = static_cast<float>((i % 13) - 6) * 0.015625f;
 
+        std::vector<float> native_core(N, 0.0f);
+        motifcl::native::matmul_f32_m1(a.data(), b.data(), native_core.data(), K, N);
+        for (int col = 0; col < N; ++col) {
+            float expected = 0.0f;
+            for (int k = 0; k < K; ++k) expected += a[k] * b[k * N + col];
+            if (std::fabs(native_core[col] - expected) > 1e-6f) {
+                std::cerr << "native core mismatch at col " << col << ": got "
+                          << native_core[col] << " expected " << expected << '\n';
+                return 3;
+            }
+        }
+
         auto A = motifcl::Tensor::from_cpu(backend, {1, K}, motifcl::DType::F32, a.data());
         auto B = motifcl::Tensor::from_cpu(backend, {K, N}, motifcl::DType::F32, b.data());
 
@@ -53,7 +66,7 @@ int main() {
         auto graph = motifcl::autograd::end_graph_capture();
         if (graph.empty() || graph.nodes()[0].op != "matmul_native_f32_m1") {
             std::cerr << "native matmul path was not used\n";
-            return 3;
+            return 4;
         }
 
         const auto c = C.to_vector<float>();
@@ -63,7 +76,7 @@ int main() {
             if (std::fabs(c[col] - expected) > 1e-5f) {
                 std::cerr << "native matmul mismatch at col " << col << ": got "
                           << c[col] << " expected " << expected << '\n';
-                return 4;
+                return 5;
             }
         }
         return 0;

@@ -99,6 +99,7 @@ set(MOTIFCL_SOURCES
     src/runtime/command_buffer.cpp
     src/runtime/backend.cpp
     src/runtime/microkernel.cpp
+    src/runtime/native_matmul.cpp
     src/runtime/profiler.cpp
     src/tensor/storage.cpp
     src/tensor/allocator.cpp

@@ -41,9 +41,12 @@ silently taking an unimplemented path.
 The typed backend structs are intentionally real but conservative: OpenCL has
 registered descriptors for the stable path. Native currently has one narrow
 implemented descriptor, `native.matmul.f32_m1`, for opt-in host F32 M=1 decode
-matmul. Other Native domains and all ASM domains stay unavailable and
-descriptor-empty until a measured implementation is landed. A new backend
-becomes selectable only after
+matmul. Its callable scalar core lives behind
+`include/motifcl/runtime/native_matmul.hpp` and
+`src/runtime/native_matmul.cpp`, so later SIMD/ASM kernels can replace the core
+without changing Tensor/op dispatch. Other Native domains and all ASM domains
+stay unavailable and descriptor-empty until a measured implementation is
+landed. A new backend becomes selectable only after
 `microkernel_backend_available(domain, backend)` returns true.
 
 Policy for new fast paths:

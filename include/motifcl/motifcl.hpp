@@ -11,6 +11,7 @@
 #include <motifcl/runtime/command_buffer.hpp>
 #include <motifcl/runtime/kernel.hpp>
 #include <motifcl/runtime/microkernel.hpp>
+#include <motifcl/runtime/native_matmul.hpp>
 #include <motifcl/runtime/opencl_context.hpp>
 #include <motifcl/runtime/program.hpp>
 #include <motifcl/tensor/tensor.hpp>

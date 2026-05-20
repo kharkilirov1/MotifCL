@@ -6,6 +6,7 @@
 #include <motifcl/ops/fp16.hpp>
 #include <motifcl/runtime/backend.hpp>
 #include <motifcl/runtime/microkernel.hpp>
+#include <motifcl/runtime/native_matmul.hpp>
 
 #include <cstdlib>
 #include <limits>
@@ -834,14 +835,7 @@ Tensor matmul_native_f32_m1(const Tensor& a, const Tensor& b) {
     auto a_host = a.to_vector<float>();
     auto b_host = b.to_vector<float>();
     std::vector<float> out_host(static_cast<std::size_t>(N), 0.0f);
-    for (int64_t col = 0; col < N; ++col) {
-        float acc = 0.0f;
-        for (int64_t k = 0; k < K; ++k) {
-            acc += a_host[static_cast<std::size_t>(k)] *
-                   b_host[static_cast<std::size_t>(k * N + col)];
-        }
-        out_host[static_cast<std::size_t>(col)] = acc;
-    }
+    native::matmul_f32_m1(a_host.data(), b_host.data(), out_host.data(), K, N);
     auto out = Tensor::from_cpu(a.backend(), {1, N}, DType::F32, out_host.data());
     autograd::record_op("matmul_native_f32_m1", {a.id(), b.id()}, {out.id()});
     return out;
