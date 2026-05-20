@@ -8,6 +8,7 @@
 #include <motifcl/runtime/microkernel.hpp>
 #include <motifcl/runtime/native_matmul.hpp>
 
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <memory>
@@ -823,6 +824,18 @@ bool native_matmul_f32_m1_supported(const Tensor& a, const Tensor& b) {
            !b.requires_grad();
 }
 
+bool native_matmul_f32_q4_0_m1_supported(const Tensor& a, const Tensor& b) {
+    return a.dtype() == DType::F32 &&
+           b.dtype() == DType::Q4_0 &&
+           a.ndim() == 2 &&
+           b.ndim() == 2 &&
+           a.shape()[0] == 1 &&
+           a.shape()[1] == b.shape()[0] &&
+           !b.has_quant_scales() &&
+           !a.requires_grad() &&
+           !b.requires_grad();
+}
+
 Tensor matmul_native_f32_m1(const Tensor& a, const Tensor& b) {
     require_matmul_f32(a, b);
     validate_matmul_args(a, b, "native matmul f32 m1");
@@ -838,6 +851,29 @@ Tensor matmul_native_f32_m1(const Tensor& a, const Tensor& b) {
     native::matmul_f32_m1(a_host.data(), b_host.data(), out_host.data(), K, N);
     auto out = Tensor::from_cpu(a.backend(), {1, N}, DType::F32, out_host.data());
     autograd::record_op("matmul_native_f32_m1", {a.id(), b.id()}, {out.id()});
+    return out;
+}
+
+Tensor matmul_native_f32_q4_0_m1(const Tensor& a, const Tensor& b) {
+    MCL_CHECK(a.dtype() == DType::F32 && b.dtype() == DType::Q4_0,
+              "native F32/Q4_0 decode matmul expects f32 lhs and q4_0 rhs");
+    validate_matmul_args(a, b, "native F32/Q4_0 decode matmul");
+    validate_scaled_quant_matmul_tensor(b, "native F32/Q4_0 decode matmul", "rhs");
+    MCL_CHECK(a.shape()[0] == 1, "native F32/Q4_0 decode matmul expects lhs M=1");
+    MCL_CHECK(!a.requires_grad() && !b.requires_grad(),
+              "native F32/Q4_0 decode matmul does not support autograd; use OpenCL fallback");
+    MCL_CHECK(!b.has_quant_scales(),
+              "native F32/Q4_0 decode matmul currently supports scalar quant scale only");
+
+    const int64_t K = a.shape()[1];
+    const int64_t N = b.shape()[1];
+    auto a_host = a.to_vector<float>();
+    std::vector<std::uint8_t> b_host(b.nbytes());
+    b.to_cpu(b_host.data(), b_host.size());
+    std::vector<float> out_host(static_cast<std::size_t>(N), 0.0f);
+    native::matmul_f32_q4_0_m1(a_host.data(), b_host.data(), out_host.data(), K, N, b.quant_scale());
+    auto out = Tensor::from_cpu(a.backend(), {1, N}, DType::F32, out_host.data());
+    autograd::record_op("matmul_native_f32_q4_0_m1", {a.id(), b.id()}, {out.id()});
     return out;
 }
 
@@ -937,6 +973,10 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
     }
     if (a.dtype() == DType::F32 && b.dtype() == DType::Q4_0 && a.ndim() == 2 && a.shape()[0] == 1) {
         MCL_CHECK(!a.requires_grad() && !b.requires_grad(), "F32/Q4_0 decode matmul does not support autograd");
+        if (selected_matmul_backend().kind == MicrokernelBackendKind::Native &&
+            native_matmul_f32_q4_0_m1_supported(a, b)) {
+            return matmul_native_f32_q4_0_m1(a, b);
+        }
         return matmul_f32_q4_0_m1(a, b);
     }
     const bool quantized = is_quant_dtype(a.dtype()) || is_quant_dtype(b.dtype());

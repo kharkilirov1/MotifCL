@@ -134,6 +134,8 @@ std::vector<MicrokernelDescriptor> microkernel_descriptors(MicrokernelDomain dom
         return {
             descriptor(domain, backend, "native.matmul.f32_m1",
                        "opt-in host native F32 M=1 decode matmul; rank-2 same-backend tensors, no autograd, bounded M/N/K, OpenCL fallback for unsupported shapes"),
+            descriptor(domain, backend, "native.matmul.f32_q4_0_m1",
+                       "opt-in host native F32 x packed-Q4_0 M=1 decode matmul; scalar quant scale only, no autograd, OpenCL fallback for external scale tensors"),
         };
     }
     if (backend != MicrokernelBackendKind::OpenCL) return {};

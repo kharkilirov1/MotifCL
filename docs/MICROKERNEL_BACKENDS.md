@@ -39,14 +39,21 @@ experimental requests; this build warns and falls back to OpenCL rather than
 silently taking an unimplemented path.
 
 The typed backend structs are intentionally real but conservative: OpenCL has
-registered descriptors for the stable path. Native currently has one narrow
-implemented descriptor, `native.matmul.f32_m1`, for opt-in host F32 M=1 decode
-matmul. Its callable scalar core lives behind
+registered descriptors for the stable path. Native currently has narrow
+implemented descriptors for opt-in host decode matmul:
+
+- `native.matmul.f32_m1` — F32 x F32 M=1.
+- `native.matmul.f32_q4_0_m1` — F32 x packed `Q4_0` M=1 with scalar
+  `quant_scale`; tensors with external quant scale metadata intentionally fall
+  back to the validated OpenCL path until native per-axis/per-block scale
+  handling lands.
+
+Their callable scalar/SIMD cores live behind
 `include/motifcl/runtime/native_matmul.hpp` and
 `src/runtime/native_matmul.cpp`. The current dispatch uses an SSE column-vector
-kernel when the compiler target exposes SSE and keeps a scalar baseline for
+kernel when the compiler target exposes SSE and keeps scalar baselines for
 correctness/perf comparison, so later wider SIMD/ASM kernels can replace the
-core without changing Tensor/op dispatch. Other Native domains and all ASM
+cores without changing Tensor/op dispatch. Other Native domains and all ASM
 domains stay unavailable and descriptor-empty until a measured implementation
 is landed. A new backend becomes selectable only after
 `microkernel_backend_available(domain, backend)` returns true.

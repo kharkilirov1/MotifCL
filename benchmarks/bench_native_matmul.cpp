@@ -67,6 +67,16 @@ float checksum(const std::vector<float>& values) {
     return sum;
 }
 
+void pack_q4_0(std::vector<std::uint8_t>& packed, std::int64_t idx, int q) {
+    const int code = q + 8;
+    const auto byte_idx = static_cast<std::size_t>(idx >> 1);
+    if ((idx & 1) == 0) {
+        packed[byte_idx] = static_cast<std::uint8_t>((packed[byte_idx] & 0xf0u) | code);
+    } else {
+        packed[byte_idx] = static_cast<std::uint8_t>((packed[byte_idx] & 0x0fu) | (code << 4));
+    }
+}
+
 std::string json_escape(const std::string& value) {
     std::string out;
     for (char ch : value) {
@@ -86,12 +96,23 @@ int main(int argc, char** argv) {
         std::vector<float> b(total);
         std::vector<float> out_scalar(static_cast<std::size_t>(options.n), 0.0f);
         std::vector<float> out_dispatch(static_cast<std::size_t>(options.n), 0.0f);
+        std::vector<std::uint8_t> q4_b((total + 1u) / 2u, 0u);
+        std::vector<float> q4_out_scalar(static_cast<std::size_t>(options.n), 0.0f);
+        std::vector<float> q4_out_dispatch(static_cast<std::size_t>(options.n), 0.0f);
+        constexpr float q4_scale = 0.03125f;
 
         for (std::int64_t k = 0; k < options.k; ++k) {
             a[static_cast<std::size_t>(k)] = static_cast<float>((k % 29) - 14) * 0.00390625f;
         }
         for (std::size_t i = 0; i < b.size(); ++i) {
             b[i] = static_cast<float>((static_cast<int>(i % 31) - 15)) * 0.0029296875f;
+        }
+        for (std::int64_t k = 0; k < options.k; ++k) {
+            for (std::int64_t col = 0; col < options.n; ++col) {
+                const std::int64_t idx = k * options.n + col;
+                const int q = static_cast<int>((k * 13 + col * 7) % 16) - 8;
+                pack_q4_0(q4_b, idx, q);
+            }
         }
 
         float scalar_checksum = 0.0f;
@@ -112,21 +133,49 @@ int main(int argc, char** argv) {
         }
         const double speedup = dispatch_ms > 0.0 ? scalar_ms / dispatch_ms : 0.0;
 
+        float q4_scalar_checksum = 0.0f;
+        const double q4_scalar_ms = measure_ms([&] {
+            motifcl::native::matmul_f32_q4_0_m1_scalar(a.data(), q4_b.data(), q4_out_scalar.data(),
+                                                       options.k, options.n, q4_scale);
+            return checksum(q4_out_scalar);
+        }, options.warmup, options.iters, q4_scalar_checksum);
+
+        float q4_dispatch_checksum = 0.0f;
+        const double q4_dispatch_ms = measure_ms([&] {
+            motifcl::native::matmul_f32_q4_0_m1(a.data(), q4_b.data(), q4_out_dispatch.data(),
+                                                options.k, options.n, q4_scale);
+            return checksum(q4_out_dispatch);
+        }, options.warmup, options.iters, q4_dispatch_checksum);
+
+        double q4_max_abs_diff = 0.0;
+        for (std::size_t i = 0; i < q4_out_scalar.size(); ++i) {
+            q4_max_abs_diff = std::max(q4_max_abs_diff,
+                                       static_cast<double>(std::abs(q4_out_scalar[i] - q4_out_dispatch[i])));
+        }
+        const double q4_speedup = q4_dispatch_ms > 0.0 ? q4_scalar_ms / q4_dispatch_ms : 0.0;
+
         std::ostringstream json;
         json << std::fixed << std::setprecision(6)
              << "{\n"
              << "  \"native_matmul_f32_m1_scalar_ms\": " << scalar_ms << ",\n"
              << "  \"native_matmul_f32_m1_dispatch_ms\": " << dispatch_ms << ",\n"
              << "  \"native_matmul_f32_m1_max_abs_diff\": " << max_abs_diff << ",\n"
+             << "  \"native_matmul_f32_q4_0_m1_scalar_ms\": " << q4_scalar_ms << ",\n"
+             << "  \"native_matmul_f32_q4_0_m1_dispatch_ms\": " << q4_dispatch_ms << ",\n"
+             << "  \"native_matmul_f32_q4_0_m1_max_abs_diff\": " << q4_max_abs_diff << ",\n"
              << "  \"metadata\": {\n"
              << "    \"kernel\": \"" << json_escape(motifcl::native::matmul_f32_m1_kernel_name()) << "\",\n"
+             << "    \"q4_kernel\": \"" << json_escape(motifcl::native::matmul_f32_q4_0_m1_kernel_name()) << "\",\n"
              << "    \"k\": " << options.k << ",\n"
              << "    \"n\": " << options.n << ",\n"
              << "    \"iters\": " << options.iters << ",\n"
              << "    \"warmup\": " << options.warmup << ",\n"
              << "    \"speedup\": " << speedup << ",\n"
+             << "    \"q4_speedup\": " << q4_speedup << ",\n"
              << "    \"scalar_checksum\": " << scalar_checksum << ",\n"
-             << "    \"dispatch_checksum\": " << dispatch_checksum << "\n"
+             << "    \"dispatch_checksum\": " << dispatch_checksum << ",\n"
+             << "    \"q4_scalar_checksum\": " << q4_scalar_checksum << ",\n"
+             << "    \"q4_dispatch_checksum\": " << q4_dispatch_checksum << "\n"
              << "  }\n"
              << "}\n";
 
@@ -135,7 +184,7 @@ int main(int argc, char** argv) {
             out << json.str();
         }
         std::cout << json.str();
-        return max_abs_diff <= 1e-4 ? 0 : 2;
+        return max_abs_diff <= 1e-4 && q4_max_abs_diff <= 1e-4 ? 0 : 2;
     } catch (const std::exception& e) {
         std::cerr << "bench_native_matmul failed: " << e.what() << "\n";
         return 1;

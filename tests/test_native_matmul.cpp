@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -18,6 +19,17 @@ void set_env(const char* name, const char* value) {
 #else
     setenv(name, value, 1);
 #endif
+}
+
+void pack_q4_0(std::vector<std::uint8_t>& packed, int idx, int q) {
+    const int code = q + 8;
+    if ((idx & 1) == 0) {
+        packed[static_cast<std::size_t>(idx >> 1)] =
+            static_cast<std::uint8_t>((packed[static_cast<std::size_t>(idx >> 1)] & 0xf0u) | code);
+    } else {
+        packed[static_cast<std::size_t>(idx >> 1)] =
+            static_cast<std::uint8_t>((packed[static_cast<std::size_t>(idx >> 1)] & 0x0fu) | (code << 4));
+    }
 }
 
 } // namespace
@@ -91,6 +103,66 @@ int main() {
                 std::cerr << "native matmul mismatch at col " << col << ": got "
                           << c[col] << " expected " << expected << '\n';
                 return 6;
+            }
+        }
+
+        constexpr int QK = 33;
+        constexpr int QN = 19;
+        constexpr float q_scale = 0.03125f;
+        std::vector<float> qa(QK);
+        std::vector<std::uint8_t> qb(static_cast<std::size_t>((QK * QN + 1) / 2), 0);
+        std::vector<float> q_expected(QN, 0.0f);
+        for (int k = 0; k < QK; ++k) qa[k] = static_cast<float>((k % 11) - 5) * 0.015625f;
+        for (int k = 0; k < QK; ++k) {
+            for (int col = 0; col < QN; ++col) {
+                const int idx = k * QN + col;
+                const int q = ((k * 7 + col * 3) % 16) - 8;
+                pack_q4_0(qb, idx, q);
+                q_expected[col] += qa[k] * static_cast<float>(q) * q_scale;
+            }
+        }
+
+        const std::string q4_kernel_name = motifcl::native::matmul_f32_q4_0_m1_kernel_name();
+        if (q4_kernel_name.empty()) {
+            std::cerr << "native q4 matmul kernel name must not be empty\n";
+            return 7;
+        }
+
+        std::vector<float> q_scalar(QN, 0.0f);
+        motifcl::native::matmul_f32_q4_0_m1_scalar(qa.data(), qb.data(), q_scalar.data(), QK, QN, q_scale);
+        std::vector<float> q_native(QN, 0.0f);
+        motifcl::native::matmul_f32_q4_0_m1(qa.data(), qb.data(), q_native.data(), QK, QN, q_scale);
+        for (int col = 0; col < QN; ++col) {
+            if (std::fabs(q_scalar[col] - q_expected[col]) > 1e-6f) {
+                std::cerr << "native q4 scalar mismatch at col " << col << ": got "
+                          << q_scalar[col] << " expected " << q_expected[col] << '\n';
+                return 8;
+            }
+            if (std::fabs(q_native[col] - q_scalar[col]) > 1e-6f) {
+                std::cerr << "native q4 dispatch mismatch at col " << col << ": got "
+                          << q_native[col] << " scalar " << q_scalar[col] << '\n';
+                return 9;
+            }
+        }
+
+        auto QA = motifcl::Tensor::from_cpu(backend, {1, QK}, motifcl::DType::F32, qa.data());
+        auto QB = motifcl::Tensor::from_cpu(backend, {QK, QN}, motifcl::DType::Q4_0, qb.data());
+        QB._set_quant_scale(q_scale);
+
+        motifcl::autograd::begin_graph_capture();
+        auto QC = motifcl::matmul(QA, QB);
+        auto qgraph = motifcl::autograd::end_graph_capture();
+        if (qgraph.empty() || qgraph.nodes()[0].op != "matmul_native_f32_q4_0_m1") {
+            std::cerr << "native q4 matmul path was not used\n";
+            return 10;
+        }
+
+        const auto qc = QC.to_vector<float>();
+        for (int col = 0; col < QN; ++col) {
+            if (std::fabs(qc[col] - q_expected[col]) > 1e-5f) {
+                std::cerr << "native q4 tensor mismatch at col " << col << ": got "
+                          << qc[col] << " expected " << q_expected[col] << '\n';
+                return 11;
             }
         }
         return 0;
