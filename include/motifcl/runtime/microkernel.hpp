@@ -66,8 +66,16 @@ const char* microkernel_domain_name(MicrokernelDomain domain);
 const char* microkernel_env_name(MicrokernelDomain domain);
 MicrokernelBackendKind microkernel_backend_from_name(const std::string& value, bool* recognized = nullptr);
 
+std::vector<MicrokernelDescriptor> microkernel_descriptors(MicrokernelDomain domain,
+                                                           MicrokernelBackendKind backend);
+bool microkernel_backend_available(MicrokernelDomain domain, MicrokernelBackendKind backend);
+
 MicrokernelSelection select_microkernel_backend_from_value(MicrokernelDomain domain, const std::string& value);
 MicrokernelSelection select_microkernel_backend(MicrokernelDomain domain);
+
+MatmulBackend selected_matmul_backend();
+AttentionBackend selected_attention_backend();
+QuantBackend selected_quant_backend();
 
 // Returns true for the currently compiled runtime. Experimental native/ASM
 // requests are explicit opt-ins, but until those implementations exist this

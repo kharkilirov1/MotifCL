@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace motifcl {
 namespace {
@@ -50,6 +51,30 @@ void warn_fallback_once(const MicrokernelSelection& selection) {
     if (emitted[index]) return;
     emitted[index] = true;
     Logger::warn(selection.fallback_reason);
+}
+
+MicrokernelDescriptor descriptor(MicrokernelDomain domain,
+                                 MicrokernelBackendKind backend,
+                                 const char* name,
+                                 const char* contract) {
+    MicrokernelDescriptor d;
+    d.domain = domain;
+    d.backend = backend;
+    d.stability = microkernel_backend_stability(backend);
+    d.name = name;
+    d.contract = contract;
+    return d;
+}
+
+template <typename Backend>
+Backend selected_domain_backend(MicrokernelDomain domain) {
+    const auto selection = select_microkernel_backend(domain);
+    warn_fallback_once(selection);
+    Backend backend;
+    backend.kind = selection.effective;
+    backend.stability = microkernel_backend_stability(selection.effective);
+    backend.kernels = microkernel_descriptors(domain, selection.effective);
+    return backend;
 }
 
 } // namespace
@@ -103,6 +128,44 @@ MicrokernelBackendKind microkernel_backend_from_name(const std::string& value, b
     return MicrokernelBackendKind::OpenCL;
 }
 
+std::vector<MicrokernelDescriptor> microkernel_descriptors(MicrokernelDomain domain,
+                                                           MicrokernelBackendKind backend) {
+    if (backend != MicrokernelBackendKind::OpenCL) return {};
+
+    switch (domain) {
+    case MicrokernelDomain::Matmul:
+        return {
+            descriptor(domain, backend, "opencl.matmul.f32",
+                       "rank-2 same-backend f32 tensors, bounded M/N/K int args, selected tile/workgroup within device limits"),
+            descriptor(domain, backend, "opencl.matmul.quantized",
+                       "rank-2 quant tensors, packed dtype/layout checks, quant scale tensors cover rows/cols/blocks before launch"),
+            descriptor(domain, backend, "opencl.matmul.f16_accum_f32",
+                       "f16-only no-autograd path with f32 accumulation and bounded matrix dimensions"),
+        };
+    case MicrokernelDomain::Attention:
+        return {
+            descriptor(domain, backend, "opencl.attention.grouped_query",
+                       "q/k/v rank, batch, head, kv-head, mask, and sequence lengths validated before launch"),
+            descriptor(domain, backend, "opencl.attention.kv_cache",
+                       "cache/page table shapes, offsets, row counts, dtype, and quant scale coverage validated before launch"),
+            descriptor(domain, backend, "opencl.attention.backward",
+                       "gradient tensor shapes and staged kernel resource limits validated before launch"),
+        };
+    case MicrokernelDomain::Quant:
+        return {
+            descriptor(domain, backend, "opencl.quantize",
+                       "f32 source, explicit quant dtype, finite scalar/axis/block scales, and bounded work-item counts"),
+            descriptor(domain, backend, "opencl.dequantize",
+                       "quant source dtype, scalar/metadata scale validity, and scale tensor coverage validated before launch"),
+        };
+    }
+    return {};
+}
+
+bool microkernel_backend_available(MicrokernelDomain domain, MicrokernelBackendKind backend) {
+    return !microkernel_descriptors(domain, backend).empty();
+}
+
 MicrokernelSelection select_microkernel_backend_from_value(MicrokernelDomain domain, const std::string& value) {
     MicrokernelSelection selection;
     selection.domain = domain;
@@ -121,9 +184,9 @@ MicrokernelSelection select_microkernel_backend_from_value(MicrokernelDomain dom
         return selection;
     }
 
-    if (selection.requested == MicrokernelBackendKind::OpenCL) {
-        selection.effective = MicrokernelBackendKind::OpenCL;
-        selection.stability = MicrokernelStability::Stable;
+    if (microkernel_backend_available(domain, selection.requested)) {
+        selection.effective = selection.requested;
+        selection.stability = microkernel_backend_stability(selection.effective);
         return selection;
     }
 
@@ -138,6 +201,18 @@ MicrokernelSelection select_microkernel_backend_from_value(MicrokernelDomain dom
 MicrokernelSelection select_microkernel_backend(MicrokernelDomain domain) {
     const char* value = std::getenv(microkernel_env_name(domain));
     return select_microkernel_backend_from_value(domain, value ? value : "opencl");
+}
+
+MatmulBackend selected_matmul_backend() {
+    return selected_domain_backend<MatmulBackend>(MicrokernelDomain::Matmul);
+}
+
+AttentionBackend selected_attention_backend() {
+    return selected_domain_backend<AttentionBackend>(MicrokernelDomain::Attention);
+}
+
+QuantBackend selected_quant_backend() {
+    return selected_domain_backend<QuantBackend>(MicrokernelDomain::Quant);
 }
 
 bool microkernel_runtime_uses_opencl(MicrokernelDomain domain) {

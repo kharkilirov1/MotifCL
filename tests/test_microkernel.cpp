@@ -44,6 +44,48 @@ int main() {
     ok &= expect(std::string(microkernel_env_name(MicrokernelDomain::Quant)) == "MOTIFCL_QUANT_BACKEND",
                  "quant env name mismatch");
 
+    auto expect_descriptors = [&](MicrokernelDomain domain, MicrokernelBackendKind backend, const char* message) {
+        const auto descriptors = microkernel_descriptors(domain, backend);
+        ok &= expect(!descriptors.empty(), message);
+        for (const auto& descriptor : descriptors) {
+            ok &= expect(descriptor.domain == domain, "descriptor domain mismatch");
+            ok &= expect(descriptor.backend == backend, "descriptor backend mismatch");
+            ok &= expect(!descriptor.name.empty(), "descriptor name must not be empty");
+            ok &= expect(!descriptor.contract.empty(), "descriptor contract must not be empty");
+            ok &= expect(descriptor.stability == microkernel_backend_stability(backend),
+                         "descriptor stability mismatch");
+        }
+    };
+    expect_descriptors(MicrokernelDomain::Matmul, MicrokernelBackendKind::OpenCL,
+                       "OpenCL matmul descriptor registry must not be empty");
+    expect_descriptors(MicrokernelDomain::Attention, MicrokernelBackendKind::OpenCL,
+                       "OpenCL attention descriptor registry must not be empty");
+    expect_descriptors(MicrokernelDomain::Quant, MicrokernelBackendKind::OpenCL,
+                       "OpenCL quant descriptor registry must not be empty");
+
+    ok &= expect(microkernel_backend_available(MicrokernelDomain::Matmul, MicrokernelBackendKind::OpenCL),
+                 "OpenCL matmul backend must be available");
+    ok &= expect(!microkernel_backend_available(MicrokernelDomain::Matmul, MicrokernelBackendKind::Native),
+                 "native matmul backend must stay unavailable until implemented");
+    ok &= expect(!microkernel_backend_available(MicrokernelDomain::Attention, MicrokernelBackendKind::Asm),
+                 "asm attention backend must stay unavailable until implemented");
+
+    const auto selected_matmul = selected_matmul_backend();
+    ok &= expect(selected_matmul.kind == MicrokernelBackendKind::OpenCL &&
+                     selected_matmul.stability == MicrokernelStability::Stable &&
+                     !selected_matmul.kernels.empty(),
+                 "selected matmul backend must resolve to registered OpenCL kernels");
+    const auto selected_attention = selected_attention_backend();
+    ok &= expect(selected_attention.kind == MicrokernelBackendKind::OpenCL &&
+                     selected_attention.stability == MicrokernelStability::Stable &&
+                     !selected_attention.kernels.empty(),
+                 "selected attention backend must resolve to registered OpenCL kernels");
+    const auto selected_quant = selected_quant_backend();
+    ok &= expect(selected_quant.kind == MicrokernelBackendKind::OpenCL &&
+                     selected_quant.stability == MicrokernelStability::Stable &&
+                     !selected_quant.kernels.empty(),
+                 "selected quant backend must resolve to registered OpenCL kernels");
+
     bool recognized = false;
     ok &= expect(microkernel_backend_from_name(" OPENCL ", &recognized) == MicrokernelBackendKind::OpenCL && recognized,
                  "failed to parse opencl backend");
