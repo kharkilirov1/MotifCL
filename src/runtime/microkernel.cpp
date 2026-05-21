@@ -30,6 +30,7 @@ std::size_t domain_index(MicrokernelDomain domain) {
     case MicrokernelDomain::Attention: return 1;
     case MicrokernelDomain::Quant: return 2;
     case MicrokernelDomain::Norm: return 3;
+    case MicrokernelDomain::Activation: return 4;
     }
     return 0;
 }
@@ -39,8 +40,8 @@ std::mutex& warning_mutex() {
     return mutex;
 }
 
-std::array<bool, 4>& warning_emitted() {
-    static std::array<bool, 4> emitted = {false, false, false, false};
+std::array<bool, 5>& warning_emitted() {
+    static std::array<bool, 5> emitted = {false, false, false, false, false};
     return emitted;
 }
 
@@ -108,6 +109,7 @@ const char* microkernel_domain_name(MicrokernelDomain domain) {
     case MicrokernelDomain::Attention: return "attention";
     case MicrokernelDomain::Quant: return "quant";
     case MicrokernelDomain::Norm: return "norm";
+    case MicrokernelDomain::Activation: return "activation";
     }
     return "unknown";
 }
@@ -118,6 +120,7 @@ const char* microkernel_env_name(MicrokernelDomain domain) {
     case MicrokernelDomain::Attention: return "MOTIFCL_ATTENTION_BACKEND";
     case MicrokernelDomain::Quant: return "MOTIFCL_QUANT_BACKEND";
     case MicrokernelDomain::Norm: return "MOTIFCL_NORM_BACKEND";
+    case MicrokernelDomain::Activation: return "MOTIFCL_ACTIVATION_BACKEND";
     }
     return "MOTIFCL_BACKEND";
 }
@@ -165,6 +168,12 @@ std::vector<MicrokernelDescriptor> microkernel_descriptors(MicrokernelDomain dom
                        "opt-in native-GPU Vulkan F32 RMSNorm; rank-2 input plus rank-1 weight, no autograd, bounded rows/cols specialization, OpenCL fallback when Vulkan compute is unavailable"),
         };
     }
+    if (backend == MicrokernelBackendKind::Vulkan && domain == MicrokernelDomain::Activation) {
+        return {
+            descriptor(domain, backend, "vulkan.activation.swiglu_f32",
+                       "opt-in native-GPU Vulkan F32 SwiGLU; rank-2 packed [rows,2*hidden], no autograd, bounded rows/hidden specialization, OpenCL fallback when Vulkan compute is unavailable"),
+        };
+    }
     if (backend != MicrokernelBackendKind::OpenCL) return {};
 
     switch (domain) {
@@ -199,6 +208,13 @@ std::vector<MicrokernelDescriptor> microkernel_descriptors(MicrokernelDomain dom
                        "rank-2 f32 input, rank-1 f32 weight, same-backend tensors, finite eps, bounded row/column dimensions before launch"),
             descriptor(domain, backend, "opencl.norm.layernorm",
                        "rank-2 f32 input, rank-1 f32 weight/bias, same-backend tensors, finite eps, bounded row/column dimensions before launch"),
+        };
+    case MicrokernelDomain::Activation:
+        return {
+            descriptor(domain, backend, "opencl.activation.unary",
+                       "f32 activation tensors with bounded element counts and same-backend output before launch"),
+            descriptor(domain, backend, "opencl.activation.swiglu",
+                       "rank-2 f32 packed [rows,2*hidden] tensor with bounded rows/hidden before launch"),
         };
     }
     return {};
@@ -259,6 +275,10 @@ QuantBackend selected_quant_backend() {
 
 NormBackend selected_norm_backend() {
     return selected_domain_backend<NormBackend>(MicrokernelDomain::Norm);
+}
+
+ActivationBackend selected_activation_backend() {
+    return selected_domain_backend<ActivationBackend>(MicrokernelDomain::Activation);
 }
 
 bool microkernel_runtime_uses_opencl(MicrokernelDomain domain) {

@@ -68,6 +68,9 @@ int main() {
         run_vulkan_rmsnorm({1.0f, 2.0f}, {1.0f, 1.0f}, 1, 2, std::numeric_limits<float>::infinity());
     expect(!invalid_rmsnorm_eps.success, "Vulkan RMSNorm must reject non-finite eps");
     expect(!invalid_rmsnorm_eps.error.empty(), "Vulkan RMSNorm eps validation failure must explain why");
+    const auto invalid_swiglu = run_vulkan_swiglu({1.0f, 2.0f, 3.0f}, 1, 2);
+    expect(!invalid_swiglu.success, "Vulkan SwiGLU must reject malformed packed input size");
+    expect(!invalid_swiglu.error.empty(), "Vulkan SwiGLU validation failure must explain why");
 
     if (result.available()) {
         const bool require_vulkan_compute = std::getenv("MOTIFCL_REQUIRE_VULKAN_COMPUTE") != nullptr;
@@ -173,6 +176,29 @@ int main() {
             }
         }
 
+        const std::vector<float> swiglu_input = {
+            1.0f, -2.0f, 0.5f, 4.0f,
+            -1.5f, 3.0f, -2.0f, 0.25f,
+        };
+        const auto swiglu_result = run_vulkan_swiglu(swiglu_input, 2, 2);
+        expect(swiglu_result.success,
+               "Vulkan SwiGLU must succeed when a Vulkan device is available");
+        expect(swiglu_result.error.empty(),
+               "Vulkan SwiGLU success must not carry an error");
+        expect(swiglu_result.output.size() == 4,
+               "Vulkan SwiGLU must return rows*hidden output values");
+        if (swiglu_result.output.size() == 4) {
+            for (std::size_t r = 0; r < 2; ++r) {
+                for (std::size_t c = 0; c < 2; ++c) {
+                    const float gate = swiglu_input[r * 4 + c];
+                    const float up = swiglu_input[r * 4 + 2 + c];
+                    const float expected = gate / (1.0f + std::exp(-gate)) * up;
+                    expect(std::fabs(swiglu_result.output[r * 2 + c] - expected) <= 1e-5f,
+                           "Vulkan SwiGLU output mismatch");
+                }
+            }
+        }
+
         set_env("MOTIFCL_MATMUL_BACKEND", "vulkan");
         try {
             auto backend = Backend::create_opencl();
@@ -239,6 +265,23 @@ int main() {
             expect(!rms_graph.empty() && rms_graph.nodes()[0].op == "rmsnorm_vulkan_f32",
                    "Vulkan RMSNorm dispatch must record the Vulkan RMSNorm op");
             set_env("MOTIFCL_NORM_BACKEND", "opencl");
+
+            set_env("MOTIFCL_ACTIVATION_BACKEND", "vulkan");
+            auto SwiX = Tensor::from_cpu(backend, {2, 4}, DType::F32, swiglu_input.data());
+            autograd::begin_graph_capture();
+            auto SwiY = swiglu(SwiX);
+            auto swiglu_graph = autograd::end_graph_capture();
+            const auto swiy = SwiY.to_vector<float>();
+            expect(swiy.size() == swiglu_result.output.size(), "Vulkan SwiGLU dispatch must return rows*hidden values");
+            if (swiy.size() == swiglu_result.output.size()) {
+                expect(std::fabs(swiy[0] - swiglu_result.output[0]) <= 1e-5f &&
+                           std::fabs(swiy[1] - swiglu_result.output[1]) <= 1e-5f &&
+                           std::fabs(swiy[2] - swiglu_result.output[2]) <= 1e-5f,
+                       "Vulkan SwiGLU dispatch output mismatch");
+            }
+            expect(!swiglu_graph.empty() && swiglu_graph.nodes()[0].op == "swiglu_vulkan_f32",
+                   "Vulkan SwiGLU dispatch must record the Vulkan SwiGLU op");
+            set_env("MOTIFCL_ACTIVATION_BACKEND", "opencl");
         } catch (const std::exception& e) {
             if (motifcl_test::is_opencl_unavailable(e)) {
                 std::cout << "Vulkan matmul dispatch smoke skipped because OpenCL tensors are unavailable: "
@@ -251,6 +294,7 @@ int main() {
         set_env("MOTIFCL_MATMUL_BACKEND", "opencl");
         set_env("MOTIFCL_ATTENTION_BACKEND", "opencl");
         set_env("MOTIFCL_NORM_BACKEND", "opencl");
+        set_env("MOTIFCL_ACTIVATION_BACKEND", "opencl");
     }
 
     return ok ? 0 : 1;

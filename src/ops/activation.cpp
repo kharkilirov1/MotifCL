@@ -4,14 +4,29 @@
 #include <motifcl/autograd/node.hpp>
 #include <motifcl/core/error.hpp>
 #include <motifcl/runtime/backend.hpp>
+#include <motifcl/runtime/microkernel.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 
+#include <cstdlib>
 #include <memory>
+#include <string>
 
 namespace motifcl {
 
 namespace {
 constexpr std::size_t kLocal = 256;
 std::size_t round_up(std::size_t x, std::size_t multiple) { return ((x + multiple - 1) / multiple) * multiple; }
+
+bool strict_vulkan_activation_required() {
+    const auto enabled = [](const char* value) {
+        if (value == nullptr) return false;
+        const std::string text(value);
+        return text == "1" || text == "true" || text == "TRUE" ||
+               text == "on" || text == "ON" || text == "yes" || text == "YES";
+    };
+    return enabled(std::getenv("MOTIFCL_REQUIRE_VULKAN_COMPUTE")) ||
+           enabled(std::getenv("MOTIFCL_REQUIRE_VULKAN_ACTIVATION"));
+}
 
 Tensor unary(const Tensor& x, const std::string& kernel_name) {
     MCL_CHECK(x.dtype() == DType::F32, kernel_name + " supports f32 only");
@@ -68,6 +83,27 @@ struct SwiGLUBackwardNode : autograd::Node {
     }
 };
 
+bool vulkan_swiglu_supported(const Tensor& packed) {
+    return packed.dtype() == DType::F32 &&
+           packed.ndim() == 2 &&
+           packed.shape()[0] > 0 &&
+           packed.shape()[1] > 0 &&
+           (packed.shape()[1] % 2) == 0 &&
+           packed.shape()[0] <= 4096 &&
+           (packed.shape()[1] / 2) <= 4096 &&
+           !packed.requires_grad();
+}
+
+Tensor swiglu_vulkan_f32(const Tensor& packed, const VulkanF32TensorResult& result) {
+    MCL_CHECK(result.success, std::string("vulkan swiglu f32 failed: ") + result.error);
+    const auto hidden = packed.shape()[1] / 2;
+    const auto expected = static_cast<std::size_t>(packed.shape()[0] * hidden);
+    MCL_CHECK(result.output.size() == expected, "vulkan swiglu f32 returned unexpected output size");
+    auto out = Tensor::from_cpu(packed.backend(), {packed.shape()[0], hidden}, DType::F32, result.output.data());
+    autograd::record_op("swiglu_vulkan_f32", {packed.id()}, {out.id()});
+    return out;
+}
+
 } // namespace
 
 Tensor relu(const Tensor& x) {
@@ -101,6 +137,17 @@ Tensor silu(const Tensor& x) { return unary(x, "silu_f32"); }
 Tensor swiglu(const Tensor& packed) {
     MCL_CHECK(packed.dtype() == DType::F32, "swiglu supports f32 only");
     MCL_CHECK(packed.ndim() == 2 && packed.shape()[1] % 2 == 0, "swiglu expects [rows, 2*hidden]");
+    const auto selected_backend = selected_activation_backend();
+    if (selected_backend.kind == MicrokernelBackendKind::Vulkan &&
+        vulkan_swiglu_supported(packed)) {
+        const auto rows = static_cast<std::size_t>(packed.shape()[0]);
+        const auto hidden = static_cast<std::size_t>(packed.shape()[1] / 2);
+        const auto packed_host = packed.to_vector<float>();
+        const auto result = run_vulkan_swiglu(packed_host, rows, hidden);
+        if (result.success) return swiglu_vulkan_f32(packed, result);
+        MCL_CHECK(!strict_vulkan_activation_required(),
+                  std::string("vulkan swiglu f32 failed: ") + result.error);
+    }
     const int rows = static_cast<int>(packed.shape()[0]);
     const int hidden = static_cast<int>(packed.shape()[1] / 2);
     auto out = Tensor::empty(packed.backend(), {packed.shape()[0], hidden}, DType::F32);

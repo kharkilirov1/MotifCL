@@ -106,6 +106,19 @@ int main() {
         std::cout << "\n";
         std::cout << "rmsnorm_device=" << rmsnorm.device_name << "\n";
         if (!rmsnorm.error.empty()) std::cout << "rmsnorm_error=" << rmsnorm.error << "\n";
+        const auto swiglu = motifcl::run_vulkan_swiglu(
+            {1.0f, -2.0f, 0.5f, 4.0f,
+             -1.5f, 3.0f, -2.0f, 0.25f},
+            2, 2);
+        std::cout << "swiglu_success=" << (swiglu.success ? "true" : "false") << "\n";
+        std::cout << "swiglu_output=";
+        for (std::size_t j = 0; j < swiglu.output.size(); ++j) {
+            if (j != 0) std::cout << ",";
+            std::cout << swiglu.output[j];
+        }
+        std::cout << "\n";
+        std::cout << "swiglu_device=" << swiglu.device_name << "\n";
+        if (!swiglu.error.empty()) std::cout << "swiglu_error=" << swiglu.error << "\n";
     }
     if (!probe.error.empty()) std::cout << "error=" << probe.error << "\n";
     return probe.loader_found ? 0 : 77;

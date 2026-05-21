@@ -16,12 +16,12 @@ Current boundary:
   - availability gate: `microkernel_backend_available(domain, backend)`
   - typed selectors: `selected_matmul_backend()`,
     `selected_attention_backend()`, `selected_quant_backend()`,
-    `selected_norm_backend()`
+    `selected_norm_backend()`, `selected_activation_backend()`
 - `src/runtime/microkernel.cpp`
   - normalizes backend names;
   - exposes a concrete descriptor registry for the currently implemented
-    OpenCL matmul/attention/quant families plus narrow opt-in Native/Vulkan
-    matmul slices;
+    OpenCL matmul/attention/quant/norm/activation families plus narrow opt-in
+    Native/Vulkan slices;
   - reads per-domain env overrides;
   - resolves typed backend selections to available descriptors;
   - emits one warning per domain when an experimental/unknown backend is
@@ -35,12 +35,13 @@ Opt-in selectors:
 - `MOTIFCL_ATTENTION_BACKEND=opencl|native|asm|vulkan`
 - `MOTIFCL_QUANT_BACKEND=opencl|native|asm|vulkan`
 - `MOTIFCL_NORM_BACKEND=opencl|native|asm|vulkan`
+- `MOTIFCL_ACTIVATION_BACKEND=opencl|native|asm|vulkan`
 
-The selectors are now touched by the real matmul, attention/KV-cache, and
-quantization callsites. `native`, `asm`, and `vulkan` are accepted only as
-explicit experimental requests. Implemented descriptor slices become effective;
-unimplemented domains warn and fall back to OpenCL rather than silently taking
-an invalid path.
+The selectors are now touched by the real matmul, attention/KV-cache,
+quantization, norm, and activation callsites. `native`, `asm`, and `vulkan` are
+accepted only as explicit experimental requests. Implemented descriptor slices
+become effective; unimplemented domains warn and fall back to OpenCL rather than
+silently taking an invalid path.
 
 The typed backend structs are intentionally real but conservative: OpenCL has
 registered descriptors for the stable path. Native currently has narrow
@@ -123,12 +124,21 @@ storage buffers for input/weight/output, and `GLSL.std.450` `InverseSqrt` for
 the RMS reciprocal. If Vulkan compute is unavailable the callsite falls back to
 OpenCL; strict testing can set `MOTIFCL_REQUIRE_VULKAN_NORM=1`.
 
+`MOTIFCL_ACTIVATION_BACKEND=vulkan` now resolves to the narrow
+`vulkan.activation.swiglu_f32` descriptor. The real `swiglu()` callsite
+dispatches F32 rank-2 packed `[rows, 2*hidden]` inputs with `rows <= 4096`,
+`hidden <= 4096`, and no autograd through `run_vulkan_swiglu()`. The runtime
+SPIR-V shader maps one work item to one output element, computes
+`gate / (1 + exp(-gate)) * up`, and writes `[rows, hidden]`. If Vulkan compute
+is unavailable the callsite falls back to OpenCL; strict testing can set
+`MOTIFCL_REQUIRE_VULKAN_ACTIVATION=1`.
+
 This is still not a full transformer replacement. Vulkan Attention/Quant
-full GQA/paged-KV kernels, LayerNorm/backward norm kernels, Quant domains,
-autograd, packed quant weights, and large/perf-gated production shapes remain
-descriptor-empty or fall back to OpenCL until validated storage-buffer inputs,
-shape/stride contracts, and correctness/perf gates land against the matching
-OpenCL kernels.
+full GQA/paged-KV kernels, LayerNorm/backward norm kernels, remaining
+activation/unary kernels, Quant domains, autograd, packed quant weights, and
+large/perf-gated production shapes remain descriptor-empty or fall back to
+OpenCL until validated storage-buffer inputs, shape/stride contracts, and
+correctness/perf gates land against the matching OpenCL kernels.
 
 Policy for new fast paths:
 
