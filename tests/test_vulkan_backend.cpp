@@ -56,6 +56,9 @@ int main() {
         run_vulkan_f32_matmul({1.0f, 2.0f}, {1.0f, 2.0f, 3.0f}, 2, 2, 2);
     expect(!invalid_general_matmul.success, "Vulkan general matmul must reject malformed A size");
     expect(!invalid_general_matmul.error.empty(), "Vulkan general matmul validation failure must explain why");
+    const auto invalid_softmax = run_vulkan_softmax_rows({1.0f, 2.0f, 3.0f}, 2, 2);
+    expect(!invalid_softmax.success, "Vulkan softmax rows must reject malformed input size");
+    expect(!invalid_softmax.error.empty(), "Vulkan softmax rows validation failure must explain why");
 
     if (result.available()) {
         const bool require_vulkan_compute = std::getenv("MOTIFCL_REQUIRE_VULKAN_COMPUTE") != nullptr;
@@ -113,6 +116,29 @@ int main() {
                    "Vulkan general f32 matmul output mismatch");
         }
 
+        const std::vector<float> softmax_input = {
+            1.0f, 2.0f, 3.0f,
+            -1.0f, -1.0f, -1.0f,
+        };
+        const auto softmax = run_vulkan_softmax_rows(softmax_input, 2, 3);
+        expect(softmax.success,
+               "Vulkan softmax rows must succeed when a Vulkan device is available");
+        expect(softmax.error.empty(),
+               "Vulkan softmax rows success must not carry an error");
+        expect(softmax.output.size() == softmax_input.size(),
+               "Vulkan softmax rows must return rows*cols output values");
+        if (softmax.output.size() == softmax_input.size()) {
+            const float denom = std::exp(1.0f - 3.0f) + std::exp(2.0f - 3.0f) + 1.0f;
+            expect(std::fabs(softmax.output[0] - std::exp(1.0f - 3.0f) / denom) <= 1e-5f &&
+                       std::fabs(softmax.output[1] - std::exp(2.0f - 3.0f) / denom) <= 1e-5f &&
+                       std::fabs(softmax.output[2] - 1.0f / denom) <= 1e-5f,
+                   "Vulkan softmax rows first row output mismatch");
+            expect(std::fabs(softmax.output[3] - (1.0f / 3.0f)) <= 1e-5f &&
+                       std::fabs(softmax.output[4] - (1.0f / 3.0f)) <= 1e-5f &&
+                       std::fabs(softmax.output[5] - (1.0f / 3.0f)) <= 1e-5f,
+                   "Vulkan softmax rows uniform row output mismatch");
+        }
+
         set_env("MOTIFCL_MATMUL_BACKEND", "vulkan");
         try {
             auto backend = Backend::create_opencl();
@@ -143,6 +169,24 @@ int main() {
             }
             expect(!graph2.empty() && graph2.nodes()[0].op == "matmul_vulkan_f32",
                    "Vulkan general matmul dispatch must record the Vulkan F32 op");
+
+            set_env("MOTIFCL_ATTENTION_BACKEND", "vulkan");
+            auto SX = Tensor::from_cpu(backend, {2, 3}, DType::F32, softmax_input.data());
+            autograd::begin_graph_capture();
+            auto SY = softmax_rows(SX);
+            auto softmax_graph = autograd::end_graph_capture();
+            const auto sy = SY.to_vector<float>();
+            expect(sy.size() == softmax_input.size(), "Vulkan softmax dispatch must return rows*cols values");
+            if (sy.size() == softmax_input.size()) {
+                expect(std::fabs(sy[0] - softmax.output[0]) <= 1e-5f &&
+                           std::fabs(sy[1] - softmax.output[1]) <= 1e-5f &&
+                           std::fabs(sy[2] - softmax.output[2]) <= 1e-5f &&
+                           std::fabs(sy[3] - softmax.output[3]) <= 1e-5f,
+                       "Vulkan softmax dispatch output mismatch");
+            }
+            expect(!softmax_graph.empty() && softmax_graph.nodes()[0].op == "softmax_rows_vulkan_f32",
+                   "Vulkan softmax dispatch must record the Vulkan softmax op");
+            set_env("MOTIFCL_ATTENTION_BACKEND", "opencl");
         } catch (const std::exception& e) {
             if (motifcl_test::is_opencl_unavailable(e)) {
                 std::cout << "Vulkan matmul dispatch smoke skipped because OpenCL tensors are unavailable: "
@@ -153,6 +197,7 @@ int main() {
             }
         }
         set_env("MOTIFCL_MATMUL_BACKEND", "opencl");
+        set_env("MOTIFCL_ATTENTION_BACKEND", "opencl");
     }
 
     return ok ? 0 : 1;

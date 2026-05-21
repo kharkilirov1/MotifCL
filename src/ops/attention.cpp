@@ -7,6 +7,7 @@
 #include <motifcl/ops/basic_ops.hpp>
 #include <motifcl/runtime/backend.hpp>
 #include <motifcl/runtime/microkernel.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 
 #include <algorithm>
 #include <cstdlib>
@@ -79,6 +80,35 @@ Tensor paged_grouped_query_attention_prefill_wg(const Tensor& q,
                                                 int64_t page_count,
                                                 int64_t head_dim,
                                                 float scale_value);
+
+bool strict_vulkan_attention_required() {
+    const auto enabled = [](const char* value) {
+        if (value == nullptr) return false;
+        const std::string text(value);
+        return text == "1" || text == "true" || text == "TRUE" ||
+               text == "on" || text == "ON" || text == "yes" || text == "YES";
+    };
+    return enabled(std::getenv("MOTIFCL_REQUIRE_VULKAN_COMPUTE")) ||
+           enabled(std::getenv("MOTIFCL_REQUIRE_VULKAN_ATTENTION"));
+}
+
+bool vulkan_softmax_rows_supported(const Tensor& x) {
+    return x.dtype() == DType::F32 &&
+           x.ndim() == 2 &&
+           x.shape()[0] > 0 &&
+           x.shape()[1] > 0 &&
+           x.shape()[0] <= 4096 &&
+           x.shape()[1] <= 256;
+}
+
+Tensor softmax_rows_vulkan_f32(const Tensor& x, const VulkanF32TensorResult& result) {
+    MCL_CHECK(result.success, std::string("vulkan softmax rows f32 failed: ") + result.error);
+    MCL_CHECK(result.output.size() == static_cast<std::size_t>(x.numel()),
+              "vulkan softmax rows f32 returned unexpected output size");
+    auto out = Tensor::from_cpu(x.backend(), x.shape(), DType::F32, result.output.data());
+    autograd::record_op("softmax_rows_vulkan_f32", {x.id()}, {out.id()});
+    return out;
+}
 
 int env_int(const char* name, int fallback) {
     if (const char* env = std::getenv(name)) {
@@ -580,6 +610,17 @@ struct GroupedQueryAttentionMaskedBackwardNode : autograd::Node {
 Tensor softmax_rows(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::F32, "softmax_rows supports f32 only");
     MCL_CHECK(x.ndim() == 2, "softmax_rows expects rank-2 tensor");
+    const auto selected_backend = selected_attention_backend();
+    if (selected_backend.kind == MicrokernelBackendKind::Vulkan &&
+        vulkan_softmax_rows_supported(x)) {
+        const auto rows = static_cast<std::size_t>(x.shape()[0]);
+        const auto cols = static_cast<std::size_t>(x.shape()[1]);
+        const auto x_host = x.to_vector<float>();
+        const auto result = run_vulkan_softmax_rows(x_host, rows, cols);
+        if (result.success) return softmax_rows_vulkan_f32(x, result);
+        MCL_CHECK(!strict_vulkan_attention_required(),
+                  std::string("vulkan softmax rows f32 failed: ") + result.error);
+    }
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     auto k = x.backend().kernels.get("softmax_rows_f32");
     int rows = static_cast<int>(x.shape()[0]);

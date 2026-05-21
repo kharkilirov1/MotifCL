@@ -1,5 +1,6 @@
 #include <cmath>
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
 #include <motifcl/motifcl.hpp>
@@ -14,6 +15,13 @@ int main() {
         float row0 = Y[0] + Y[1] + Y[2];
         float row1 = Y[3] + Y[4] + Y[5];
         if (std::fabs(row0 - 1.0f) > 1e-4f || std::fabs(row1 - 1.0f) > 1e-4f) return 1;
+        if (std::getenv("MOTIFCL_REQUIRE_VULKAN_ATTENTION") != nullptr) {
+            motifcl::autograd::begin_graph_capture();
+            auto CapturedSoftmax = motifcl::softmax_rows(X);
+            (void)CapturedSoftmax;
+            auto softmax_graph = motifcl::autograd::end_graph_capture();
+            if (softmax_graph.empty() || softmax_graph.nodes()[0].op != "softmax_rows_vulkan_f32") return 2;
+        }
 
         auto RS = motifcl::rowwise_sum(X).to_vector<float>();
         auto RM = motifcl::rowwise_max(X).to_vector<float>();

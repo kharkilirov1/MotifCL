@@ -150,6 +150,12 @@ std::vector<MicrokernelDescriptor> microkernel_descriptors(MicrokernelDomain dom
                        "opt-in native-GPU Vulkan F32 matmul; rank-2 same-backend tensors, no autograd, bounded specialized K, exact-dispatch M/N, OpenCL fallback when Vulkan compute is unavailable"),
         };
     }
+    if (backend == MicrokernelBackendKind::Vulkan && domain == MicrokernelDomain::Attention) {
+        return {
+            descriptor(domain, backend, "vulkan.attention.softmax_rows_f32",
+                       "opt-in native-GPU Vulkan F32 row softmax; rank-2 tensors, bounded row/column specialization, OpenCL fallback when Vulkan compute is unavailable"),
+        };
+    }
     if (backend != MicrokernelBackendKind::OpenCL) return {};
 
     switch (domain) {

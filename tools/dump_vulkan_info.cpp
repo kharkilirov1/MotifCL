@@ -79,6 +79,19 @@ int main() {
         std::cout << "\n";
         std::cout << "f32_general_matmul_device=" << general_matmul.device_name << "\n";
         if (!general_matmul.error.empty()) std::cout << "f32_general_matmul_error=" << general_matmul.error << "\n";
+        const auto softmax = motifcl::run_vulkan_softmax_rows(
+            {1.0f, 2.0f, 3.0f,
+             -1.0f, -1.0f, -1.0f},
+            2, 3);
+        std::cout << "softmax_rows_success=" << (softmax.success ? "true" : "false") << "\n";
+        std::cout << "softmax_rows_output=";
+        for (std::size_t j = 0; j < softmax.output.size(); ++j) {
+            if (j != 0) std::cout << ",";
+            std::cout << softmax.output[j];
+        }
+        std::cout << "\n";
+        std::cout << "softmax_rows_device=" << softmax.device_name << "\n";
+        if (!softmax.error.empty()) std::cout << "softmax_rows_error=" << softmax.error << "\n";
     }
     if (!probe.error.empty()) std::cout << "error=" << probe.error << "\n";
     return probe.loader_found ? 0 : 77;

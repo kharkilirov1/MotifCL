@@ -103,11 +103,20 @@ runtime/compute is unavailable the callsite falls back to the validated OpenCL
 path; strict testing can set `MOTIFCL_REQUIRE_VULKAN_COMPUTE=1` or
 `MOTIFCL_REQUIRE_VULKAN_MATMUL=1` to make that fallback fail loudly.
 
+`MOTIFCL_ATTENTION_BACKEND=vulkan` now resolves to the narrow
+`vulkan.attention.softmax_rows_f32` descriptor. The real `softmax_rows()`
+callsite dispatches F32 rank-2 row softmax with `rows <= 4096` and
+`cols <= 256` through `run_vulkan_softmax_rows()`. This emits a runtime SPIR-V
+shader using `GlobalInvocationId`, `GLSL.std.450` `FMax`/`Exp`, one work item
+per row, and storage buffers for input/output. If Vulkan compute is unavailable
+the callsite falls back to OpenCL; strict testing can set
+`MOTIFCL_REQUIRE_VULKAN_ATTENTION=1`.
+
 This is still not a full transformer replacement. Vulkan Attention/Quant
-domains, autograd, packed quant weights, and large/perf-gated production shapes
-remain descriptor-empty or fall back to OpenCL until validated storage-buffer
-inputs, shape/stride contracts, and correctness/perf gates land against the
-matching OpenCL kernels.
+full GQA/paged-KV kernels, Quant domains, autograd, packed quant weights, and
+large/perf-gated production shapes remain descriptor-empty or fall back to
+OpenCL until validated storage-buffer inputs, shape/stride contracts, and
+correctness/perf gates land against the matching OpenCL kernels.
 
 Policy for new fast paths:
 

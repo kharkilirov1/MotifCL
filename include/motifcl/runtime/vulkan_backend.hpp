@@ -50,6 +50,13 @@ struct VulkanF32MatmulSmokeResult {
     std::string error;
 };
 
+struct VulkanF32TensorResult {
+    bool success = false;
+    std::vector<float> output;
+    std::string device_name;
+    std::string error;
+};
+
 VulkanProbeResult probe_vulkan_runtime();
 VulkanSmokeComputeResult run_vulkan_smoke_compute();
 VulkanF32MatmulSmokeResult run_vulkan_f32_matmul(const std::vector<float>& a,
@@ -57,6 +64,9 @@ VulkanF32MatmulSmokeResult run_vulkan_f32_matmul(const std::vector<float>& a,
                                                  std::size_t m,
                                                  std::size_t k,
                                                  std::size_t n);
+VulkanF32TensorResult run_vulkan_softmax_rows(const std::vector<float>& x,
+                                              std::size_t rows,
+                                              std::size_t cols);
 VulkanF32MatmulSmokeResult run_vulkan_f32_m1_matmul(const std::vector<float>& a,
                                                     const std::vector<float>& b,
                                                     std::size_t k,

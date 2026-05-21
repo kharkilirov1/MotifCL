@@ -70,6 +70,8 @@ int main() {
                        "native matmul descriptor registry must not be empty");
     expect_descriptors(MicrokernelDomain::Matmul, MicrokernelBackendKind::Vulkan,
                        "vulkan matmul descriptor registry must expose implemented F32 slices");
+    expect_descriptors(MicrokernelDomain::Attention, MicrokernelBackendKind::Vulkan,
+                       "vulkan attention descriptor registry must expose implemented softmax slice");
     const auto vulkan_descriptors = microkernel_descriptors(MicrokernelDomain::Matmul,
                                                             MicrokernelBackendKind::Vulkan);
     bool has_vulkan_m1 = false;
@@ -87,6 +89,8 @@ int main() {
                  "native matmul backend must be available for the implemented M=1 F32 slice");
     ok &= expect(microkernel_backend_available(MicrokernelDomain::Matmul, MicrokernelBackendKind::Vulkan),
                  "vulkan matmul backend must be available for implemented F32 slices");
+    ok &= expect(microkernel_backend_available(MicrokernelDomain::Attention, MicrokernelBackendKind::Vulkan),
+                 "vulkan attention backend must be available for implemented softmax slice");
     ok &= expect(!microkernel_backend_available(MicrokernelDomain::Attention, MicrokernelBackendKind::Asm),
                  "asm attention backend must stay unavailable until implemented");
 
@@ -150,6 +154,14 @@ int main() {
                      asm_backend.fallback_to_opencl &&
                      !asm_backend.fallback_reason.empty(),
                  "asm selection must explicitly fallback to OpenCL");
+
+    const auto vulkan_attention = select_microkernel_backend_from_value(MicrokernelDomain::Attention, "vulkan");
+    ok &= expect(vulkan_attention.requested == MicrokernelBackendKind::Vulkan &&
+                     vulkan_attention.effective == MicrokernelBackendKind::Vulkan &&
+                     vulkan_attention.stability == MicrokernelStability::Experimental &&
+                     !vulkan_attention.fallback_to_opencl &&
+                     vulkan_attention.fallback_reason.empty(),
+                 "vulkan attention selection must resolve to the implemented softmax backend");
 
     const auto vulkan_backend = select_microkernel_backend_from_value(MicrokernelDomain::Matmul, "vulkan");
     ok &= expect(vulkan_backend.requested == MicrokernelBackendKind::Vulkan &&
