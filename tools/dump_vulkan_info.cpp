@@ -92,6 +92,20 @@ int main() {
         std::cout << "\n";
         std::cout << "softmax_rows_device=" << softmax.device_name << "\n";
         if (!softmax.error.empty()) std::cout << "softmax_rows_error=" << softmax.error << "\n";
+        const auto rmsnorm = motifcl::run_vulkan_rmsnorm(
+            {1.0f, 2.0f, 3.0f, 4.0f,
+             -2.0f, 0.0f, 2.0f, 4.0f},
+            {1.0f, 0.5f, 1.5f, 2.0f},
+            2, 4, 1.0e-6f);
+        std::cout << "rmsnorm_success=" << (rmsnorm.success ? "true" : "false") << "\n";
+        std::cout << "rmsnorm_output=";
+        for (std::size_t j = 0; j < rmsnorm.output.size(); ++j) {
+            if (j != 0) std::cout << ",";
+            std::cout << rmsnorm.output[j];
+        }
+        std::cout << "\n";
+        std::cout << "rmsnorm_device=" << rmsnorm.device_name << "\n";
+        if (!rmsnorm.error.empty()) std::cout << "rmsnorm_error=" << rmsnorm.error << "\n";
     }
     if (!probe.error.empty()) std::cout << "error=" << probe.error << "\n";
     return probe.loader_found ? 0 : 77;

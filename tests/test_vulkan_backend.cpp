@@ -1,6 +1,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -59,6 +60,14 @@ int main() {
     const auto invalid_softmax = run_vulkan_softmax_rows({1.0f, 2.0f, 3.0f}, 2, 2);
     expect(!invalid_softmax.success, "Vulkan softmax rows must reject malformed input size");
     expect(!invalid_softmax.error.empty(), "Vulkan softmax rows validation failure must explain why");
+    const auto invalid_rmsnorm =
+        run_vulkan_rmsnorm({1.0f, 2.0f, 3.0f}, {1.0f, 1.0f}, 2, 2, 1.0e-6f);
+    expect(!invalid_rmsnorm.success, "Vulkan RMSNorm must reject malformed input size");
+    expect(!invalid_rmsnorm.error.empty(), "Vulkan RMSNorm validation failure must explain why");
+    const auto invalid_rmsnorm_eps =
+        run_vulkan_rmsnorm({1.0f, 2.0f}, {1.0f, 1.0f}, 1, 2, std::numeric_limits<float>::infinity());
+    expect(!invalid_rmsnorm_eps.success, "Vulkan RMSNorm must reject non-finite eps");
+    expect(!invalid_rmsnorm_eps.error.empty(), "Vulkan RMSNorm eps validation failure must explain why");
 
     if (result.available()) {
         const bool require_vulkan_compute = std::getenv("MOTIFCL_REQUIRE_VULKAN_COMPUTE") != nullptr;
@@ -139,6 +148,31 @@ int main() {
                    "Vulkan softmax rows uniform row output mismatch");
         }
 
+        const std::vector<float> rms_x = {
+            1.0f, 2.0f, 3.0f, 4.0f,
+            -2.0f, 0.0f, 2.0f, 4.0f,
+        };
+        const std::vector<float> rms_w = {1.0f, 0.5f, 1.5f, 2.0f};
+        const auto rmsnorm_result = run_vulkan_rmsnorm(rms_x, rms_w, 2, 4, 1.0e-6f);
+        expect(rmsnorm_result.success,
+               "Vulkan RMSNorm must succeed when a Vulkan device is available");
+        expect(rmsnorm_result.error.empty(),
+               "Vulkan RMSNorm success must not carry an error");
+        expect(rmsnorm_result.output.size() == rms_x.size(),
+               "Vulkan RMSNorm must return rows*cols output values");
+        if (rmsnorm_result.output.size() == rms_x.size()) {
+            for (std::size_t r = 0; r < 2; ++r) {
+                float ss = 0.0f;
+                for (std::size_t c = 0; c < 4; ++c) ss += rms_x[r * 4 + c] * rms_x[r * 4 + c];
+                const float inv = 1.0f / std::sqrt(ss / 4.0f + 1.0e-6f);
+                for (std::size_t c = 0; c < 4; ++c) {
+                    const float expected = rms_x[r * 4 + c] * inv * rms_w[c];
+                    expect(std::fabs(rmsnorm_result.output[r * 4 + c] - expected) <= 1e-5f,
+                           "Vulkan RMSNorm output mismatch");
+                }
+            }
+        }
+
         set_env("MOTIFCL_MATMUL_BACKEND", "vulkan");
         try {
             auto backend = Backend::create_opencl();
@@ -187,6 +221,24 @@ int main() {
             expect(!softmax_graph.empty() && softmax_graph.nodes()[0].op == "softmax_rows_vulkan_f32",
                    "Vulkan softmax dispatch must record the Vulkan softmax op");
             set_env("MOTIFCL_ATTENTION_BACKEND", "opencl");
+
+            set_env("MOTIFCL_NORM_BACKEND", "vulkan");
+            auto RX = Tensor::from_cpu(backend, {2, 4}, DType::F32, rms_x.data());
+            auto RW = Tensor::from_cpu(backend, {4}, DType::F32, rms_w.data());
+            autograd::begin_graph_capture();
+            auto RY = rmsnorm(RX, RW);
+            auto rms_graph = autograd::end_graph_capture();
+            const auto ry = RY.to_vector<float>();
+            expect(ry.size() == rms_x.size(), "Vulkan RMSNorm dispatch must return rows*cols values");
+            if (ry.size() == rms_x.size()) {
+                expect(std::fabs(ry[0] - rmsnorm_result.output[0]) <= 1e-5f &&
+                           std::fabs(ry[3] - rmsnorm_result.output[3]) <= 1e-5f &&
+                           std::fabs(ry[4] - rmsnorm_result.output[4]) <= 1e-5f,
+                       "Vulkan RMSNorm dispatch output mismatch");
+            }
+            expect(!rms_graph.empty() && rms_graph.nodes()[0].op == "rmsnorm_vulkan_f32",
+                   "Vulkan RMSNorm dispatch must record the Vulkan RMSNorm op");
+            set_env("MOTIFCL_NORM_BACKEND", "opencl");
         } catch (const std::exception& e) {
             if (motifcl_test::is_opencl_unavailable(e)) {
                 std::cout << "Vulkan matmul dispatch smoke skipped because OpenCL tensors are unavailable: "
@@ -198,6 +250,7 @@ int main() {
         }
         set_env("MOTIFCL_MATMUL_BACKEND", "opencl");
         set_env("MOTIFCL_ATTENTION_BACKEND", "opencl");
+        set_env("MOTIFCL_NORM_BACKEND", "opencl");
     }
 
     return ok ? 0 : 1;

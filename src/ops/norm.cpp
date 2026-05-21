@@ -4,7 +4,11 @@
 #include <motifcl/autograd/node.hpp>
 #include <motifcl/core/error.hpp>
 #include <motifcl/runtime/backend.hpp>
+#include <motifcl/runtime/microkernel.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 
+#include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <utility>
@@ -19,11 +23,48 @@ bool supports_norm_workgroup(const Backend& backend) {
     return backend.device_info().max_work_group_size >= kNormWorkgroup;
 }
 
+bool strict_vulkan_norm_required() {
+    const auto enabled = [](const char* value) {
+        if (value == nullptr) return false;
+        const std::string text(value);
+        return text == "1" || text == "true" || text == "TRUE" ||
+               text == "on" || text == "ON" || text == "yes" || text == "YES";
+    };
+    return enabled(std::getenv("MOTIFCL_REQUIRE_VULKAN_COMPUTE")) ||
+           enabled(std::getenv("MOTIFCL_REQUIRE_VULKAN_NORM"));
+}
+
 void require_rmsnorm_inputs(const Tensor& x, const Tensor& weight, const char* op) {
     MCL_CHECK(x.dtype() == DType::F32 && weight.dtype() == DType::F32, std::string(op) + " supports f32 only");
     MCL_CHECK(x.ndim() == 2 && weight.ndim() == 1, std::string(op) + " expects x [rows, cols] and weight [cols]");
     MCL_CHECK(x.shape()[1] == weight.shape()[0], std::string(op) + " weight shape mismatch");
     MCL_CHECK(x.backend_ptr() == weight.backend_ptr(), std::string(op) + " requires tensors on same backend");
+}
+
+bool vulkan_rmsnorm_supported(const Tensor& x, const Tensor& weight, float eps) {
+    return x.dtype() == DType::F32 &&
+           weight.dtype() == DType::F32 &&
+           x.ndim() == 2 &&
+           weight.ndim() == 1 &&
+           x.shape()[0] > 0 &&
+           x.shape()[1] > 0 &&
+           x.shape()[1] == weight.shape()[0] &&
+           x.shape()[0] <= 4096 &&
+           x.shape()[1] <= 256 &&
+           x.backend_ptr() == weight.backend_ptr() &&
+           std::isfinite(eps) &&
+           eps > 0.0f &&
+           !x.requires_grad() &&
+           !weight.requires_grad();
+}
+
+Tensor rmsnorm_vulkan_f32(const Tensor& x, const Tensor& weight, const VulkanF32TensorResult& result) {
+    MCL_CHECK(result.success, std::string("vulkan rmsnorm f32 failed: ") + result.error);
+    MCL_CHECK(result.output.size() == static_cast<std::size_t>(x.numel()),
+              "vulkan rmsnorm f32 returned unexpected output size");
+    auto out = Tensor::from_cpu(x.backend(), x.shape(), DType::F32, result.output.data());
+    autograd::record_op("rmsnorm_vulkan_f32", {x.id(), weight.id()}, {out.id()});
+    return out;
 }
 
 struct RMSNormBackwardNode : autograd::Node {
@@ -45,6 +86,18 @@ struct RMSNormBackwardNode : autograd::Node {
 
 Tensor rmsnorm(const Tensor& x, const Tensor& weight, float eps) {
     require_rmsnorm_inputs(x, weight, "rmsnorm");
+    const auto selected_backend = selected_norm_backend();
+    if (selected_backend.kind == MicrokernelBackendKind::Vulkan &&
+        vulkan_rmsnorm_supported(x, weight, eps)) {
+        const auto rows = static_cast<std::size_t>(x.shape()[0]);
+        const auto cols = static_cast<std::size_t>(x.shape()[1]);
+        const auto x_host = x.to_vector<float>();
+        const auto weight_host = weight.to_vector<float>();
+        const auto result = run_vulkan_rmsnorm(x_host, weight_host, rows, cols, eps);
+        if (result.success) return rmsnorm_vulkan_f32(x, weight, result);
+        MCL_CHECK(!strict_vulkan_norm_required(),
+                  std::string("vulkan rmsnorm f32 failed: ") + result.error);
+    }
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     const bool use_wg = supports_norm_workgroup(x.backend());
     const std::string kernel_name = use_wg ? "rmsnorm_rowwise_wg_f32" : "rmsnorm_rowwise_f32";

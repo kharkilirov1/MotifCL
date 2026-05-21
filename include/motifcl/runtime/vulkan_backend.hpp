@@ -67,6 +67,11 @@ VulkanF32MatmulSmokeResult run_vulkan_f32_matmul(const std::vector<float>& a,
 VulkanF32TensorResult run_vulkan_softmax_rows(const std::vector<float>& x,
                                               std::size_t rows,
                                               std::size_t cols);
+VulkanF32TensorResult run_vulkan_rmsnorm(const std::vector<float>& x,
+                                         const std::vector<float>& weight,
+                                         std::size_t rows,
+                                         std::size_t cols,
+                                         float eps);
 VulkanF32MatmulSmokeResult run_vulkan_f32_m1_matmul(const std::vector<float>& a,
                                                     const std::vector<float>& b,
                                                     std::size_t k,

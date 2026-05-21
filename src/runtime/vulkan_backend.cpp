@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -659,6 +660,12 @@ void append_spirv_inst(std::vector<std::uint32_t>& words,
     words.insert(words.end(), operands.begin(), operands.end());
 }
 
+std::uint32_t f32_bits(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
 std::vector<std::uint32_t> f32_m1_matmul_spirv(std::size_t k, std::size_t n) {
     constexpr std::uint16_t op_capability = 17;
     constexpr std::uint16_t op_memory_model = 14;
@@ -956,6 +963,195 @@ std::vector<std::uint32_t> f32_matmul_spirv(std::size_t k, std::size_t n) {
     append_spirv_inst(words, op_variable, {id_ptr_buffer, id_a, storage_class_uniform});
     append_spirv_inst(words, op_variable, {id_ptr_buffer, id_b, storage_class_uniform});
     append_spirv_inst(words, op_variable, {id_ptr_buffer, id_c, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    words.insert(words.end(), body.begin(), body.end());
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
+std::vector<std::uint32_t> rmsnorm_spirv(std::size_t cols, float eps) {
+    constexpr std::uint16_t op_ext_inst_import = 11;
+    constexpr std::uint16_t op_ext_inst = 12;
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_float = 22;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_iadd = 128;
+    constexpr std::uint16_t op_imul = 132;
+    constexpr std::uint16_t op_fmul = 133;
+    constexpr std::uint16_t op_fadd = 129;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+    constexpr std::uint32_t glsl_inverse_sqrt = 32;
+
+    const auto max_constant = cols;
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_glsl = 5;
+    const std::uint32_t id_f32 = 6;
+    const std::uint32_t id_u32 = 7;
+    const std::uint32_t id_v3u32 = 8;
+    const std::uint32_t id_ptr_input_v3u32 = 9;
+    const std::uint32_t id_global_invocation_id = 10;
+    std::uint32_t next_id = 11;
+    std::vector<std::uint32_t> constants(max_constant + 1);
+    for (std::uint32_t value = 0; value <= max_constant; ++value) constants[value] = next_id++;
+    const std::uint32_t id_inv_cols = next_id++;
+    const std::uint32_t id_eps = next_id++;
+    const std::uint32_t id_runtime_array = next_id++;
+    const std::uint32_t id_buffer_struct = next_id++;
+    const std::uint32_t id_ptr_buffer = next_id++;
+    const std::uint32_t id_ptr_f32 = next_id++;
+    const std::uint32_t id_x = next_id++;
+    const std::uint32_t id_weight = next_id++;
+    const std::uint32_t id_out = next_id++;
+    auto new_id = [&]() {
+        return next_id++;
+    };
+
+    std::vector<std::uint32_t> body;
+    auto emit_body = [&](std::uint16_t opcode, const std::vector<std::uint32_t>& operands) {
+        append_spirv_inst(body, opcode, operands);
+    };
+
+    const auto gid = new_id();
+    const auto row = new_id();
+    const auto row_base = new_id();
+    emit_body(op_load, {id_v3u32, gid, id_global_invocation_id});
+    emit_body(op_composite_extract, {id_u32, row, gid, 0});
+    emit_body(op_imul, {id_u32, row_base, row, constants[static_cast<std::uint32_t>(cols)]});
+
+    std::uint32_t sumsq = 0;
+    for (std::uint32_t col = 0; col < static_cast<std::uint32_t>(cols); ++col) {
+        const auto index = new_id();
+        const auto ptr = new_id();
+        const auto value = new_id();
+        const auto square = new_id();
+        emit_body(op_iadd, {id_u32, index, row_base, constants[col]});
+        emit_body(op_access_chain, {id_ptr_f32, ptr, id_x, constants[0], index});
+        emit_body(op_load, {id_f32, value, ptr});
+        emit_body(op_fmul, {id_f32, square, value, value});
+        if (sumsq == 0) {
+            sumsq = square;
+        } else {
+            const auto next_sum = new_id();
+            emit_body(op_fadd, {id_f32, next_sum, sumsq, square});
+            sumsq = next_sum;
+        }
+    }
+    const auto mean_square = new_id();
+    const auto variance = new_id();
+    const auto inv_rms = new_id();
+    emit_body(op_fmul, {id_f32, mean_square, sumsq, id_inv_cols});
+    emit_body(op_fadd, {id_f32, variance, mean_square, id_eps});
+    emit_body(op_ext_inst, {id_f32, inv_rms, id_glsl, glsl_inverse_sqrt, variance});
+
+    for (std::uint32_t col = 0; col < static_cast<std::uint32_t>(cols); ++col) {
+        const auto index = new_id();
+        const auto x_ptr = new_id();
+        const auto w_ptr = new_id();
+        const auto out_ptr = new_id();
+        const auto x_val = new_id();
+        const auto w_val = new_id();
+        const auto normed = new_id();
+        const auto weighted = new_id();
+        emit_body(op_iadd, {id_u32, index, row_base, constants[col]});
+        emit_body(op_access_chain, {id_ptr_f32, x_ptr, id_x, constants[0], index});
+        emit_body(op_access_chain, {id_ptr_f32, w_ptr, id_weight, constants[0], constants[col]});
+        emit_body(op_access_chain, {id_ptr_f32, out_ptr, id_out, constants[0], index});
+        emit_body(op_load, {id_f32, x_val, x_ptr});
+        emit_body(op_load, {id_f32, w_val, w_ptr});
+        emit_body(op_fmul, {id_f32, normed, x_val, inv_rms});
+        emit_body(op_fmul, {id_f32, weighted, normed, w_val});
+        emit_body(op_store, {out_ptr, weighted});
+    }
+
+    std::vector<std::uint32_t> words;
+    words.reserve(220 + body.size());
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(next_id);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    words.push_back((6u << 16u) | op_ext_inst_import);
+    words.push_back(id_glsl);
+    append_spirv_string(words, "GLSL.std.450");
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_x, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_x, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_weight, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_weight, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_out, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_out, decoration_binding, 2});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_float, {id_f32, 32});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    for (std::uint32_t value = 0; value <= max_constant; ++value) {
+        append_spirv_inst(words, op_constant, {id_u32, constants[value], value});
+    }
+    append_spirv_inst(words, op_constant, {id_f32, id_inv_cols, f32_bits(1.0f / static_cast<float>(cols))});
+    append_spirv_inst(words, op_constant, {id_f32, id_eps, f32_bits(eps)});
+    append_spirv_inst(words, op_type_runtime_array, {id_runtime_array, id_f32});
+    append_spirv_inst(words, op_type_struct, {id_buffer_struct, id_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_buffer, storage_class_uniform, id_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32, storage_class_uniform, id_f32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_x, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_weight, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_out, storage_class_uniform});
     append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
     append_spirv_inst(words, op_label, {id_label});
     words.insert(words.end(), body.begin(), body.end());
@@ -1928,6 +2124,54 @@ VulkanF32TensorResult run_vulkan_softmax_rows(const std::vector<float>& x,
     if (run.outputs.size() != 1 || run.outputs[0].size() != out.size() * sizeof(float)) {
         result.success = false;
         result.error = "Vulkan softmax rows returned malformed output";
+        return result;
+    }
+
+    result.output.resize(out.size());
+    std::memcpy(result.output.data(), run.outputs[0].data(), run.outputs[0].size());
+    return result;
+}
+
+VulkanF32TensorResult run_vulkan_rmsnorm(const std::vector<float>& x,
+                                         const std::vector<float>& weight,
+                                         std::size_t rows,
+                                         std::size_t cols,
+                                         float eps) {
+    VulkanF32TensorResult result;
+    constexpr std::size_t kMaxRows = 4096;
+    constexpr std::size_t kMaxCols = 256;
+
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (rows == 0 || cols == 0) return fail("Vulkan RMSNorm requires non-zero rows and cols");
+    if (rows > kMaxRows || cols > kMaxCols) {
+        return fail("Vulkan RMSNorm currently supports rows up to 4096 and cols up to 256");
+    }
+    if (!std::isfinite(eps) || !(eps > 0.0f)) return fail("Vulkan RMSNorm requires finite positive eps");
+    if (rows > std::numeric_limits<std::size_t>::max() / cols) {
+        return fail("Vulkan RMSNorm rows*cols overflows size_t");
+    }
+    if (x.size() != rows * cols) return fail("Vulkan RMSNorm input size must equal rows*cols");
+    if (weight.size() != cols) return fail("Vulkan RMSNorm weight size must equal cols");
+
+    std::vector<float> out(x.size(), 0.0f);
+    const auto shader = rmsnorm_spirv(cols, eps);
+    const std::vector<VulkanStorageBufferSpec> buffers = {
+        {x.data(), x.size() * sizeof(float)},
+        {weight.data(), weight.size() * sizeof(float)},
+        {out.data(), out.size() * sizeof(float)},
+    };
+    const auto run = run_vulkan_storage_buffer_compute(
+        shader.data(), shader.size(), buffers, {2}, static_cast<std::uint32_t>(rows), 1, 1);
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    if (!run.success) return result;
+    if (run.outputs.size() != 1 || run.outputs[0].size() != out.size() * sizeof(float)) {
+        result.success = false;
+        result.error = "Vulkan RMSNorm returned malformed output";
         return result;
     }
 

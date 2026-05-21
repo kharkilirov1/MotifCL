@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
 #include <motifcl/motifcl.hpp>
@@ -17,7 +18,9 @@ int main() {
         auto captured_norm = motifcl::rmsnorm(X, W);
         (void)captured_norm;
         auto graph = motifcl::autograd::end_graph_capture();
-        if (backend.device_info().max_work_group_size >= 256 &&
+        if (std::getenv("MOTIFCL_REQUIRE_VULKAN_NORM") != nullptr) {
+            if (graph.empty() || graph.nodes()[0].op != "rmsnorm_vulkan_f32") return 1;
+        } else if (backend.device_info().max_work_group_size >= 256 &&
             (graph.empty() || graph.nodes()[0].op != "rmsnorm_rowwise_wg_f32")) return 1;
 
         std::vector<float> grad = {0.5f, -0.25f, 0.75f, -1.0f};

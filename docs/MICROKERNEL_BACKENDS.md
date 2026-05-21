@@ -15,7 +15,8 @@ Current boundary:
   - descriptor registry: `microkernel_descriptors(domain, backend)`
   - availability gate: `microkernel_backend_available(domain, backend)`
   - typed selectors: `selected_matmul_backend()`,
-    `selected_attention_backend()`, `selected_quant_backend()`
+    `selected_attention_backend()`, `selected_quant_backend()`,
+    `selected_norm_backend()`
 - `src/runtime/microkernel.cpp`
   - normalizes backend names;
   - exposes a concrete descriptor registry for the currently implemented
@@ -33,6 +34,7 @@ Opt-in selectors:
 - `MOTIFCL_MATMUL_BACKEND=opencl|native|asm|vulkan`
 - `MOTIFCL_ATTENTION_BACKEND=opencl|native|asm|vulkan`
 - `MOTIFCL_QUANT_BACKEND=opencl|native|asm|vulkan`
+- `MOTIFCL_NORM_BACKEND=opencl|native|asm|vulkan`
 
 The selectors are now touched by the real matmul, attention/KV-cache, and
 quantization callsites. `native`, `asm`, and `vulkan` are accepted only as
@@ -112,11 +114,21 @@ per row, and storage buffers for input/output. If Vulkan compute is unavailable
 the callsite falls back to OpenCL; strict testing can set
 `MOTIFCL_REQUIRE_VULKAN_ATTENTION=1`.
 
+`MOTIFCL_NORM_BACKEND=vulkan` now resolves to the narrow
+`vulkan.norm.rmsnorm_f32` descriptor. The real `rmsnorm()` callsite dispatches
+F32 rank-2 input plus F32 rank-1 weight with `rows <= 4096`, `cols <= 256`,
+finite positive `eps`, same backend, and no autograd through
+`run_vulkan_rmsnorm()`. The runtime SPIR-V shader uses one work item per row,
+storage buffers for input/weight/output, and `GLSL.std.450` `InverseSqrt` for
+the RMS reciprocal. If Vulkan compute is unavailable the callsite falls back to
+OpenCL; strict testing can set `MOTIFCL_REQUIRE_VULKAN_NORM=1`.
+
 This is still not a full transformer replacement. Vulkan Attention/Quant
-full GQA/paged-KV kernels, Quant domains, autograd, packed quant weights, and
-large/perf-gated production shapes remain descriptor-empty or fall back to
-OpenCL until validated storage-buffer inputs, shape/stride contracts, and
-correctness/perf gates land against the matching OpenCL kernels.
+full GQA/paged-KV kernels, LayerNorm/backward norm kernels, Quant domains,
+autograd, packed quant weights, and large/perf-gated production shapes remain
+descriptor-empty or fall back to OpenCL until validated storage-buffer inputs,
+shape/stride contracts, and correctness/perf gates land against the matching
+OpenCL kernels.
 
 Policy for new fast paths:
 
