@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include "test_utils.hpp"
+
 namespace {
 
 void require(bool cond, const std::string& message) {
@@ -508,7 +510,19 @@ int main() {
                 gemma4_cfg.local_attention_layers == std::vector<int>({0}) &&
                 gemma4_cfg.global_attention_layers == std::vector<int>({1}),
             "Gemma4 GGUF sliding/full attention pattern mapping failed");
-    auto backend = motifcl::Backend::create_opencl();
+    motifcl::Backend backend;
+    try {
+        backend = motifcl::Backend::create_opencl();
+    } catch (const std::exception& e) {
+        if (motifcl_test::is_opencl_unavailable(e)) {
+            std::cerr << "Skipping OpenCL-dependent GGUF runtime checks: " << e.what() << '\n';
+            std::filesystem::remove(gemma4_path);
+            std::filesystem::remove(path);
+            return 77;
+        }
+        throw;
+    }
+
     auto gemma4_model = motifcl::nn::make_hf_transformer_model(backend, gemma4_cfg);
     require(gemma4_model.blocks[0]->attention().head_dim() == 2 &&
                 gemma4_model.blocks[1]->attention().head_dim() == 4 &&

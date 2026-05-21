@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "test_utils.hpp"
+
 namespace {
 
 void require(bool cond, const std::string& message) {
@@ -231,7 +233,18 @@ int main() {
     require(probe.can_instantiate && !probe.can_load_weights && !probe.warnings.empty(),
             "HF model probe readiness failed");
 
-    auto backend = motifcl::Backend::create_opencl();
+    motifcl::Backend backend;
+    try {
+        backend = motifcl::Backend::create_opencl();
+    } catch (const std::exception& e) {
+        if (motifcl_test::is_opencl_unavailable(e)) {
+            std::cerr << "Skipping OpenCL-dependent HF runtime checks: " << e.what() << '\n';
+            std::filesystem::remove_all(dir);
+            return 77;
+        }
+        throw;
+    }
+
     auto qwen35_hybrid = motifcl::nn::make_hf_hybrid_transformer_model(backend, qwen35_cfg);
     std::vector<int32_t> qwen35_token_values{65, 66, 67};
     auto qwen35_tokens = motifcl::Tensor::from_cpu(backend, {1, 3}, motifcl::DType::I32, qwen35_token_values.data());
