@@ -41,7 +41,11 @@ jobs:
             if [ -f "$failed_file" ]; then
               failed_tests="$(tr '\n' ' ' < "$failed_file")"
             fi
-            echo "::error file=.github/workflows/ci.yml,line=33,title=Release CTest failed::${failed_tests:-Release CTest failed without LastTestsFailed.log}"
+            log_tail=""
+            if [ -f "$log_file" ]; then
+              log_tail="$(tail -n 80 "$log_file" | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')"
+            fi
+            echo "::error file=.github/workflows/ci.yml,line=33,title=Release CTest failed::${failed_tests:-Release CTest failed without LastTestsFailed.log} ${log_tail}"
             if [ -f "$log_file" ]; then
               echo "::group::Release CTest LastTest.log"
               cat "$log_file"
@@ -103,7 +107,11 @@ jobs:
             if [ -f "$failed_file" ]; then
               failed_tests="$(tr '\n' ' ' < "$failed_file")"
             fi
-            echo "::error file=.github/workflows/ci.yml,line=70,title=CTest failed::${failed_tests:-CTest failed without LastTestsFailed.log}"
+            log_tail=""
+            if [ -f "$log_file" ]; then
+              log_tail="$(tail -n 80 "$log_file" | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')"
+            fi
+            echo "::error file=.github/workflows/ci.yml,line=70,title=CTest failed::${failed_tests:-CTest failed without LastTestsFailed.log} ${log_tail}"
             if [ -f "$log_file" ]; then
               echo "::group::CTest LastTest.log"
               cat "$log_file"
