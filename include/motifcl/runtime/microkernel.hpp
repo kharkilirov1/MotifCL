@@ -12,6 +12,7 @@ enum class MicrokernelDomain {
     Quant,
     Norm,
     Activation,
+    Elementwise,
 };
 
 enum class MicrokernelBackendKind {
@@ -64,6 +65,12 @@ struct ActivationBackend {
     std::vector<MicrokernelDescriptor> kernels;
 };
 
+struct ElementwiseBackend {
+    MicrokernelBackendKind kind = MicrokernelBackendKind::OpenCL;
+    MicrokernelStability stability = MicrokernelStability::Stable;
+    std::vector<MicrokernelDescriptor> kernels;
+};
+
 struct MicrokernelSelection {
     MicrokernelDomain domain = MicrokernelDomain::Matmul;
     MicrokernelBackendKind requested = MicrokernelBackendKind::OpenCL;
@@ -93,6 +100,7 @@ AttentionBackend selected_attention_backend();
 QuantBackend selected_quant_backend();
 NormBackend selected_norm_backend();
 ActivationBackend selected_activation_backend();
+ElementwiseBackend selected_elementwise_backend();
 
 // Returns true when the selected backend for the domain is OpenCL. Experimental
 // backend requests are explicit opt-ins; unavailable domains emit one warning

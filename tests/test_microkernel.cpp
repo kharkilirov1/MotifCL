@@ -44,6 +44,8 @@ int main() {
                  "norm domain name mismatch");
     ok &= expect(std::string(microkernel_domain_name(MicrokernelDomain::Activation)) == "activation",
                  "activation domain name mismatch");
+    ok &= expect(std::string(microkernel_domain_name(MicrokernelDomain::Elementwise)) == "elementwise",
+                 "elementwise domain name mismatch");
 
     ok &= expect(std::string(microkernel_env_name(MicrokernelDomain::Matmul)) == "MOTIFCL_MATMUL_BACKEND",
                  "matmul env name mismatch");
@@ -55,6 +57,8 @@ int main() {
                  "norm env name mismatch");
     ok &= expect(std::string(microkernel_env_name(MicrokernelDomain::Activation)) == "MOTIFCL_ACTIVATION_BACKEND",
                  "activation env name mismatch");
+    ok &= expect(std::string(microkernel_env_name(MicrokernelDomain::Elementwise)) == "MOTIFCL_ELEMENTWISE_BACKEND",
+                 "elementwise env name mismatch");
 
     auto expect_descriptors = [&](MicrokernelDomain domain, MicrokernelBackendKind backend, const char* message) {
         const auto descriptors = microkernel_descriptors(domain, backend);
@@ -78,6 +82,8 @@ int main() {
                        "OpenCL norm descriptor registry must not be empty");
     expect_descriptors(MicrokernelDomain::Activation, MicrokernelBackendKind::OpenCL,
                        "OpenCL activation descriptor registry must not be empty");
+    expect_descriptors(MicrokernelDomain::Elementwise, MicrokernelBackendKind::OpenCL,
+                       "OpenCL elementwise descriptor registry must not be empty");
     expect_descriptors(MicrokernelDomain::Matmul, MicrokernelBackendKind::Native,
                        "native matmul descriptor registry must not be empty");
     expect_descriptors(MicrokernelDomain::Matmul, MicrokernelBackendKind::Vulkan,
@@ -88,6 +94,8 @@ int main() {
                        "vulkan norm descriptor registry must expose implemented RMSNorm slice");
     expect_descriptors(MicrokernelDomain::Activation, MicrokernelBackendKind::Vulkan,
                        "vulkan activation descriptor registry must expose implemented SwiGLU slice");
+    expect_descriptors(MicrokernelDomain::Elementwise, MicrokernelBackendKind::Vulkan,
+                       "vulkan elementwise descriptor registry must expose implemented Add slice");
     const auto vulkan_descriptors = microkernel_descriptors(MicrokernelDomain::Matmul,
                                                             MicrokernelBackendKind::Vulkan);
     bool has_vulkan_m1 = false;
@@ -111,6 +119,8 @@ int main() {
                  "vulkan norm backend must be available for implemented RMSNorm slice");
     ok &= expect(microkernel_backend_available(MicrokernelDomain::Activation, MicrokernelBackendKind::Vulkan),
                  "vulkan activation backend must be available for implemented SwiGLU slice");
+    ok &= expect(microkernel_backend_available(MicrokernelDomain::Elementwise, MicrokernelBackendKind::Vulkan),
+                 "vulkan elementwise backend must be available for implemented Add slice");
     ok &= expect(!microkernel_backend_available(MicrokernelDomain::Attention, MicrokernelBackendKind::Asm),
                  "asm attention backend must stay unavailable until implemented");
 
@@ -139,6 +149,11 @@ int main() {
                      selected_activation.stability == MicrokernelStability::Stable &&
                      !selected_activation.kernels.empty(),
                  "selected activation backend must resolve to registered OpenCL kernels");
+    const auto selected_elementwise = selected_elementwise_backend();
+    ok &= expect(selected_elementwise.kind == MicrokernelBackendKind::OpenCL &&
+                     selected_elementwise.stability == MicrokernelStability::Stable &&
+                     !selected_elementwise.kernels.empty(),
+                 "selected elementwise backend must resolve to registered OpenCL kernels");
 
     bool recognized = false;
     ok &= expect(microkernel_backend_from_name(" OPENCL ", &recognized) == MicrokernelBackendKind::OpenCL && recognized,
@@ -208,6 +223,14 @@ int main() {
                      !vulkan_activation.fallback_to_opencl &&
                      vulkan_activation.fallback_reason.empty(),
                  "vulkan activation selection must resolve to the implemented SwiGLU backend");
+
+    const auto vulkan_elementwise = select_microkernel_backend_from_value(MicrokernelDomain::Elementwise, "vulkan");
+    ok &= expect(vulkan_elementwise.requested == MicrokernelBackendKind::Vulkan &&
+                     vulkan_elementwise.effective == MicrokernelBackendKind::Vulkan &&
+                     vulkan_elementwise.stability == MicrokernelStability::Experimental &&
+                     !vulkan_elementwise.fallback_to_opencl &&
+                     vulkan_elementwise.fallback_reason.empty(),
+                 "vulkan elementwise selection must resolve to the implemented Add backend");
 
     const auto vulkan_backend = select_microkernel_backend_from_value(MicrokernelDomain::Matmul, "vulkan");
     ok &= expect(vulkan_backend.requested == MicrokernelBackendKind::Vulkan &&

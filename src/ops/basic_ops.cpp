@@ -5,11 +5,15 @@
 #include <motifcl/core/error.hpp>
 #include <motifcl/ops/activation.hpp>
 #include <motifcl/runtime/backend.hpp>
+#include <motifcl/runtime/microkernel.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 #include <motifcl/ops/reduce.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <numeric>
+#include <string>
 
 namespace motifcl {
 
@@ -25,6 +29,37 @@ void require_f32_same_shape(const Tensor& a, const Tensor& b, const char* op) {
     MCL_CHECK(a.dtype() == DType::F32 && b.dtype() == DType::F32, std::string(op) + " supports f32 only");
     MCL_CHECK(a.shape() == b.shape(), std::string(op) + " shape mismatch: " + a.shape().str() + " vs " + b.shape().str());
     MCL_CHECK(a.backend_ptr() == b.backend_ptr(), std::string(op) + " requires tensors on same backend");
+}
+
+bool strict_vulkan_elementwise_required() {
+    const auto enabled = [](const char* value) {
+        if (value == nullptr) return false;
+        const std::string text(value);
+        return text == "1" || text == "true" || text == "TRUE" ||
+               text == "on" || text == "ON" || text == "yes" || text == "YES";
+    };
+    return enabled(std::getenv("MOTIFCL_REQUIRE_VULKAN_COMPUTE")) ||
+           enabled(std::getenv("MOTIFCL_REQUIRE_VULKAN_ELEMENTWISE"));
+}
+
+bool vulkan_add_supported(const Tensor& a, const Tensor& b) {
+    return a.dtype() == DType::F32 &&
+           b.dtype() == DType::F32 &&
+           a.shape() == b.shape() &&
+           a.backend_ptr() == b.backend_ptr() &&
+           a.numel() > 0 &&
+           a.numel() <= static_cast<int64_t>(1u << 20u) &&
+           !a.requires_grad() &&
+           !b.requires_grad();
+}
+
+Tensor add_vulkan_f32(const Tensor& a, const Tensor& b, const VulkanF32TensorResult& result) {
+    MCL_CHECK(result.success, std::string("vulkan add f32 failed: ") + result.error);
+    MCL_CHECK(result.output.size() == static_cast<std::size_t>(a.numel()),
+              "vulkan add f32 returned unexpected output size");
+    auto out = Tensor::from_cpu(a.backend(), a.shape(), DType::F32, result.output.data());
+    autograd::record_op("add_vulkan_f32", {a.id(), b.id()}, {out.id()});
+    return out;
 }
 
 Tensor elementwise_binary(const Tensor& a, const Tensor& b, const std::string& kernel_name) {
@@ -303,6 +338,16 @@ Tensor ones_like(const Tensor& x) { return Tensor::ones(x.backend(), x.shape(), 
 
 Tensor add(const Tensor& a, const Tensor& b) {
     if (a.shape() != b.shape()) return add_broadcast(a, b);
+    const auto selected_backend = selected_elementwise_backend();
+    if (selected_backend.kind == MicrokernelBackendKind::Vulkan &&
+        vulkan_add_supported(a, b)) {
+        const auto a_host = a.to_vector<float>();
+        const auto b_host = b.to_vector<float>();
+        const auto result = run_vulkan_add(a_host, b_host);
+        if (result.success) return add_vulkan_f32(a, b, result);
+        MCL_CHECK(!strict_vulkan_elementwise_required(),
+                  std::string("vulkan add f32 failed: ") + result.error);
+    }
     auto out = elementwise_binary(a, b, "add_f32");
     attach_binary_grad(out, a, b, std::make_shared<AddBackward>(a, b));
     return out;

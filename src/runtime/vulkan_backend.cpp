@@ -1337,6 +1337,132 @@ std::vector<std::uint32_t> swiglu_spirv(std::size_t hidden) {
     return words;
 }
 
+std::vector<std::uint32_t> add_spirv() {
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_float = 22;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_fadd = 129;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_f32 = 5;
+    const std::uint32_t id_u32 = 6;
+    const std::uint32_t id_v3u32 = 7;
+    const std::uint32_t id_ptr_input_v3u32 = 8;
+    const std::uint32_t id_global_invocation_id = 9;
+    const std::uint32_t id_const_u32_0 = 10;
+    const std::uint32_t id_runtime_array = 11;
+    const std::uint32_t id_buffer_struct = 12;
+    const std::uint32_t id_ptr_buffer = 13;
+    const std::uint32_t id_ptr_f32 = 14;
+    const std::uint32_t id_a = 15;
+    const std::uint32_t id_b = 16;
+    const std::uint32_t id_out = 17;
+    const std::uint32_t id_gid = 18;
+    const std::uint32_t id_index = 19;
+    const std::uint32_t id_a_ptr = 20;
+    const std::uint32_t id_b_ptr = 21;
+    const std::uint32_t id_out_ptr = 22;
+    const std::uint32_t id_a_val = 23;
+    const std::uint32_t id_b_val = 24;
+    const std::uint32_t id_sum = 25;
+    const std::uint32_t bound = 26;
+
+    std::vector<std::uint32_t> words;
+    words.reserve(140);
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(bound);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_a, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_a, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_b, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_b, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_out, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_out, decoration_binding, 2});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_float, {id_f32, 32});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    append_spirv_inst(words, op_constant, {id_u32, id_const_u32_0, 0});
+    append_spirv_inst(words, op_type_runtime_array, {id_runtime_array, id_f32});
+    append_spirv_inst(words, op_type_struct, {id_buffer_struct, id_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_buffer, storage_class_uniform, id_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32, storage_class_uniform, id_f32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_a, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_b, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_out, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    append_spirv_inst(words, op_load, {id_v3u32, id_gid, id_global_invocation_id});
+    append_spirv_inst(words, op_composite_extract, {id_u32, id_index, id_gid, 0});
+    append_spirv_inst(words, op_access_chain, {id_ptr_f32, id_a_ptr, id_a, id_const_u32_0, id_index});
+    append_spirv_inst(words, op_access_chain, {id_ptr_f32, id_b_ptr, id_b, id_const_u32_0, id_index});
+    append_spirv_inst(words, op_access_chain, {id_ptr_f32, id_out_ptr, id_out, id_const_u32_0, id_index});
+    append_spirv_inst(words, op_load, {id_f32, id_a_val, id_a_ptr});
+    append_spirv_inst(words, op_load, {id_f32, id_b_val, id_b_ptr});
+    append_spirv_inst(words, op_fadd, {id_f32, id_sum, id_a_val, id_b_val});
+    append_spirv_inst(words, op_store, {id_out_ptr, id_sum});
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
 std::vector<std::uint32_t> softmax_rows_spirv(std::size_t cols) {
     constexpr std::uint16_t op_ext_inst_import = 11;
     constexpr std::uint16_t op_ext_inst = 12;
@@ -2402,6 +2528,43 @@ VulkanF32TensorResult run_vulkan_swiglu(const std::vector<float>& packed,
     if (run.outputs.size() != 1 || run.outputs[0].size() != out.size() * sizeof(float)) {
         result.success = false;
         result.error = "Vulkan SwiGLU returned malformed output";
+        return result;
+    }
+
+    result.output.resize(out.size());
+    std::memcpy(result.output.data(), run.outputs[0].data(), run.outputs[0].size());
+    return result;
+}
+
+VulkanF32TensorResult run_vulkan_add(const std::vector<float>& a,
+                                     const std::vector<float>& b) {
+    VulkanF32TensorResult result;
+    constexpr std::size_t kMaxElements = 1u << 20u;
+
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (a.empty()) return fail("Vulkan add requires non-empty inputs");
+    if (a.size() != b.size()) return fail("Vulkan add input sizes must match");
+    if (a.size() > kMaxElements) return fail("Vulkan add currently supports up to 1048576 elements");
+
+    std::vector<float> out(a.size(), 0.0f);
+    const auto shader = add_spirv();
+    const std::vector<VulkanStorageBufferSpec> buffers = {
+        {a.data(), a.size() * sizeof(float)},
+        {b.data(), b.size() * sizeof(float)},
+        {out.data(), out.size() * sizeof(float)},
+    };
+    const auto run = run_vulkan_storage_buffer_compute(
+        shader.data(), shader.size(), buffers, {2}, static_cast<std::uint32_t>(a.size()), 1, 1);
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    if (!run.success) return result;
+    if (run.outputs.size() != 1 || run.outputs[0].size() != out.size() * sizeof(float)) {
+        result.success = false;
+        result.error = "Vulkan add returned malformed output";
         return result;
     }
 

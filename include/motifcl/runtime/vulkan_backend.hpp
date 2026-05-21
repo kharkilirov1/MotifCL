@@ -75,6 +75,8 @@ VulkanF32TensorResult run_vulkan_rmsnorm(const std::vector<float>& x,
 VulkanF32TensorResult run_vulkan_swiglu(const std::vector<float>& packed,
                                         std::size_t rows,
                                         std::size_t hidden);
+VulkanF32TensorResult run_vulkan_add(const std::vector<float>& a,
+                                     const std::vector<float>& b);
 VulkanF32MatmulSmokeResult run_vulkan_f32_m1_matmul(const std::vector<float>& a,
                                                     const std::vector<float>& b,
                                                     std::size_t k,

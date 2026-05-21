@@ -119,6 +119,18 @@ int main() {
         std::cout << "\n";
         std::cout << "swiglu_device=" << swiglu.device_name << "\n";
         if (!swiglu.error.empty()) std::cout << "swiglu_error=" << swiglu.error << "\n";
+        const auto add = motifcl::run_vulkan_add(
+            {1.0f, -2.0f, 3.5f, 4.0f},
+            {4.0f, 5.0f, -0.5f, -1.0f});
+        std::cout << "add_success=" << (add.success ? "true" : "false") << "\n";
+        std::cout << "add_output=";
+        for (std::size_t j = 0; j < add.output.size(); ++j) {
+            if (j != 0) std::cout << ",";
+            std::cout << add.output[j];
+        }
+        std::cout << "\n";
+        std::cout << "add_device=" << add.device_name << "\n";
+        if (!add.error.empty()) std::cout << "add_error=" << add.error << "\n";
     }
     if (!probe.error.empty()) std::cout << "error=" << probe.error << "\n";
     return probe.loader_found ? 0 : 77;

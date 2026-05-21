@@ -71,6 +71,9 @@ int main() {
     const auto invalid_swiglu = run_vulkan_swiglu({1.0f, 2.0f, 3.0f}, 1, 2);
     expect(!invalid_swiglu.success, "Vulkan SwiGLU must reject malformed packed input size");
     expect(!invalid_swiglu.error.empty(), "Vulkan SwiGLU validation failure must explain why");
+    const auto invalid_add = run_vulkan_add({1.0f, 2.0f}, {1.0f});
+    expect(!invalid_add.success, "Vulkan add must reject mismatched input sizes");
+    expect(!invalid_add.error.empty(), "Vulkan add validation failure must explain why");
 
     if (result.available()) {
         const bool require_vulkan_compute = std::getenv("MOTIFCL_REQUIRE_VULKAN_COMPUTE") != nullptr;
@@ -199,6 +202,22 @@ int main() {
             }
         }
 
+        const std::vector<float> add_a = {1.0f, -2.0f, 3.5f, 4.0f};
+        const std::vector<float> add_b = {4.0f, 5.0f, -0.5f, -1.0f};
+        const auto add_result = run_vulkan_add(add_a, add_b);
+        expect(add_result.success,
+               "Vulkan add must succeed when a Vulkan device is available");
+        expect(add_result.error.empty(),
+               "Vulkan add success must not carry an error");
+        expect(add_result.output.size() == add_a.size(),
+               "Vulkan add must return input-sized output");
+        if (add_result.output.size() == add_a.size()) {
+            for (std::size_t i = 0; i < add_a.size(); ++i) {
+                expect(std::fabs(add_result.output[i] - (add_a[i] + add_b[i])) <= 1e-6f,
+                       "Vulkan add output mismatch");
+            }
+        }
+
         set_env("MOTIFCL_MATMUL_BACKEND", "vulkan");
         try {
             auto backend = Backend::create_opencl();
@@ -282,6 +301,24 @@ int main() {
             expect(!swiglu_graph.empty() && swiglu_graph.nodes()[0].op == "swiglu_vulkan_f32",
                    "Vulkan SwiGLU dispatch must record the Vulkan SwiGLU op");
             set_env("MOTIFCL_ACTIVATION_BACKEND", "opencl");
+
+            set_env("MOTIFCL_ELEMENTWISE_BACKEND", "vulkan");
+            auto AddA = Tensor::from_cpu(backend, {2, 2}, DType::F32, add_a.data());
+            auto AddB = Tensor::from_cpu(backend, {2, 2}, DType::F32, add_b.data());
+            autograd::begin_graph_capture();
+            auto AddY = add(AddA, AddB);
+            auto add_graph = autograd::end_graph_capture();
+            const auto add_y = AddY.to_vector<float>();
+            expect(add_y.size() == add_result.output.size(), "Vulkan add dispatch must return input-sized output");
+            if (add_y.size() == add_result.output.size()) {
+                expect(std::fabs(add_y[0] - add_result.output[0]) <= 1e-6f &&
+                           std::fabs(add_y[1] - add_result.output[1]) <= 1e-6f &&
+                           std::fabs(add_y[2] - add_result.output[2]) <= 1e-6f,
+                       "Vulkan add dispatch output mismatch");
+            }
+            expect(!add_graph.empty() && add_graph.nodes()[0].op == "add_vulkan_f32",
+                   "Vulkan add dispatch must record the Vulkan add op");
+            set_env("MOTIFCL_ELEMENTWISE_BACKEND", "opencl");
         } catch (const std::exception& e) {
             if (motifcl_test::is_opencl_unavailable(e)) {
                 std::cout << "Vulkan matmul dispatch smoke skipped because OpenCL tensors are unavailable: "
@@ -295,6 +332,7 @@ int main() {
         set_env("MOTIFCL_ATTENTION_BACKEND", "opencl");
         set_env("MOTIFCL_NORM_BACKEND", "opencl");
         set_env("MOTIFCL_ACTIVATION_BACKEND", "opencl");
+        set_env("MOTIFCL_ELEMENTWISE_BACKEND", "opencl");
     }
 
     return ok ? 0 : 1;
