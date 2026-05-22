@@ -7,6 +7,22 @@
 #include <motifcl/motifcl.hpp>
 #include "test_utils.hpp"
 
+namespace {
+
+void set_test_env(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    if (value && *value) {
+        setenv(name, value, 1);
+    } else {
+        unsetenv(name);
+    }
+#endif
+}
+
+} // namespace
+
 int main() {
     try {
         auto backend = motifcl::Backend::create_opencl();
@@ -74,6 +90,21 @@ int main() {
             float expected = 0.0f;
             for (int k = 0; k < M1K; ++k) expected += m1_a[k] * m1_b[k * M1N + c];
             if (std::fabs(M1C[c] - expected) > 2e-4f) return 9;
+        }
+
+        {
+            auto M1Q = motifcl::quantize_q4_symmetric_cols(M1B);
+            set_test_env("MOTIFCL_DISABLE_Q4_0_M1_WG64X8", "1");
+            auto ref_q4 = motifcl::matmul(M1A, M1Q).to_vector<float>();
+            set_test_env("MOTIFCL_DISABLE_Q4_0_M1_WG64X8", "");
+            motifcl::autograd::begin_graph_capture();
+            auto Q4Wg64x8C = motifcl::matmul(M1A, M1Q);
+            auto q4_graph = motifcl::autograd::end_graph_capture();
+            if (q4_graph.empty() || q4_graph.nodes()[0].op != "matmul_f32_q4_0_scaled_m1_wg64x8_f32") return 19;
+            auto q4_wg64x8 = Q4Wg64x8C.to_vector<float>();
+            for (int c = 0; c < M1N; ++c) {
+                if (std::fabs(q4_wg64x8[c] - ref_q4[c]) > 2e-4f) return 20;
+            }
         }
 
         constexpr int KM = 5;

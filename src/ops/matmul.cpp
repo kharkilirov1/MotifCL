@@ -196,6 +196,12 @@ bool enable_q4_0_m1_wg64x4() {
              std::string(disabled) != "false" && std::string(disabled) != "FALSE");
 }
 
+bool enable_q4_0_m1_wg64x8() {
+    const char* disabled = std::getenv("MOTIFCL_DISABLE_Q4_0_M1_WG64X8");
+    return !(disabled && *disabled && std::string(disabled) != "0" &&
+             std::string(disabled) != "false" && std::string(disabled) != "FALSE");
+}
+
 bool disable_kquant_prefill_row4() {
     const char* env = std::getenv("MOTIFCL_DISABLE_KQUANT_PREFILL_ROW4");
     return env && *env && std::string(env) != "0" &&
@@ -718,11 +724,16 @@ Tensor matmul_f32_q4_0_m1(const Tensor& a, const Tensor& b) {
     const int N = static_cast<int>(b.shape()[1]);
     const int K = static_cast<int>(a.shape()[1]);
     constexpr int kLocal = 64;
+    const bool use_wg64x8 = K >= kLocal && N >= 8 &&
+                            enable_q4_0_m1_wg64x8() &&
+                            a.backend().device_info().max_work_group_size >= static_cast<std::size_t>(kLocal);
     const bool use_wg64x4 = K >= kLocal && N >= 4 &&
+                            !use_wg64x8 &&
                             enable_q4_0_m1_wg64x4() &&
                             a.backend().device_info().max_work_group_size >= static_cast<std::size_t>(kLocal);
-    const char* kernel_name = use_wg64x4 ? "matmul_f32_q4_0_scaled_m1_wg64x4_f32"
-                                         : "matmul_f32_q4_0_scaled_m1_f32";
+    const char* kernel_name = use_wg64x8 ? "matmul_f32_q4_0_scaled_m1_wg64x8_f32"
+                            : (use_wg64x4 ? "matmul_f32_q4_0_scaled_m1_wg64x4_f32"
+                                           : "matmul_f32_q4_0_scaled_m1_f32");
     auto k = a.backend().kernels.get(kernel_name);
     k.set_arg(0, a.buffer());
     k.set_arg(1, b.buffer());
@@ -733,9 +744,11 @@ Tensor matmul_f32_q4_0_m1(const Tensor& a, const Tensor& b) {
     k.set_arg(6, scales_b.buffer());
     k.set_arg(7, mode_b);
     k.set_arg(8, block_b);
-    if (use_wg64x4) {
-        k.set_arg_local(9, 4 * kLocal * sizeof(float));
-        const std::size_t groups = (static_cast<std::size_t>(N) + 3u) / 4u;
+    if (use_wg64x8 || use_wg64x4) {
+        k.set_arg_local(9, (use_wg64x8 ? 8 : 4) * kLocal * sizeof(float));
+        const std::size_t groups = use_wg64x8
+            ? (static_cast<std::size_t>(N) + 7u) / 8u
+            : (static_cast<std::size_t>(N) + 3u) / 4u;
         k.launch1d(groups * kLocal, kLocal);
     } else {
         k.launch1d(round_up(static_cast<std::size_t>(N), static_cast<std::size_t>(128)), 128);

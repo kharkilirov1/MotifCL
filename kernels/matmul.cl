@@ -3617,6 +3617,104 @@ __kernel void matmul_f32_q4_0_scaled_m1_wg64x4_f32(__global const float* A,
     }
 }
 
+__kernel void matmul_f32_q4_0_scaled_m1_wg64x8_f32(__global const float* A,
+                                                   __global const uchar* B,
+                                                   __global float* C,
+                                                   int N,
+                                                   int K,
+                                                   float scale_b,
+                                                   __global const float* scales_b,
+                                                   int mode_b,
+                                                   int block_b,
+                                                   __local float* scratch) {
+    const int group = get_group_id(0);
+    const int lid = get_local_id(0);
+    const int col0 = group * 8;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    float acc4 = 0.0f;
+    float acc5 = 0.0f;
+    float acc6 = 0.0f;
+    float acc7 = 0.0f;
+    for (int k = lid; k < K; k += 64) {
+        const float av = A[k];
+        const int c0 = col0;
+        const int c1 = col0 + 1;
+        const int c2 = col0 + 2;
+        const int c3 = col0 + 3;
+        const int c4 = col0 + 4;
+        const int c5 = col0 + 5;
+        const int c6 = col0 + 6;
+        const int c7 = col0 + 7;
+        if (c0 < N) {
+            const float sb = mode_b == 2 ? scales_b[c0] : quant_matmul_scale(scales_b, scale_b, mode_b, k, c0, N, block_b);
+            acc0 += av * ((float)q4_0_load(B, k * N + c0)) * sb;
+        }
+        if (c1 < N) {
+            const float sb = mode_b == 2 ? scales_b[c1] : quant_matmul_scale(scales_b, scale_b, mode_b, k, c1, N, block_b);
+            acc1 += av * ((float)q4_0_load(B, k * N + c1)) * sb;
+        }
+        if (c2 < N) {
+            const float sb = mode_b == 2 ? scales_b[c2] : quant_matmul_scale(scales_b, scale_b, mode_b, k, c2, N, block_b);
+            acc2 += av * ((float)q4_0_load(B, k * N + c2)) * sb;
+        }
+        if (c3 < N) {
+            const float sb = mode_b == 2 ? scales_b[c3] : quant_matmul_scale(scales_b, scale_b, mode_b, k, c3, N, block_b);
+            acc3 += av * ((float)q4_0_load(B, k * N + c3)) * sb;
+        }
+        if (c4 < N) {
+            const float sb = mode_b == 2 ? scales_b[c4] : quant_matmul_scale(scales_b, scale_b, mode_b, k, c4, N, block_b);
+            acc4 += av * ((float)q4_0_load(B, k * N + c4)) * sb;
+        }
+        if (c5 < N) {
+            const float sb = mode_b == 2 ? scales_b[c5] : quant_matmul_scale(scales_b, scale_b, mode_b, k, c5, N, block_b);
+            acc5 += av * ((float)q4_0_load(B, k * N + c5)) * sb;
+        }
+        if (c6 < N) {
+            const float sb = mode_b == 2 ? scales_b[c6] : quant_matmul_scale(scales_b, scale_b, mode_b, k, c6, N, block_b);
+            acc6 += av * ((float)q4_0_load(B, k * N + c6)) * sb;
+        }
+        if (c7 < N) {
+            const float sb = mode_b == 2 ? scales_b[c7] : quant_matmul_scale(scales_b, scale_b, mode_b, k, c7, N, block_b);
+            acc7 += av * ((float)q4_0_load(B, k * N + c7)) * sb;
+        }
+    }
+    scratch[lid] = acc0;
+    scratch[64 + lid] = acc1;
+    scratch[128 + lid] = acc2;
+    scratch[192 + lid] = acc3;
+    scratch[256 + lid] = acc4;
+    scratch[320 + lid] = acc5;
+    scratch[384 + lid] = acc6;
+    scratch[448 + lid] = acc7;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = 32; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            scratch[lid] += scratch[lid + stride];
+            scratch[64 + lid] += scratch[64 + lid + stride];
+            scratch[128 + lid] += scratch[128 + lid + stride];
+            scratch[192 + lid] += scratch[192 + lid + stride];
+            scratch[256 + lid] += scratch[256 + lid + stride];
+            scratch[320 + lid] += scratch[320 + lid + stride];
+            scratch[384 + lid] += scratch[384 + lid + stride];
+            scratch[448 + lid] += scratch[448 + lid + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (lid == 0) {
+        if (col0 < N) C[col0] = scratch[0];
+        if (col0 + 1 < N) C[col0 + 1] = scratch[64];
+        if (col0 + 2 < N) C[col0 + 2] = scratch[128];
+        if (col0 + 3 < N) C[col0 + 3] = scratch[192];
+        if (col0 + 4 < N) C[col0 + 4] = scratch[256];
+        if (col0 + 5 < N) C[col0 + 5] = scratch[320];
+        if (col0 + 6 < N) C[col0 + 6] = scratch[384];
+        if (col0 + 7 < N) C[col0 + 7] = scratch[448];
+    }
+}
+
 __kernel void matmul_f32_q4_0_m1_2out_wg64x4_f32(__global const float* A,
                                                  __global const uchar* B0,
                                                  __global const float* S0,
