@@ -464,13 +464,15 @@ int main() {
             set_test_env("MOTIFCL_DISABLE_FUSED_PACKED_SWIGLU_Q4_0_DECODE", "1");
             auto ref = mlp.forward(x).to_vector<float>();
             set_test_env("MOTIFCL_DISABLE_FUSED_PACKED_SWIGLU_Q4_0_DECODE", "");
+            set_test_env("MOTIFCL_PACKED_SWIGLU_Q4_0_ENABLE_WG64X2", "1");
 
             motifcl::autograd::begin_graph_capture();
             auto fused_y = mlp.forward(x);
             auto graph = motifcl::autograd::end_graph_capture();
+            set_test_env("MOTIFCL_PACKED_SWIGLU_Q4_0_ENABLE_WG64X2", "");
             auto fused = fused_y.to_vector<float>();
             require_close_vec(fused, ref, 5e-4f);
-            if (!graph_has_op(graph, "matmul_swiglu_product_f32_q4_0_packed_m1_wg64x4_f32")) return 1;
+            if (!graph_has_op(graph, "matmul_swiglu_product_f32_q4_0_packed_m1_wg64x2_f32")) return 1;
             if (graph_has_op(graph, "swiglu_f32")) return 1;
         }
 

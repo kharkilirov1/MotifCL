@@ -586,7 +586,12 @@ Tensor fused_packed_swiglu_q4_0_decode(const Tensor& x,
     auto out = Tensor::empty(x.backend(), {1, hidden}, DType::F32);
     const Tensor& qweight = decode_quantized_weight(gate_up);
     auto scales = qweight.quant_scales();
-    auto kernel = x.backend().kernels.get("matmul_swiglu_product_f32_q4_0_packed_m1_wg64x4_f32");
+    const bool use_wg64x2 = env_enabled("MOTIFCL_PACKED_SWIGLU_Q4_0_ENABLE_WG64X2") &&
+                            !env_enabled("MOTIFCL_PACKED_SWIGLU_Q4_0_FORCE_WG64X4");
+    const char* kernel_name = use_wg64x2
+        ? "matmul_swiglu_product_f32_q4_0_packed_m1_wg64x2_f32"
+        : "matmul_swiglu_product_f32_q4_0_packed_m1_wg64x4_f32";
+    auto kernel = x.backend().kernels.get(kernel_name);
     constexpr std::size_t kLocal = 64;
     kernel.set_arg(0, x.buffer());
     kernel.set_arg(1, qweight.buffer());
@@ -594,10 +599,12 @@ Tensor fused_packed_swiglu_q4_0_decode(const Tensor& x,
     kernel.set_arg(3, out.buffer());
     kernel.set_arg(4, hidden);
     kernel.set_arg(5, static_cast<int>(x.shape()[1]));
-    kernel.set_arg_local(6, 8 * kLocal * sizeof(float));
-    const std::size_t groups = (static_cast<std::size_t>(hidden) + 3u) / 4u;
+    kernel.set_arg_local(6, (use_wg64x2 ? 4 : 8) * kLocal * sizeof(float));
+    const std::size_t groups = use_wg64x2
+        ? (static_cast<std::size_t>(hidden) + 1u) / 2u
+        : (static_cast<std::size_t>(hidden) + 3u) / 4u;
     kernel.launch1d(groups * kLocal, kLocal);
-    autograd::record_op("matmul_swiglu_product_f32_q4_0_packed_m1_wg64x4_f32",
+    autograd::record_op(kernel_name,
                         {x.id(), qweight.id(), scales.id()},
                         {out.id()});
     return out;

@@ -3850,6 +3850,61 @@ __kernel void matmul_f32_q4_0_packed_qkv_m1_wg64x4_f32(__global const float* A,
     }
 }
 
+__kernel void matmul_swiglu_product_f32_q4_0_packed_m1_wg64x2_f32(__global const float* A,
+                                                                  __global const uchar* B,
+                                                                  __global const float* S,
+                                                                  __global float* C,
+                                                                  int hidden,
+                                                                  int in_dim,
+                                                                  __local float* scratch) {
+    const int group = get_group_id(0);
+    const int lid = get_local_id(0);
+    const int col0 = group * 2;
+    const int col1 = col0 + 1;
+    const int total = hidden * 2;
+    float gate_acc0 = 0.0f;
+    float gate_acc1 = 0.0f;
+    float up_acc0 = 0.0f;
+    float up_acc1 = 0.0f;
+    for (int k = lid; k < in_dim; k += 64) {
+        const float av = A[k];
+        if (col0 < hidden) {
+            const int up_col = hidden + col0;
+            gate_acc0 += av * ((float)q4_0_load(B, k * total + col0)) * S[col0];
+            up_acc0 += av * ((float)q4_0_load(B, k * total + up_col)) * S[up_col];
+        }
+        if (col1 < hidden) {
+            const int up_col = hidden + col1;
+            gate_acc1 += av * ((float)q4_0_load(B, k * total + col1)) * S[col1];
+            up_acc1 += av * ((float)q4_0_load(B, k * total + up_col)) * S[up_col];
+        }
+    }
+    scratch[lid] = gate_acc0;
+    scratch[64 + lid] = gate_acc1;
+    scratch[128 + lid] = up_acc0;
+    scratch[192 + lid] = up_acc1;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = 32; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            scratch[lid] += scratch[lid + stride];
+            scratch[64 + lid] += scratch[64 + lid + stride];
+            scratch[128 + lid] += scratch[128 + lid + stride];
+            scratch[192 + lid] += scratch[192 + lid + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (lid == 0) {
+        if (col0 < hidden) {
+            const float g = scratch[0];
+            C[col0] = (g * native_recip(1.0f + native_exp(-g))) * scratch[128];
+        }
+        if (col1 < hidden) {
+            const float g = scratch[64];
+            C[col1] = (g * native_recip(1.0f + native_exp(-g))) * scratch[192];
+        }
+    }
+}
+
 __kernel void matmul_swiglu_product_f32_q4_0_packed_m1_wg64x4_f32(__global const float* A,
                                                                   __global const uchar* B,
                                                                   __global const float* S,
