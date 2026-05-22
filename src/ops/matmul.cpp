@@ -190,6 +190,12 @@ bool enable_q4_0_tile8_wg64x16() {
            std::string(env) != "false" && std::string(env) != "FALSE";
 }
 
+bool enable_q4_0_m1_wg64x4() {
+    const char* disabled = std::getenv("MOTIFCL_DISABLE_Q4_0_M1_WG64X4");
+    return !(disabled && *disabled && std::string(disabled) != "0" &&
+             std::string(disabled) != "false" && std::string(disabled) != "FALSE");
+}
+
 bool disable_kquant_prefill_row4() {
     const char* env = std::getenv("MOTIFCL_DISABLE_KQUANT_PREFILL_ROW4");
     return env && *env && std::string(env) != "0" &&
@@ -709,9 +715,15 @@ Tensor matmul_f32_q4_0_m1(const Tensor& a, const Tensor& b) {
     const int mode_b = scale_mode(b);
     const int block_b = static_cast<int>(b.quant_block_size());
     auto out = Tensor::empty(a.backend(), {1, b.shape()[1]}, DType::F32);
-    auto k = a.backend().kernels.get("matmul_f32_q4_0_scaled_m1_f32");
     const int N = static_cast<int>(b.shape()[1]);
     const int K = static_cast<int>(a.shape()[1]);
+    constexpr int kLocal = 64;
+    const bool use_wg64x4 = K >= kLocal && N >= 4 &&
+                            enable_q4_0_m1_wg64x4() &&
+                            a.backend().device_info().max_work_group_size >= static_cast<std::size_t>(kLocal);
+    const char* kernel_name = use_wg64x4 ? "matmul_f32_q4_0_scaled_m1_wg64x4_f32"
+                                         : "matmul_f32_q4_0_scaled_m1_f32";
+    auto k = a.backend().kernels.get(kernel_name);
     k.set_arg(0, a.buffer());
     k.set_arg(1, b.buffer());
     k.set_arg(2, out.buffer());
@@ -721,8 +733,14 @@ Tensor matmul_f32_q4_0_m1(const Tensor& a, const Tensor& b) {
     k.set_arg(6, scales_b.buffer());
     k.set_arg(7, mode_b);
     k.set_arg(8, block_b);
-    k.launch1d(round_up(static_cast<std::size_t>(N), static_cast<std::size_t>(128)), 128);
-    autograd::record_op("matmul_f32_q4_0_scaled_m1_f32", {a.id(), b.id()}, {out.id()});
+    if (use_wg64x4) {
+        k.set_arg_local(9, 4 * kLocal * sizeof(float));
+        const std::size_t groups = (static_cast<std::size_t>(N) + 3u) / 4u;
+        k.launch1d(groups * kLocal, kLocal);
+    } else {
+        k.launch1d(round_up(static_cast<std::size_t>(N), static_cast<std::size_t>(128)), 128);
+    }
+    autograd::record_op(kernel_name, {a.id(), b.id()}, {out.id()});
     return out;
 }
 

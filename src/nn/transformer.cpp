@@ -300,6 +300,10 @@ bool q4_0_tile8_wg64x8_enabled() {
     return !env_enabled("MOTIFCL_DISABLE_Q4_0_TILE8_WG64X8");
 }
 
+bool q4_0_fused_decode_enabled() {
+    return !env_enabled("MOTIFCL_DISABLE_Q4_0_FUSED_DECODE");
+}
+
 bool can_use_fused_swiglu_mlp_residual(const ModernMLP& mlp) {
     return env_enabled("MOTIFCL_ENABLE_FUSED_MLP_BACKWARD") &&
            !mlp.split_projections_enabled() &&
@@ -326,7 +330,7 @@ bool is_k_quant_dtype(DType dtype) {
 }
 
 bool is_direct_decode_quant_dtype(DType dtype) {
-    return dtype == DType::Q4_0_COL || is_k_quant_dtype(dtype);
+    return dtype == DType::Q4_0 || dtype == DType::Q4_0_COL || is_k_quant_dtype(dtype);
 }
 
 const char* fused_decode_pair_kernel_name(DType dtype, bool use_wg) {
@@ -369,6 +373,18 @@ int q4_0_col_block_size(const Tensor& weight) {
 
 bool q4_0_col_tile8_layout(const Tensor& weight) {
     return weight.valid() && weight.dtype() == DType::Q4_0_COL && weight.quant_scale_axis() == 4;
+}
+
+bool q4_0_col_scaled_layout(const Tensor& weight) {
+    return weight.valid() &&
+           weight.dtype() == DType::Q4_0 &&
+           weight.has_quant_scales() &&
+           weight.quant_scale_axis() == 1 &&
+           weight.quant_scales().valid() &&
+           weight.quant_scales().dtype() == DType::F32 &&
+           weight.quant_scales().ndim() == 1 &&
+           weight.quant_scales().numel() >= weight.shape()[1] &&
+           weight.quant_scales().backend_ptr() == weight.backend_ptr();
 }
 
 const Tensor& decode_quantized_weight(const Linear& layer) {
@@ -455,6 +471,10 @@ bool can_use_fused_decode_projection(const Tensor& x, const Linear& layer) {
            qweight.ndim() == 2 &&
            qweight.shape()[0] == x.shape()[1] &&
            qweight.shape()[1] == layer.out_features() &&
+           (qdtype != DType::Q4_0 || (q4_0_fused_decode_enabled() &&
+                                      q4_0_col_scaled_layout(qweight) &&
+                                      x.shape()[1] >= 64 &&
+                                      x.backend().device_info().max_work_group_size >= 64)) &&
            !layer.has_bias() &&
            (!autograd::is_enabled() || !layer.weight.data.valid()) &&
            x.backend_ptr() == qweight.backend_ptr();
@@ -558,15 +578,38 @@ std::pair<Tensor, Tensor> fused_decode_projection_pair(const Tensor& x,
     const bool use_q4tile8_wg64x8 = use_wg4 && q4_tile8 &&
                                     q4_0_tile8_wg64x8_enabled() &&
                                     x.backend().device_info().max_work_group_size >= 64;
-    const char* kernel_name = use_q4tile8_wg64x8
+    const bool q4_0_scaled = weight_dtype == DType::Q4_0;
+    const char* kernel_name = q4_0_scaled
+        ? "matmul_f32_q4_0_m1_2out_wg64x4_f32"
+        : (use_q4tile8_wg64x8
         ? "matmul_f32_q4_0_tile8_m1_2out_wg64x8_f32"
         : (use_q4col_wg64x4
         ? "matmul_f32_q4_0_col_m1_2out_wg64x4_f32"
         : (use_wg4 ? fused_decode_pair_wg4_kernel_name(weight_dtype)
-                   : fused_decode_pair_kernel_name(weight_dtype, use_wg)));
+                   : fused_decode_pair_kernel_name(weight_dtype, use_wg))));
     auto k = x.backend().kernels.get(kernel_name);
     std::vector<int> graph_inputs{x.id(), weight_a.id(), weight_b.id()};
-    if (weight_dtype == DType::Q4_0_COL) {
+    if (q4_0_scaled) {
+        auto scales_a = weight_a.quant_scales();
+        auto scales_b = weight_b.quant_scales();
+        graph_inputs = {x.id(),
+                        weight_a.id(), scales_a.id(),
+                        weight_b.id(), scales_b.id()};
+        constexpr std::size_t kLocalQ4 = 64;
+        k.set_arg(0, x.buffer());
+        k.set_arg(1, weight_a.buffer());
+        k.set_arg(2, scales_a.buffer());
+        k.set_arg(3, weight_b.buffer());
+        k.set_arg(4, scales_b.buffer());
+        k.set_arg(5, out_a.buffer());
+        k.set_arg(6, out_b.buffer());
+        k.set_arg(7, n0);
+        k.set_arg(8, n1);
+        k.set_arg(9, in);
+        k.set_arg_local(10, 4 * kLocalQ4 * sizeof(float));
+        const std::size_t groups = (static_cast<std::size_t>(total) + 3u) / 4u;
+        k.launch1d(groups * kLocalQ4, kLocalQ4);
+    } else if (weight_dtype == DType::Q4_0_COL) {
         MCL_CHECK(use_wg4, "Q4_0_COL fused decode pair requires wg4 path");
         const int block = q4_0_col_block_size(weight_a);
         MCL_CHECK(q4_0_col_block_size(weight_b) == block,
@@ -729,18 +772,47 @@ QKV fused_decode_projection_triple(const Tensor& x,
     const bool use_q4tile8_wg64x8 = use_wg4 && q4_tile8 &&
                                     q4_0_tile8_wg64x8_enabled() &&
                                     x.backend().device_info().max_work_group_size >= 64;
-    const char* kernel_name = use_q4tile8_wg64x8
+    const bool q4_0_scaled = weight_dtype == DType::Q4_0;
+    const char* kernel_name = q4_0_scaled
+        ? "matmul_f32_q4_0_m1_3out_wg64x4_f32"
+        : (use_q4tile8_wg64x8
         ? "matmul_f32_q4_0_tile8_m1_3out_wg64x8_f32"
         : (use_q4col_wg64x4
         ? "matmul_f32_q4_0_col_m1_3out_wg64x4_f32"
         : (use_wg4 ? fused_decode_triple_wg4_kernel_name(weight_dtype)
-                   : fused_decode_triple_kernel_name(weight_dtype, use_wg)));
+                   : fused_decode_triple_kernel_name(weight_dtype, use_wg))));
     auto kernel = x.backend().kernels.get(kernel_name);
     std::vector<int> graph_inputs{x.id(),
                                   weight_q.id(),
                                   weight_k.id(),
                                   weight_v.id()};
-    if (weight_dtype == DType::Q4_0_COL) {
+    if (q4_0_scaled) {
+        auto scales_q = weight_q.quant_scales();
+        auto scales_k = weight_k.quant_scales();
+        auto scales_v = weight_v.quant_scales();
+        graph_inputs = {x.id(),
+                        weight_q.id(), scales_q.id(),
+                        weight_k.id(), scales_k.id(),
+                        weight_v.id(), scales_v.id()};
+        constexpr std::size_t kLocalQ4 = 64;
+        kernel.set_arg(0, x.buffer());
+        kernel.set_arg(1, weight_q.buffer());
+        kernel.set_arg(2, scales_q.buffer());
+        kernel.set_arg(3, weight_k.buffer());
+        kernel.set_arg(4, scales_k.buffer());
+        kernel.set_arg(5, weight_v.buffer());
+        kernel.set_arg(6, scales_v.buffer());
+        kernel.set_arg(7, out.q.buffer());
+        kernel.set_arg(8, out.k.buffer());
+        kernel.set_arg(9, out.v.buffer());
+        kernel.set_arg(10, n0);
+        kernel.set_arg(11, n1);
+        kernel.set_arg(12, n2);
+        kernel.set_arg(13, in);
+        kernel.set_arg_local(14, 4 * kLocalQ4 * sizeof(float));
+        const std::size_t groups = (static_cast<std::size_t>(total) + 3u) / 4u;
+        kernel.launch1d(groups * kLocalQ4, kLocalQ4);
+    } else if (weight_dtype == DType::Q4_0_COL) {
         MCL_CHECK(use_wg4, "Q4_0_COL fused decode triple requires wg4 path");
         const int block = q4_0_col_block_size(weight_q);
         MCL_CHECK(q4_0_col_block_size(weight_k) == block &&
