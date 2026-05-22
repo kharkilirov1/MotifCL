@@ -442,6 +442,39 @@ int main() {
         }
 
         {
+            constexpr int in = 128;
+            constexpr int hidden = 64;
+            motifcl::nn::ModernMLP mlp(backend, in, hidden, true, false, 0.0f, true);
+            std::vector<float> x_host(in);
+            std::vector<float> gate_up_w(in * hidden * 2);
+            std::vector<float> down_w(hidden * in);
+            for (int i = 0; i < in; ++i) x_host[i] = static_cast<float>((i % 13) - 6) * 0.01f;
+            for (int r = 0; r < in; ++r) {
+                for (int c = 0; c < hidden; ++c) {
+                    gate_up_w[r * hidden * 2 + c] = static_cast<float>(((r + c) % 17) - 8) * 0.007f;
+                    gate_up_w[r * hidden * 2 + hidden + c] = static_cast<float>(((r * 3 + c) % 19) - 9) * 0.006f;
+                }
+            }
+            for (int i = 0; i < hidden * in; ++i) down_w[i] = static_cast<float>((i % 23) - 11) * 0.005f;
+            mlp.gate_up_proj.set_quantized_weight(make_q4_0_weight(backend, in, hidden * 2, gate_up_w));
+            mlp.down_proj.weight.data =
+                motifcl::Tensor::from_cpu(backend, {hidden, in}, motifcl::DType::F32, down_w.data());
+            auto x = motifcl::Tensor::from_cpu(backend, {1, in}, motifcl::DType::F32, x_host.data());
+            motifcl::autograd::NoGradGuard no_grad;
+            set_test_env("MOTIFCL_DISABLE_FUSED_PACKED_SWIGLU_Q4_0_DECODE", "1");
+            auto ref = mlp.forward(x).to_vector<float>();
+            set_test_env("MOTIFCL_DISABLE_FUSED_PACKED_SWIGLU_Q4_0_DECODE", "");
+
+            motifcl::autograd::begin_graph_capture();
+            auto fused_y = mlp.forward(x);
+            auto graph = motifcl::autograd::end_graph_capture();
+            auto fused = fused_y.to_vector<float>();
+            require_close_vec(fused, ref, 5e-4f);
+            if (!graph_has_op(graph, "matmul_swiglu_product_f32_q4_0_packed_m1_wg64x4_f32")) return 1;
+            if (graph_has_op(graph, "swiglu_f32")) return 1;
+        }
+
+        {
             motifcl::nn::TransformerConfig q4_attn_cfg = cfg;
             q4_attn_cfg.n_embd = 128;
             q4_attn_cfg.n_head = 4;
@@ -480,6 +513,48 @@ int main() {
             auto fused = fused_y.to_vector<float>();
             require_close_vec(fused, ref, 5e-4f);
             if (!graph_has_op(graph, "matmul_f32_q4_0_m1_3out_wg64x4_f32")) return 1;
+        }
+
+        {
+            motifcl::nn::TransformerConfig q4_packed_attn_cfg = cfg;
+            q4_packed_attn_cfg.n_embd = 128;
+            q4_packed_attn_cfg.n_head = 4;
+            q4_packed_attn_cfg.n_kv_head = 2;
+            q4_packed_attn_cfg.block_size = 4;
+            q4_packed_attn_cfg.use_qkv_bias = false;
+            q4_packed_attn_cfg.use_rope = false;
+            q4_packed_attn_cfg.split_qkv_projections = false;
+            motifcl::nn::ModernSelfAttention attn(backend, q4_packed_attn_cfg);
+            const int q_dim = q4_packed_attn_cfg.n_embd;
+            const int kv_dim = q4_packed_attn_cfg.n_kv_head * (q4_packed_attn_cfg.n_embd / q4_packed_attn_cfg.n_head);
+            const int total = q_dim + 2 * kv_dim;
+            std::vector<float> qkv_w(q4_packed_attn_cfg.n_embd * total);
+            for (int r = 0; r < q4_packed_attn_cfg.n_embd; ++r) {
+                for (int c = 0; c < total; ++c) {
+                    qkv_w[r * total + c] = static_cast<float>(((r * 5 + c) % 29) - 14) * 0.004f;
+                }
+            }
+            attn.qkv_proj().set_quantized_weight(
+                make_q4_0_weight(backend, q4_packed_attn_cfg.n_embd, total, qkv_w));
+            auto x = motifcl::Tensor::randn(backend, {1, q4_packed_attn_cfg.n_embd}, 0.02f);
+            motifcl::autograd::NoGradGuard no_grad;
+            set_test_env("MOTIFCL_DISABLE_FUSED_PACKED_QKV_Q4_0_DECODE", "1");
+            motifcl::nn::KVCache ref_cache(backend, 1, q4_packed_attn_cfg.block_size,
+                                           q4_packed_attn_cfg.n_kv_head,
+                                           q4_packed_attn_cfg.n_embd / q4_packed_attn_cfg.n_head);
+            auto ref = attn.forward_with_cache(x, ref_cache, 1, 1).to_vector<float>();
+            set_test_env("MOTIFCL_DISABLE_FUSED_PACKED_QKV_Q4_0_DECODE", "");
+
+            motifcl::nn::KVCache fused_cache(backend, 1, q4_packed_attn_cfg.block_size,
+                                             q4_packed_attn_cfg.n_kv_head,
+                                             q4_packed_attn_cfg.n_embd / q4_packed_attn_cfg.n_head);
+            motifcl::autograd::begin_graph_capture();
+            auto fused_y = attn.forward_with_cache(x, fused_cache, 1, 1);
+            auto graph = motifcl::autograd::end_graph_capture();
+            auto fused = fused_y.to_vector<float>();
+            require_close_vec(fused, ref, 5e-4f);
+            if (!graph_has_op(graph, "matmul_f32_q4_0_packed_qkv_m1_wg64x4_f32")) return 1;
+            if (graph_has_op(graph, "qkv_split_f32")) return 1;
         }
 
         {

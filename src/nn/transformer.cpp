@@ -480,6 +480,129 @@ bool can_use_fused_decode_projection(const Tensor& x, const Linear& layer) {
            x.backend_ptr() == qweight.backend_ptr();
 }
 
+bool can_use_fused_packed_qkv_q4_0_decode(const Tensor& x,
+                                          const Linear& qkv,
+                                          int q_dim,
+                                          int kv_dim) {
+    if (env_enabled("MOTIFCL_DISABLE_FUSED_PACKED_QKV_Q4_0_DECODE") ||
+        !q4_0_fused_decode_enabled() ||
+        autograd::is_enabled()) {
+        return false;
+    }
+    const Tensor& qweight = decode_quantized_weight(qkv);
+    return x.valid() &&
+           x.dtype() == DType::F32 &&
+           x.ndim() == 2 &&
+           x.shape()[0] == 1 &&
+           x.shape()[1] == qkv.in_features() &&
+           q_dim > 0 &&
+           kv_dim > 0 &&
+           qkv.out_features() == q_dim + 2 * kv_dim &&
+           qkv.quantized_inference_enabled() &&
+           decode_quantized_weight_dtype(qkv) == DType::Q4_0 &&
+           qweight.valid() &&
+           qweight.ndim() == 2 &&
+           qweight.shape()[0] == qkv.in_features() &&
+           qweight.shape()[1] == qkv.out_features() &&
+           q4_0_col_scaled_layout(qweight) &&
+           !qkv.has_bias() &&
+           x.shape()[1] >= 64 &&
+           x.backend().device_info().max_work_group_size >= 64 &&
+           x.backend_ptr() == qweight.backend_ptr();
+}
+
+QKV fused_packed_qkv_q4_0_decode(const Tensor& x,
+                                 const Linear& qkv,
+                                 int q_dim,
+                                 int kv_dim) {
+    MCL_CHECK(can_use_fused_packed_qkv_q4_0_decode(x, qkv, q_dim, kv_dim),
+              "fused packed QKV Q4_0 decode expects M=1 f32 input and packed column-scaled Q4_0 QKV weight");
+    QKV out{
+        Tensor::empty(x.backend(), {1, q_dim}, DType::F32),
+        Tensor::empty(x.backend(), {1, kv_dim}, DType::F32),
+        Tensor::empty(x.backend(), {1, kv_dim}, DType::F32)};
+    const Tensor& qweight = decode_quantized_weight(qkv);
+    auto scales = qweight.quant_scales();
+    auto kernel = x.backend().kernels.get("matmul_f32_q4_0_packed_qkv_m1_wg64x4_f32");
+    constexpr std::size_t kLocal = 64;
+    kernel.set_arg(0, x.buffer());
+    kernel.set_arg(1, qweight.buffer());
+    kernel.set_arg(2, scales.buffer());
+    kernel.set_arg(3, out.q.buffer());
+    kernel.set_arg(4, out.k.buffer());
+    kernel.set_arg(5, out.v.buffer());
+    kernel.set_arg(6, q_dim);
+    kernel.set_arg(7, kv_dim);
+    kernel.set_arg(8, static_cast<int>(x.shape()[1]));
+    kernel.set_arg_local(9, 4 * kLocal * sizeof(float));
+    const int total = q_dim + 2 * kv_dim;
+    const std::size_t groups = (static_cast<std::size_t>(total) + 3u) / 4u;
+    kernel.launch1d(groups * kLocal, kLocal);
+    autograd::record_op("matmul_f32_q4_0_packed_qkv_m1_wg64x4_f32",
+                        {x.id(), qweight.id(), scales.id()},
+                        {out.q.id(), out.k.id(), out.v.id()});
+    return out;
+}
+
+bool can_use_fused_packed_swiglu_q4_0_decode(const Tensor& x,
+                                             const Linear& gate_up,
+                                             int hidden,
+                                             bool use_swiglu,
+                                             float dropout_p) {
+    if (env_enabled("MOTIFCL_DISABLE_FUSED_PACKED_SWIGLU_Q4_0_DECODE") ||
+        !q4_0_fused_decode_enabled() ||
+        autograd::is_enabled()) {
+        return false;
+    }
+    const Tensor& qweight = decode_quantized_weight(gate_up);
+    return use_swiglu &&
+           dropout_p == 0.0f &&
+           hidden > 0 &&
+           x.valid() &&
+           x.dtype() == DType::F32 &&
+           x.ndim() == 2 &&
+           x.shape()[0] == 1 &&
+           x.shape()[1] == gate_up.in_features() &&
+           gate_up.out_features() == hidden * 2 &&
+           gate_up.quantized_inference_enabled() &&
+           decode_quantized_weight_dtype(gate_up) == DType::Q4_0 &&
+           qweight.valid() &&
+           qweight.ndim() == 2 &&
+           qweight.shape()[0] == gate_up.in_features() &&
+           qweight.shape()[1] == gate_up.out_features() &&
+           q4_0_col_scaled_layout(qweight) &&
+           !gate_up.has_bias() &&
+           x.shape()[1] >= 64 &&
+           x.backend().device_info().max_work_group_size >= 64 &&
+           x.backend_ptr() == qweight.backend_ptr();
+}
+
+Tensor fused_packed_swiglu_q4_0_decode(const Tensor& x,
+                                       const Linear& gate_up,
+                                       int hidden,
+                                       float dropout_p) {
+    MCL_CHECK(can_use_fused_packed_swiglu_q4_0_decode(x, gate_up, hidden, true, dropout_p),
+              "fused packed SwiGLU Q4_0 decode expects M=1 f32 input and packed column-scaled Q4_0 gate/up weight");
+    auto out = Tensor::empty(x.backend(), {1, hidden}, DType::F32);
+    const Tensor& qweight = decode_quantized_weight(gate_up);
+    auto scales = qweight.quant_scales();
+    auto kernel = x.backend().kernels.get("matmul_swiglu_product_f32_q4_0_packed_m1_wg64x4_f32");
+    constexpr std::size_t kLocal = 64;
+    kernel.set_arg(0, x.buffer());
+    kernel.set_arg(1, qweight.buffer());
+    kernel.set_arg(2, scales.buffer());
+    kernel.set_arg(3, out.buffer());
+    kernel.set_arg(4, hidden);
+    kernel.set_arg(5, static_cast<int>(x.shape()[1]));
+    kernel.set_arg_local(6, 8 * kLocal * sizeof(float));
+    const std::size_t groups = (static_cast<std::size_t>(hidden) + 3u) / 4u;
+    kernel.launch1d(groups * kLocal, kLocal);
+    autograd::record_op("matmul_swiglu_product_f32_q4_0_packed_m1_wg64x4_f32",
+                        {x.id(), qweight.id(), scales.id()},
+                        {out.id()});
+    return out;
+}
+
 bool can_use_fused_decode_projection_pair(const Tensor& x, const Linear& a, const Linear& b) {
     return can_use_fused_decode_projection(x, a) &&
            can_use_fused_decode_projection(x, b) &&
@@ -1295,8 +1418,13 @@ Tensor ModernMLP::forward(const Tensor& x) {
         }
         hidden = use_swiglu ? silu_mul_fast(gate, up) : gelu_mul_fast(gate, up);
     } else {
-        hidden = gate_up_proj.forward(x);
-        hidden = use_swiglu ? motifcl::swiglu(hidden) : motifcl::gelu(hidden);
+        if (can_use_fused_packed_swiglu_q4_0_decode(x, gate_up_proj, down_proj.in_features(),
+                                                    use_swiglu, dropout_p)) {
+            hidden = fused_packed_swiglu_q4_0_decode(x, gate_up_proj, down_proj.in_features(), dropout_p);
+        } else {
+            hidden = gate_up_proj.forward(x);
+            hidden = use_swiglu ? motifcl::swiglu(hidden) : motifcl::gelu(hidden);
+        }
     }
     auto out = down_proj.forward(hidden);
     return dropout_p > 0.0f ? motifcl::dropout(out, dropout_p, true) : out;
@@ -1503,6 +1631,9 @@ QKV ModernSelfAttention::project_qkv(const Tensor& x) {
             return fused_decode_projection_triple(x, q_proj_, k_proj_, v_proj_);
         }
         return {q_proj_.forward(x), k_proj_.forward(x), v_proj_.forward(x)};
+    }
+    if (can_use_fused_packed_qkv_q4_0_decode(x, qkv_proj_, q_dim_, kv_dim_)) {
+        return fused_packed_qkv_q4_0_decode(x, qkv_proj_, q_dim_, kv_dim_);
     }
     auto packed = qkv_proj_.forward(x);
     return motifcl::qkv_split(packed, q_dim_, kv_dim_);
