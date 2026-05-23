@@ -231,6 +231,11 @@ bool decode_block_graph_replay_enabled() {
     return !env_enabled("MOTIFCL_DISABLE_DECODE_BLOCK_GRAPH_REPLAY");
 }
 
+bool decode_tail_graph_replay_enabled() {
+    return decode_block_graph_replay_enabled() &&
+           !env_enabled("MOTIFCL_DISABLE_DECODE_TAIL_GRAPH_REPLAY");
+}
+
 bool decode_block_graph_replay_log_enabled() {
     return env_enabled("MOTIFCL_LOG_DECODE_BLOCK_GRAPH_REPLAY");
 }
@@ -259,6 +264,23 @@ struct DecodeBlockTailGraphCache {
 
 std::mutex g_decode_block_tail_graph_mutex;
 std::unordered_map<const ModernTransformerBlock*, DecodeBlockTailGraphCache> g_decode_block_tail_graph_cache;
+
+struct DecodePlainBlockTailGraphCache {
+    bool capture_failed = false;
+    bool ready = false;
+    int input_id = 0;
+    int output_id = 0;
+    Shape input_shape;
+    Shape output_shape;
+    DType output_dtype = DType::F32;
+    std::size_t node_count = 0;
+    std::size_t kernel_count = 0;
+    std::unique_ptr<autograd::GraphExecutor> executor;
+};
+
+std::mutex g_decode_plain_block_tail_graph_mutex;
+std::unordered_map<const ModernTransformerBlock*, DecodePlainBlockTailGraphCache>
+    g_decode_plain_block_tail_graph_cache;
 
 struct DecodeFullBlockGraphCache {
     bool capture_failed = false;
@@ -2494,33 +2516,21 @@ Tensor ModernTransformerBlock::forward(const Tensor& x) {
 Tensor ModernTransformerBlock::forward(const Tensor& x, int64_t batch_size, int64_t seq_len, const Tensor* per_layer_input) {
     auto attn_out = attn_.forward(norm1_.forward(x), batch_size, seq_len, causal_);
     auto h = apply_attention_residual(x, attn_out);
-    h = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
-        ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
-        : apply_ffn_residual(h, mlp_forward_rmsnorm_decode(h, norm2_, mlp_));
-    h = apply_per_layer_input(h, per_layer_input);
-    return apply_layer_output_scale(h);
+    return finish_after_attention(h, per_layer_input);
 }
 
 Tensor ModernTransformerBlock::forward_masked(const Tensor& x, const Tensor& mask, int64_t batch_size, int64_t seq_len,
                                               const Tensor* per_layer_input) {
     auto attn_out = attn_.forward_masked(norm1_.forward(x), mask, batch_size, seq_len, causal_);
     auto h = apply_attention_residual(x, attn_out);
-    h = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
-        ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
-        : apply_ffn_residual(h, mlp_forward_rmsnorm_decode(h, norm2_, mlp_));
-    h = apply_per_layer_input(h, per_layer_input);
-    return apply_layer_output_scale(h);
+    return finish_after_attention(h, per_layer_input);
 }
 
 Tensor ModernTransformerBlock::forward_with_cache(const Tensor& x, KVCache& cache, int64_t batch_size, int64_t seq_len,
                                                   const Tensor* per_layer_input) {
     auto attn_out = attn_.forward_with_cache(norm1_.forward(x), cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
-    h = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
-        ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
-        : apply_ffn_residual(h, mlp_forward_rmsnorm_decode(h, norm2_, mlp_));
-    h = apply_per_layer_input(h, per_layer_input);
-    return apply_layer_output_scale(h);
+    return finish_after_attention(h, per_layer_input);
 }
 
 Tensor ModernTransformerBlock::forward_with_shared_kv_cache(const Tensor& x,
@@ -2530,11 +2540,7 @@ Tensor ModernTransformerBlock::forward_with_shared_kv_cache(const Tensor& x,
                                                             const Tensor* per_layer_input) {
     auto attn_out = attn_.forward_with_shared_kv_cache(norm1_.forward(x), shared_cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
-    h = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
-        ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
-        : apply_ffn_residual(h, mlp_forward_rmsnorm_decode(h, norm2_, mlp_));
-    h = apply_per_layer_input(h, per_layer_input);
-    return apply_layer_output_scale(h);
+    return finish_after_attention(h, per_layer_input);
 }
 
 Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input(const Tensor& x,
@@ -2742,11 +2748,7 @@ Tensor ModernTransformerBlock::forward_with_cache_masked(const Tensor& x, const 
                                                          const Tensor* per_layer_input) {
     auto attn_out = attn_.forward_with_cache_masked(norm1_.forward(x), mask, cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
-    h = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
-        ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
-        : apply_ffn_residual(h, mlp_forward_rmsnorm_decode(h, norm2_, mlp_));
-    h = apply_per_layer_input(h, per_layer_input);
-    return apply_layer_output_scale(h);
+    return finish_after_attention(h, per_layer_input);
 }
 
 Tensor ModernTransformerBlock::forward_with_cache_positions_masked(const Tensor& x, const Tensor& positions, const Tensor& mask,
@@ -2756,22 +2758,14 @@ Tensor ModernTransformerBlock::forward_with_cache_positions_masked(const Tensor&
     auto attn_out = attn_.forward_with_cache_positions_masked(norm1_.forward(x), positions, mask, cache,
                                                               batch_size, seq_len, cache_length_after, causal);
     auto h = apply_attention_residual(x, attn_out);
-    h = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
-        ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
-        : apply_ffn_residual(h, mlp_forward_rmsnorm_decode(h, norm2_, mlp_));
-    h = apply_per_layer_input(h, per_layer_input);
-    return apply_layer_output_scale(h);
+    return finish_after_attention(h, per_layer_input);
 }
 
 Tensor ModernTransformerBlock::forward_with_cache(const Tensor& x, PagedKVCache& cache, int64_t batch_size, int64_t seq_len,
                                                   const Tensor* per_layer_input) {
     auto attn_out = attn_.forward_with_cache(norm1_.forward(x), cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
-    h = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
-        ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
-        : apply_ffn_residual(h, mlp_forward_rmsnorm_decode(h, norm2_, mlp_));
-    h = apply_per_layer_input(h, per_layer_input);
-    return apply_layer_output_scale(h);
+    return finish_after_attention(h, per_layer_input);
 }
 
 Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input(const Tensor& x,
@@ -2784,6 +2778,119 @@ Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input(const T
     auto attn_out = attn_.forward_with_cache(norm1_.forward(x), cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
     return decode_tail_after_attention_packed_replay(h, packed_per_layer_input, layer_index, token_count);
+}
+
+Tensor ModernTransformerBlock::decode_tail_after_attention(const Tensor& h) {
+    Tensor out = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
+        ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
+        : apply_ffn_residual(h, mlp_forward_rmsnorm_decode(h, norm2_, mlp_));
+    return apply_layer_output_scale(out);
+}
+
+Tensor ModernTransformerBlock::decode_tail_after_attention_replay(const Tensor& h) {
+    const bool eligible =
+        decode_tail_graph_replay_enabled() &&
+        !autograd::is_enabled() &&
+        !autograd::is_graph_capturing() &&
+        !use_per_layer_input_ &&
+        dropout_p_ == 0.0f &&
+        h.valid() &&
+        h.dtype() == DType::F32 &&
+        h.ndim() == 2 &&
+        h.shape()[0] == 1;
+    if (!eligible) {
+        return decode_tail_after_attention(h);
+    }
+
+    std::lock_guard<std::mutex> lock(g_decode_plain_block_tail_graph_mutex);
+    auto& cache = g_decode_plain_block_tail_graph_cache[this];
+    const bool cache_matches =
+        cache.ready &&
+        cache.executor &&
+        cache.input_shape == h.shape();
+    if (cache_matches) {
+        Tensor out = Tensor::empty(h.backend(), cache.output_shape, cache.output_dtype);
+        try {
+            cache.executor->clear_bindings();
+            cache.executor->bind_tensor(cache.input_id, h);
+            cache.executor->bind_tensor(cache.output_id, out);
+            cache.executor->execute();
+            return out;
+        } catch (const std::exception& e) {
+            cache.capture_failed = true;
+            cache.ready = false;
+            cache.executor.reset();
+            if (decode_block_graph_replay_log_enabled()) {
+                std::fprintf(stderr,
+                             "[motifcl] decode tail graph replay disabled after replay failure: %s\n",
+                             e.what());
+            }
+            return decode_tail_after_attention(h);
+        }
+    }
+    if (cache.capture_failed) {
+        return decode_tail_after_attention(h);
+    }
+
+    autograd::GraphCaptureGuard guard;
+    autograd::register_tensor(h.id(), h.shape(), h.dtype(), h.nbytes(), h.buffer().raw());
+    Tensor out = decode_tail_after_attention(h);
+    auto graph = guard.finish();
+
+    const bool usable_graph =
+        !graph.empty() &&
+        graph.replayable() &&
+        graph.rebindable() &&
+        graph.tensor_specs().find(h.id()) != graph.tensor_specs().end() &&
+        graph.tensor_specs().find(out.id()) != graph.tensor_specs().end();
+    if (!usable_graph) {
+        cache.capture_failed = true;
+        if (decode_block_graph_replay_log_enabled()) {
+            std::fprintf(stderr,
+                         "[motifcl] decode tail graph replay unavailable: nodes=%zu replayable=%d rebindable=%d\n",
+                         graph.size(),
+                         graph.replayable() ? 1 : 0,
+                         graph.rebindable() ? 1 : 0);
+        }
+        return out;
+    }
+
+    std::size_t kernel_count = 0;
+    for (const auto& node : graph.nodes()) kernel_count += node.kernel_launches().size();
+
+    try {
+        autograd::GraphOptimizeOptions options;
+        options.enable_buffer_reuse = true;
+        auto executor = std::make_unique<autograd::GraphExecutor>(std::move(graph), options);
+        cache.input_id = h.id();
+        cache.output_id = out.id();
+        cache.input_shape = h.shape();
+        cache.output_shape = out.shape();
+        cache.output_dtype = out.dtype();
+        cache.node_count = executor->graph().size();
+        cache.kernel_count = kernel_count;
+        cache.executor = std::move(executor);
+        cache.ready = true;
+        cache.capture_failed = false;
+        if (decode_block_graph_replay_log_enabled()) {
+            std::fprintf(stderr,
+                         "[motifcl] captured decode tail graph nodes=%zu kernels=%zu mode=%s arena=%zu\n",
+                         cache.node_count,
+                         cache.kernel_count,
+                         cache.executor->execution_mode().c_str(),
+                         cache.executor->arena_bytes());
+        }
+    } catch (const std::exception& e) {
+        cache.capture_failed = true;
+        cache.ready = false;
+        cache.executor.reset();
+        if (decode_block_graph_replay_log_enabled()) {
+            std::fprintf(stderr,
+                         "[motifcl] decode tail graph capture failed: %s\n",
+                         e.what());
+        }
+    }
+    return out;
 }
 
 Tensor ModernTransformerBlock::decode_tail_after_attention_packed(const Tensor& h,
@@ -2939,6 +3046,17 @@ Tensor ModernTransformerBlock::apply_ffn_residual(const Tensor& h, const Tensor&
     }
     const auto y = use_post_ffw_norm_ ? post_ffw_norm_.forward(mlp_out) : mlp_out;
     return add(h, y);
+}
+
+Tensor ModernTransformerBlock::finish_after_attention(const Tensor& h, const Tensor* per_layer_input) {
+    if (!use_per_layer_input_ && per_layer_input == nullptr) {
+        return decode_tail_after_attention_replay(h);
+    }
+    Tensor out = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
+        ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
+        : apply_ffn_residual(h, mlp_forward_rmsnorm_decode(h, norm2_, mlp_));
+    out = apply_per_layer_input(out, per_layer_input);
+    return apply_layer_output_scale(out);
 }
 
 Tensor ModernTransformerBlock::apply_per_layer_input(const Tensor& h, const Tensor* per_layer_input) {

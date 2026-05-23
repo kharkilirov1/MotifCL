@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -605,6 +606,56 @@ int main() {
                 set_test_env("MOTIFCL_ENABLE_DECODE_BLOCK_GRAPH_REPLAY", "");
                 set_test_env("MOTIFCL_DISABLE_DECODE_BLOCK_GRAPH_REPLAY", "");
             }
+        }
+
+        {
+            motifcl::nn::TransformerConfig replay_cfg = cfg;
+            replay_cfg.n_embd = 128;
+            replay_cfg.n_head = 4;
+            replay_cfg.n_kv_head = 2;
+            replay_cfg.block_size = 4;
+            replay_cfg.mlp_hidden = 64;
+            replay_cfg.use_qkv_bias = false;
+            replay_cfg.split_qkv_projections = false;
+            replay_cfg.split_mlp_projections = false;
+            motifcl::nn::ModernGPTModel model(backend, replay_cfg);
+            model.enable_quantized_inference(motifcl::DType::Q4_0);
+
+            std::int32_t token_values[2] = {1, 2};
+            auto token_a = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, token_values);
+            auto token_b = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, token_values + 1);
+            motifcl::autograd::NoGradGuard no_grad;
+
+            set_test_env("MOTIFCL_DISABLE_DECODE_TAIL_GRAPH_REPLAY", "1");
+            auto eager_cache = model.create_kv_cache(backend, 1);
+            (void)model.forward_with_cache_last_logits(token_a, eager_cache);
+            auto eager_b = model.forward_with_cache_last_logits(token_b, eager_cache).to_vector<float>();
+
+            set_test_env("MOTIFCL_DISABLE_DECODE_TAIL_GRAPH_REPLAY", "");
+            auto replay_cache = model.create_kv_cache(backend, 1);
+            (void)model.forward_with_cache_last_logits(token_a, replay_cache);
+            backend.finish();
+            backend.profiler.clear();
+            backend.profiler.set_enabled(true);
+            auto replay_b_tensor = model.forward_with_cache_last_logits(token_b, replay_cache);
+            backend.finish();
+            backend.profiler.set_enabled(false);
+            auto replay_b = replay_b_tensor.to_vector<float>();
+            require_close_vec(replay_b, eager_b, 5e-4f);
+
+            std::size_t packed_swiglu_count = 0;
+            for (const auto& row : backend.profiler.summary()) {
+                if (row.name == "matmul_swiglu_product_f32_q4_0_packed_m1_wg64x4_f32" ||
+                    row.name == "matmul_swiglu_product_f32_q4_0_packed_m1_wg64x2_f32") {
+                    packed_swiglu_count += row.count;
+                }
+            }
+            if (packed_swiglu_count != 0) {
+                std::cerr << "expected replayed decode tail to hide packed SwiGLU launches from profiler, got "
+                          << packed_swiglu_count << "\n";
+                return 1;
+            }
+            set_test_env("MOTIFCL_DISABLE_DECODE_TAIL_GRAPH_REPLAY", "");
         }
 
         {

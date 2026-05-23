@@ -452,6 +452,7 @@ private:
 
     Tensor apply_attention_residual(const Tensor& x, const Tensor& attn_out);
     Tensor apply_ffn_residual(const Tensor& h, const Tensor& mlp_out);
+    Tensor finish_after_attention(const Tensor& h, const Tensor* per_layer_input);
     Tensor apply_per_layer_input(const Tensor& h, const Tensor* per_layer_input);
     Tensor apply_packed_per_layer_input(const Tensor& h, const Tensor* packed_per_layer_input,
                                         int layer_index, int64_t token_count);
@@ -467,6 +468,8 @@ private:
                                                             const Tensor* packed_per_layer_input,
                                                             int layer_index,
                                                             int64_t token_count);
+    Tensor decode_tail_after_attention(const Tensor& h);
+    Tensor decode_tail_after_attention_replay(const Tensor& h);
     Tensor decode_tail_after_attention_packed(const Tensor& h, const Tensor* packed_per_layer_input,
                                               int layer_index, int64_t token_count);
     Tensor decode_tail_after_attention_packed_replay(const Tensor& h, const Tensor* packed_per_layer_input,
