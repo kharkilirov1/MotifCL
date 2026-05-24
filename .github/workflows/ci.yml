@@ -34,7 +34,7 @@ jobs:
 
       - name: Full CTest release
         run: |
-          if ! ctest --test-dir build/release --output-on-failure; then
+          if ! ctest --test-dir build/release --output-on-failure --stop-on-failure; then
             failed_file="build/release/Testing/Temporary/LastTestsFailed.log"
             log_file="build/release/Testing/Temporary/LastTest.log"
             failed_tests=""
@@ -100,7 +100,7 @@ jobs:
       - name: Test
         if: runner.os == 'Linux'
         run: |
-          if ! ctest --test-dir build -C Debug --output-on-failure; then
+          if ! ctest --test-dir build -C Debug --output-on-failure --stop-on-failure; then
             failed_file="build/Testing/Temporary/LastTestsFailed.log"
             log_file="build/Testing/Temporary/LastTest.log"
             failed_tests=""
