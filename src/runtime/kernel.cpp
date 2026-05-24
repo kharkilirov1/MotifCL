@@ -6,6 +6,7 @@
 #include <motifcl/runtime/opencl_context.hpp>
 #include <motifcl/runtime/profiler.hpp>
 
+#include <cstring>
 #include <type_traits>
 #include <utility>
 
@@ -31,6 +32,24 @@ std::vector<std::pair<int, cl_mem>> buffer_arg_pairs(const std::vector<KernelBuf
     return out;
 }
 
+std::vector<std::pair<int, std::vector<std::uint8_t>>> scalar_arg_pairs(const std::vector<KernelScalarArgSnapshot>& args) {
+    std::vector<std::pair<int, std::vector<std::uint8_t>>> out;
+    out.reserve(args.size());
+    for (const auto& arg : args) {
+        out.emplace_back(arg.index, arg.bytes);
+    }
+    return out;
+}
+
+std::vector<std::pair<int, std::size_t>> local_arg_pairs(const std::vector<KernelLocalArgSnapshot>& args) {
+    std::vector<std::pair<int, std::size_t>> out;
+    out.reserve(args.size());
+    for (const auto& arg : args) {
+        out.emplace_back(arg.index, arg.bytes);
+    }
+    return out;
+}
+
 }
 
 Kernel::Kernel(OpenCLContext& ctx, cl_kernel kernel, std::string name, Profiler* profiler)
@@ -49,6 +68,8 @@ Kernel& Kernel::operator=(Kernel&& other) noexcept {
         name_ = std::move(other.name_);
         profiler_ = other.profiler_;
         buffer_args_ = std::move(other.buffer_args_);
+        scalar_args_ = std::move(other.scalar_args_);
+        local_args_ = std::move(other.local_args_);
         other.ctx_ = nullptr;
         other.kernel_ = nullptr;
         other.profiler_ = nullptr;
@@ -81,6 +102,31 @@ void Kernel::remember_buffer_arg(int index, cl_mem mem) {
     buffer_args_.push_back({index, mem});
 }
 
+void Kernel::remember_scalar_arg(int index, std::size_t size, const void* ptr) {
+    for (auto& arg : scalar_args_) {
+        if (arg.index == index) {
+            arg.bytes.resize(size);
+            if (size) std::memcpy(arg.bytes.data(), ptr, size);
+            return;
+        }
+    }
+    KernelScalarArgSnapshot snapshot;
+    snapshot.index = index;
+    snapshot.bytes.resize(size);
+    if (size) std::memcpy(snapshot.bytes.data(), ptr, size);
+    scalar_args_.push_back(std::move(snapshot));
+}
+
+void Kernel::remember_local_arg(int index, std::size_t bytes) {
+    for (auto& arg : local_args_) {
+        if (arg.index == index) {
+            arg.bytes = bytes;
+            return;
+        }
+    }
+    local_args_.push_back({index, bytes});
+}
+
 void Kernel::set_arg(int index, const Buffer& buffer) {
     cl_mem mem = buffer.raw();
     set_arg_raw(index, sizeof(cl_mem), &mem);
@@ -95,6 +141,7 @@ void Kernel::set_arg_mem(int index, cl_mem mem) {
 void Kernel::set_arg_local(int index, std::size_t bytes) {
     MCL_CHECK(kernel_ != nullptr, "kernel is not initialized");
     MCL_CHECK_CL(clSetKernelArg(kernel_, static_cast<cl_uint>(index), bytes, nullptr));
+    remember_local_arg(index, bytes);
 }
 
 Event Kernel::launch1d(std::size_t global, std::size_t local) {
@@ -115,6 +162,8 @@ Event Kernel::launch1d(std::size_t global, std::size_t local) {
         });
         auto state = state_;
         auto buffer_args = buffer_arg_pairs(buffer_args_);
+        auto scalar_args = scalar_arg_pairs(scalar_args_);
+        auto local_args = local_arg_pairs(local_args_);
         autograd::GraphKernelLaunchInfo launch;
         launch.kernel_name = name_;
         launch.platform = state->platform;
@@ -127,6 +176,8 @@ Event Kernel::launch1d(std::size_t global, std::size_t local) {
         if (local) launch.local_work_size = {local};
         launch.has_local_work_size = local != 0;
         launch.buffer_args = buffer_args;
+        launch.scalar_args = scalar_args;
+        launch.local_args = local_args;
         launch.retained_state = state;
         launch.retained_kernel = retained;
         autograd::record_kernel_launch(std::move(launch), [state, retained, global, local, buffer_args](const std::unordered_map<int, cl_mem>& bindings,
@@ -170,6 +221,8 @@ Event Kernel::launch2d(std::size_t gx, std::size_t gy, std::size_t lx, std::size
         });
         auto state = state_;
         auto buffer_args = buffer_arg_pairs(buffer_args_);
+        auto scalar_args = scalar_arg_pairs(scalar_args_);
+        auto local_args = local_arg_pairs(local_args_);
         autograd::GraphKernelLaunchInfo launch;
         launch.kernel_name = name_;
         launch.platform = state->platform;
@@ -182,6 +235,8 @@ Event Kernel::launch2d(std::size_t gx, std::size_t gy, std::size_t lx, std::size
         if (lx && ly) launch.local_work_size = {lx, ly};
         launch.has_local_work_size = lx != 0 && ly != 0;
         launch.buffer_args = buffer_args;
+        launch.scalar_args = scalar_args;
+        launch.local_args = local_args;
         launch.retained_state = state;
         launch.retained_kernel = retained;
         autograd::record_kernel_launch(std::move(launch), [state, retained, gx, gy, lx, ly, buffer_args](const std::unordered_map<int, cl_mem>& bindings,

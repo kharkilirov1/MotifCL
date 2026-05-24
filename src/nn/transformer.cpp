@@ -246,6 +246,23 @@ bool decode_full_block_graph_replay_enabled() {
            !env_enabled("MOTIFCL_DISABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY");
 }
 
+void bind_decode_attention_replay_offsets(autograd::GraphExecutor& executor,
+                                          int64_t offset,
+                                          int64_t seq_len) {
+    MCL_CHECK(offset >= 0 && seq_len > 0, "decode graph replay offset binding expects positive decode range");
+    MCL_CHECK(offset <= std::numeric_limits<int>::max() - seq_len,
+              "decode graph replay offset exceeds OpenCL scalar range");
+    const int offset_i32 = static_cast<int>(offset);
+    const int key_tokens_i32 = static_cast<int>(offset + seq_len);
+    executor.bind_i32_arg("rope_cache_append_decode_f32", 11, offset_i32);
+    executor.bind_i32_arg("qk_norm_rope_cache_append_decode_f32", 13, offset_i32);
+    executor.bind_i32_arg("grouped_query_attention_decode_f32", 5, key_tokens_i32);
+    executor.bind_i32_arg("grouped_query_attention_decode_f32", 10, offset_i32);
+    executor.bind_local_arg("grouped_query_attention_decode_f32",
+                            13,
+                            (static_cast<std::size_t>(key_tokens_i32) + 256u) * sizeof(float));
+}
+
 struct DecodeBlockTailGraphCache {
     bool capture_failed = false;
     bool ready = false;
@@ -2596,15 +2613,13 @@ Tensor ModernTransformerBlock::forward_with_cache_replay(const Tensor& x,
         return forward_with_cache_eager(x, kv_cache, batch_size, seq_len, nullptr);
     }
 
-    const std::string key = std::to_string(offset) + ":" +
-                            std::to_string(batch_size) + ":" + std::to_string(seq_len);
+    const std::string key = std::to_string(batch_size) + ":" + std::to_string(seq_len);
     std::lock_guard<std::mutex> lock(g_decode_plain_full_block_graph_mutex);
     auto& by_key = g_decode_plain_full_block_graph_cache[this];
     auto& cache = by_key[key];
     const bool cache_matches =
         cache.ready &&
         cache.executor &&
-        cache.offset == offset &&
         cache.batch_size == batch_size &&
         cache.seq_len == seq_len &&
         cache.input_shape == x.shape() &&
@@ -2618,6 +2633,7 @@ Tensor ModernTransformerBlock::forward_with_cache_replay(const Tensor& x,
             cache.executor->bind_tensor(cache.cache_k_id, kv_cache.k);
             cache.executor->bind_tensor(cache.cache_v_id, kv_cache.v);
             cache.executor->bind_tensor(cache.output_id, out);
+            bind_decode_attention_replay_offsets(*cache.executor, offset, seq_len);
             cache.executor->execute();
             kv_cache.length = offset + seq_len;
             return out;
@@ -2785,7 +2801,7 @@ Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input_replay(
                                                                packed_per_layer_input, layer_index, token_count);
     }
 
-    const std::string key = std::to_string(layer_index) + ":" + std::to_string(offset) + ":" +
+    const std::string key = std::to_string(layer_index) + ":" +
                             std::to_string(batch_size) + ":" + std::to_string(seq_len);
     std::lock_guard<std::mutex> lock(g_decode_full_block_graph_mutex);
     auto& by_key = g_decode_full_block_graph_cache[this];
@@ -2794,7 +2810,6 @@ Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input_replay(
         cache.ready &&
         cache.executor &&
         cache.layer_index == layer_index &&
-        cache.offset == offset &&
         cache.batch_size == batch_size &&
         cache.seq_len == seq_len &&
         cache.token_count == token_count &&
@@ -2811,6 +2826,7 @@ Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input_replay(
             cache.executor->bind_tensor(cache.cache_k_id, kv_cache.k);
             cache.executor->bind_tensor(cache.cache_v_id, kv_cache.v);
             cache.executor->bind_tensor(cache.output_id, out);
+            bind_decode_attention_replay_offsets(*cache.executor, offset, seq_len);
             cache.executor->execute();
             kv_cache.length = offset + seq_len;
             return out;

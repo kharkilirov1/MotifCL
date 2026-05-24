@@ -687,7 +687,6 @@ int main() {
             set_test_env("MOTIFCL_ENABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY", "1");
             auto warm_cache = model.create_kv_cache(backend, 1);
             (void)model.forward_with_cache_last_logits(token_a, warm_cache);
-            (void)model.forward_with_cache_last_logits(token_b, warm_cache);
             backend.finish();
 
             auto replay_cache = model.create_kv_cache(backend, 1);
@@ -717,11 +716,12 @@ int main() {
                 }
             }
             if (packed_qkv_count != 0 || rope_append_count != 0 || gqa_decode_count != 0) {
-                std::cerr << "full decode block replay kept profiler-visible front-half launches on this OpenCL runtime: "
+                std::cerr << "expected dynamic-offset full decode block replay to hide front-half launches, got "
                           << "packed_qkv=" << packed_qkv_count
                           << " rope_append=" << rope_append_count
                           << " gqa=" << gqa_decode_count
                           << " q4_scaled_m1=" << q4_scaled_m1_count << "\n";
+                return 1;
             }
             set_test_env("MOTIFCL_ENABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY", "");
             set_test_env("MOTIFCL_DISABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY", "");

@@ -123,6 +123,36 @@ cl_mem rebound_mem_for_arg(const autograd::GraphKernelLaunchInfo& launch,
     return captured;
 }
 
+bool kernel_binding_matches(const std::string& binding_kernel_name, const std::string& launch_kernel_name) {
+    return binding_kernel_name.empty() || binding_kernel_name == launch_kernel_name;
+}
+
+const autograd::GraphScalarArgOverride* find_scalar_override(
+    const std::vector<autograd::GraphScalarArgOverride>& overrides,
+    const autograd::GraphKernelLaunchInfo& launch,
+    int arg_index) {
+    for (const auto& override_arg : overrides) {
+        if (override_arg.arg_index == arg_index &&
+            kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) {
+            return &override_arg;
+        }
+    }
+    return nullptr;
+}
+
+const autograd::GraphLocalArgOverride* find_local_override(
+    const std::vector<autograd::GraphLocalArgOverride>& overrides,
+    const autograd::GraphKernelLaunchInfo& launch,
+    int arg_index) {
+    for (const auto& override_arg : overrides) {
+        if (override_arg.arg_index == arg_index &&
+            kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) {
+            return &override_arg;
+        }
+    }
+    return nullptr;
+}
+
 bool same_driver_target(const std::vector<autograd::GraphKernelLaunchInfo>& launches) {
     if (launches.empty()) return false;
     const auto platform = launches.front().platform;
@@ -183,8 +213,13 @@ bool DriverCommandBuffer::valid() const {
     return impl_ && impl_->command_buffer != nullptr;
 }
 
-bool DriverCommandBuffer::can_execute_with_bindings(const std::unordered_map<int, cl_mem>& tensor_bindings) const {
-    return valid() && (tensor_bindings.empty() || mutable_rebinding_);
+bool DriverCommandBuffer::can_execute_with_bindings(
+    const std::unordered_map<int, cl_mem>& tensor_bindings,
+    const std::vector<autograd::GraphScalarArgOverride>& scalar_bindings,
+    const std::vector<autograd::GraphLocalArgOverride>& local_bindings) const {
+    const bool needs_mutable_rebinding =
+        !tensor_bindings.empty() || !scalar_bindings.empty() || !local_bindings.empty();
+    return valid() && (!needs_mutable_rebinding || mutable_rebinding_);
 }
 
 std::unique_ptr<DriverCommandBuffer> DriverCommandBuffer::try_create(
@@ -264,9 +299,14 @@ std::unique_ptr<DriverCommandBuffer> DriverCommandBuffer::try_create(
     return build(false);
 }
 
-bool DriverCommandBuffer::execute(const std::unordered_map<int, cl_mem>& tensor_bindings) {
+bool DriverCommandBuffer::execute(
+    const std::unordered_map<int, cl_mem>& tensor_bindings,
+    const std::vector<autograd::GraphScalarArgOverride>& scalar_bindings,
+    const std::vector<autograd::GraphLocalArgOverride>& local_bindings) {
     if (!valid()) return false;
-    if (!tensor_bindings.empty() && !mutable_rebinding_) return false;
+    const bool needs_mutable_rebinding =
+        !tensor_bindings.empty() || !scalar_bindings.empty() || !local_bindings.empty();
+    if (needs_mutable_rebinding && !mutable_rebinding_) return false;
 
     if (mutable_rebinding_) {
         const std::size_t count = impl_->launches.size();
@@ -278,10 +318,14 @@ bool DriverCommandBuffer::execute(const std::unordered_map<int, cl_mem>& tensor_
         for (std::size_t i = 0; i < count; ++i) {
             const auto& launch = impl_->launches[i];
             const auto mutable_command = impl_->mutable_commands[i];
-            if (!mutable_command || launch.buffer_args.empty()) continue;
+            if (!mutable_command) continue;
 
             arg_values[i].reserve(launch.buffer_args.size());
-            arg_lists[i].reserve(launch.buffer_args.size());
+            arg_lists[i].reserve(launch.buffer_args.size() +
+                                 launch.scalar_args.size() +
+                                 launch.local_args.size() +
+                                 scalar_bindings.size() +
+                                 local_bindings.size());
             for (const auto& arg : launch.buffer_args) {
                 arg_values[i].push_back(rebound_mem_for_arg(launch, arg.first, arg.second, tensor_bindings));
                 arg_lists[i].push_back(MutableDispatchArgKHR{
@@ -290,6 +334,51 @@ bool DriverCommandBuffer::execute(const std::unordered_map<int, cl_mem>& tensor_
                     &arg_values[i].back()
                 });
             }
+            for (const auto& arg : launch.scalar_args) {
+                const auto* override_arg = find_scalar_override(scalar_bindings, launch, arg.first);
+                const auto& bytes = override_arg ? override_arg->bytes : arg.second;
+                arg_lists[i].push_back(MutableDispatchArgKHR{
+                    static_cast<cl_uint>(arg.first),
+                    bytes.size(),
+                    bytes.empty() ? nullptr : bytes.data()
+                });
+            }
+            for (const auto& override_arg : scalar_bindings) {
+                if (!kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) continue;
+                const bool already_captured = std::any_of(launch.scalar_args.begin(), launch.scalar_args.end(),
+                                                          [&](const auto& arg) {
+                                                              return arg.first == override_arg.arg_index;
+                                                          });
+                if (already_captured) continue;
+                arg_lists[i].push_back(MutableDispatchArgKHR{
+                    static_cast<cl_uint>(override_arg.arg_index),
+                    override_arg.bytes.size(),
+                    override_arg.bytes.empty() ? nullptr : override_arg.bytes.data()
+                });
+            }
+            for (const auto& arg : launch.local_args) {
+                const auto* override_arg = find_local_override(local_bindings, launch, arg.first);
+                const std::size_t bytes = override_arg ? override_arg->bytes : arg.second;
+                arg_lists[i].push_back(MutableDispatchArgKHR{
+                    static_cast<cl_uint>(arg.first),
+                    bytes,
+                    nullptr
+                });
+            }
+            for (const auto& override_arg : local_bindings) {
+                if (!kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) continue;
+                const bool already_captured = std::any_of(launch.local_args.begin(), launch.local_args.end(),
+                                                          [&](const auto& arg) {
+                                                              return arg.first == override_arg.arg_index;
+                                                          });
+                if (already_captured) continue;
+                arg_lists[i].push_back(MutableDispatchArgKHR{
+                    static_cast<cl_uint>(override_arg.arg_index),
+                    override_arg.bytes,
+                    nullptr
+                });
+            }
+            if (arg_lists[i].empty()) continue;
 
             MutableDispatchConfigKHR config;
             config.command = mutable_command;

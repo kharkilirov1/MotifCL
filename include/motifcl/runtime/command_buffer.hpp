@@ -11,6 +11,8 @@
 
 namespace motifcl::autograd {
 struct GraphKernelLaunchInfo;
+struct GraphScalarArgOverride;
+struct GraphLocalArgOverride;
 }
 
 namespace motifcl {
@@ -94,8 +96,12 @@ public:
     bool valid() const;
     bool mutable_rebinding() const { return mutable_rebinding_; }
     const std::string& mode() const { return mode_; }
-    bool can_execute_with_bindings(const std::unordered_map<int, cl_mem>& tensor_bindings) const;
-    bool execute(const std::unordered_map<int, cl_mem>& tensor_bindings);
+    bool can_execute_with_bindings(const std::unordered_map<int, cl_mem>& tensor_bindings,
+                                   const std::vector<autograd::GraphScalarArgOverride>& scalar_bindings = {},
+                                   const std::vector<autograd::GraphLocalArgOverride>& local_bindings = {}) const;
+    bool execute(const std::unordered_map<int, cl_mem>& tensor_bindings,
+                 const std::vector<autograd::GraphScalarArgOverride>& scalar_bindings = {},
+                 const std::vector<autograd::GraphLocalArgOverride>& local_bindings = {});
 
 private:
     struct Impl;

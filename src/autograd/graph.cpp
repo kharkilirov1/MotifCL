@@ -6,6 +6,7 @@
 #include <motifcl/tensor/tensor.hpp>
 
 #include <algorithm>
+#include <cstring>
 #include <cstdlib>
 #include <limits>
 #include <mutex>
@@ -87,13 +88,92 @@ bool graph_is_driver_command_buffer_recordable(const CapturedGraph& graph, const
 }
 
 std::vector<GraphKernelLaunchInfo> flatten_driver_kernel_launches(const CapturedGraph& graph,
-                                                                  const std::vector<std::size_t>& schedule) {
+                                                                   const std::vector<std::size_t>& schedule) {
     std::vector<GraphKernelLaunchInfo> launches;
     for (std::size_t index : schedule) {
         const auto& node_launches = graph.nodes().at(index).kernel_launches();
         launches.insert(launches.end(), node_launches.begin(), node_launches.end());
     }
     return launches;
+}
+
+bool kernel_binding_matches(const std::string& binding_kernel_name, const std::string& launch_kernel_name) {
+    return binding_kernel_name.empty() || binding_kernel_name == launch_kernel_name;
+}
+
+const GraphScalarArgOverride* find_scalar_override(const std::vector<GraphScalarArgOverride>& overrides,
+                                                   const GraphKernelLaunchInfo& launch,
+                                                   int arg_index) {
+    for (const auto& override_arg : overrides) {
+        if (override_arg.arg_index == arg_index &&
+            kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) {
+            return &override_arg;
+        }
+    }
+    return nullptr;
+}
+
+const GraphLocalArgOverride* find_local_override(const std::vector<GraphLocalArgOverride>& overrides,
+                                                 const GraphKernelLaunchInfo& launch,
+                                                 int arg_index) {
+    for (const auto& override_arg : overrides) {
+        if (override_arg.arg_index == arg_index &&
+            kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) {
+            return &override_arg;
+        }
+    }
+    return nullptr;
+}
+
+void apply_replay_kernel_args(const CapturedGraph& graph,
+                              const std::vector<std::size_t>& schedule,
+                              const std::vector<GraphScalarArgOverride>& scalar_overrides,
+                              const std::vector<GraphLocalArgOverride>& local_overrides) {
+    for (std::size_t index : schedule) {
+        const auto& node = graph.nodes().at(index);
+        for (const auto& launch : node.kernel_launches()) {
+            if (!launch.kernel) continue;
+
+            for (const auto& arg : launch.scalar_args) {
+                const auto* override_arg = find_scalar_override(scalar_overrides, launch, arg.first);
+                const auto& bytes = override_arg ? override_arg->bytes : arg.second;
+                MCL_CHECK_CL(clSetKernelArg(launch.kernel,
+                                            static_cast<cl_uint>(arg.first),
+                                            bytes.size(),
+                                            bytes.empty() ? nullptr : bytes.data()));
+            }
+            for (const auto& override_arg : scalar_overrides) {
+                if (!kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) continue;
+                const bool already_captured = std::any_of(launch.scalar_args.begin(), launch.scalar_args.end(),
+                                                          [&](const auto& arg) {
+                                                              return arg.first == override_arg.arg_index;
+                                                          });
+                if (already_captured) continue;
+                MCL_CHECK_CL(clSetKernelArg(launch.kernel,
+                                            static_cast<cl_uint>(override_arg.arg_index),
+                                            override_arg.bytes.size(),
+                                            override_arg.bytes.empty() ? nullptr : override_arg.bytes.data()));
+            }
+
+            for (const auto& arg : launch.local_args) {
+                const auto* override_arg = find_local_override(local_overrides, launch, arg.first);
+                const std::size_t bytes = override_arg ? override_arg->bytes : arg.second;
+                MCL_CHECK_CL(clSetKernelArg(launch.kernel, static_cast<cl_uint>(arg.first), bytes, nullptr));
+            }
+            for (const auto& override_arg : local_overrides) {
+                if (!kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) continue;
+                const bool already_captured = std::any_of(launch.local_args.begin(), launch.local_args.end(),
+                                                          [&](const auto& arg) {
+                                                              return arg.first == override_arg.arg_index;
+                                                          });
+                if (already_captured) continue;
+                MCL_CHECK_CL(clSetKernelArg(launch.kernel,
+                                            static_cast<cl_uint>(override_arg.arg_index),
+                                            override_arg.bytes,
+                                            nullptr));
+            }
+        }
+    }
 }
 
 std::vector<std::pair<int, int>> map_kernel_buffer_args_to_tensors(const PendingReplayLaunch& launch,
@@ -608,13 +688,15 @@ void GraphExecutor::execute() {
     MCL_CHECK(graph_.replayable(), "captured graph contains nodes that cannot be replayed");
     std::unordered_map<int, cl_mem> active_bindings = arena_mem_;
     for (const auto& binding : bound_mem_) active_bindings[binding.first] = binding.second;
-    if (driver_command_buffer_ && driver_command_buffer_->can_execute_with_bindings(active_bindings) &&
-        driver_command_buffer_->execute(active_bindings)) {
+    if (driver_command_buffer_ &&
+        driver_command_buffer_->can_execute_with_bindings(active_bindings, bound_scalar_args_, bound_local_args_) &&
+        driver_command_buffer_->execute(active_bindings, bound_scalar_args_, bound_local_args_)) {
         execution_mode_ = driver_command_buffer_->mode();
         ++executions_;
         return;
     }
     execution_mode_ = "host_replay_fallback";
+    apply_replay_kernel_args(graph_, cached_schedule_, bound_scalar_args_, bound_local_args_);
     for (std::size_t index : cached_schedule_) {
         graph_.nodes().at(index).replay(active_bindings);
     }
@@ -633,9 +715,51 @@ void GraphExecutor::bind_tensor(int captured_tensor_id, const Tensor& tensor) {
     bound_mem_[captured_tensor_id] = tensor.buffer().raw();
 }
 
+void GraphExecutor::bind_scalar_arg(const std::string& kernel_name,
+                                    int arg_index,
+                                    const void* data,
+                                    std::size_t nbytes) {
+    MCL_CHECK(arg_index >= 0, "graph scalar binding argument index must be non-negative");
+    MCL_CHECK(data != nullptr || nbytes == 0, "graph scalar binding data is null");
+    for (auto& binding : bound_scalar_args_) {
+        if (binding.kernel_name == kernel_name && binding.arg_index == arg_index) {
+            binding.bytes.resize(nbytes);
+            if (nbytes) std::memcpy(binding.bytes.data(), data, nbytes);
+            return;
+        }
+    }
+    GraphScalarArgOverride binding;
+    binding.kernel_name = kernel_name;
+    binding.arg_index = arg_index;
+    binding.bytes.resize(nbytes);
+    if (nbytes) std::memcpy(binding.bytes.data(), data, nbytes);
+    bound_scalar_args_.push_back(std::move(binding));
+}
+
+void GraphExecutor::bind_i32_arg(const std::string& kernel_name, int arg_index, int value) {
+    bind_scalar_arg(kernel_name, arg_index, &value, sizeof(value));
+}
+
+void GraphExecutor::bind_local_arg(const std::string& kernel_name, int arg_index, std::size_t bytes) {
+    MCL_CHECK(arg_index >= 0, "graph local binding argument index must be non-negative");
+    for (auto& binding : bound_local_args_) {
+        if (binding.kernel_name == kernel_name && binding.arg_index == arg_index) {
+            binding.bytes = bytes;
+            return;
+        }
+    }
+    GraphLocalArgOverride binding;
+    binding.kernel_name = kernel_name;
+    binding.arg_index = arg_index;
+    binding.bytes = bytes;
+    bound_local_args_.push_back(std::move(binding));
+}
+
 void GraphExecutor::clear_bindings() {
     bound_mem_.clear();
     bound_tensors_.clear();
+    bound_scalar_args_.clear();
+    bound_local_args_.clear();
 }
 
 void GraphExecutor::initialize_temporary_arena() {

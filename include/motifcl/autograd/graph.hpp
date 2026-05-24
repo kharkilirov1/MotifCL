@@ -1,7 +1,8 @@
 #pragma once
 
-#include <cstddef>
 #include <CL/cl.h>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -81,9 +82,23 @@ struct GraphKernelLaunchInfo {
     std::vector<std::size_t> local_work_size;
     bool has_local_work_size = false;
     std::vector<std::pair<int, cl_mem>> buffer_args;
+    std::vector<std::pair<int, std::vector<std::uint8_t>>> scalar_args;
+    std::vector<std::pair<int, std::size_t>> local_args;
     std::vector<std::pair<int, int>> tensor_arg_bindings;
     std::shared_ptr<::motifcl::OpenCLContextState> retained_state;
     std::shared_ptr<void> retained_kernel;
+};
+
+struct GraphScalarArgOverride {
+    std::string kernel_name;
+    int arg_index = 0;
+    std::vector<std::uint8_t> bytes;
+};
+
+struct GraphLocalArgOverride {
+    std::string kernel_name;
+    int arg_index = 0;
+    std::size_t bytes = 0;
 };
 
 struct GraphNodeInfo {
@@ -212,6 +227,9 @@ public:
     bool rebindable() const { return graph_.rebindable(); }
     const std::string& execution_mode() const { return execution_mode_; }
     void bind_tensor(int captured_tensor_id, const Tensor& tensor);
+    void bind_scalar_arg(const std::string& kernel_name, int arg_index, const void* data, std::size_t nbytes);
+    void bind_i32_arg(const std::string& kernel_name, int arg_index, int value);
+    void bind_local_arg(const std::string& kernel_name, int arg_index, std::size_t bytes);
     void clear_bindings();
     std::size_t bound_tensor_count() const { return bound_tensors_.size(); }
     std::size_t arena_binding_count() const { return arena_mem_.size(); }
@@ -226,6 +244,8 @@ private:
     std::unordered_map<int, cl_mem> bound_mem_;
     std::unordered_map<int, cl_mem> arena_mem_;
     std::unordered_map<int, std::shared_ptr<Tensor>> bound_tensors_;
+    std::vector<GraphScalarArgOverride> bound_scalar_args_;
+    std::vector<GraphLocalArgOverride> bound_local_args_;
     std::vector<std::shared_ptr<std::remove_pointer_t<cl_mem>>> arena_roots_;
     std::vector<std::shared_ptr<std::remove_pointer_t<cl_mem>>> arena_views_;
     std::unique_ptr<::motifcl::DriverCommandBuffer> driver_command_buffer_;

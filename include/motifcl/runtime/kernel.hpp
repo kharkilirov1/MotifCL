@@ -2,6 +2,7 @@
 
 #include <CL/cl.h>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -19,6 +20,16 @@ struct OpenCLContextState;
 struct KernelBufferArgSnapshot {
     int index = 0;
     cl_mem mem = nullptr;
+};
+
+struct KernelScalarArgSnapshot {
+    int index = 0;
+    std::vector<std::uint8_t> bytes;
+};
+
+struct KernelLocalArgSnapshot {
+    int index = 0;
+    std::size_t bytes = 0;
 };
 
 class Kernel {
@@ -39,6 +50,7 @@ public:
     template <typename T, typename = std::enable_if_t<std::is_arithmetic<T>::value || std::is_enum<T>::value>>
     void set_arg(int index, const T& value) {
         set_arg_raw(index, sizeof(T), &value);
+        remember_scalar_arg(index, sizeof(T), &value);
     }
 
     Event launch1d(std::size_t global, std::size_t local = 0);
@@ -52,9 +64,13 @@ private:
     std::string name_;
     Profiler* profiler_ = nullptr;
     std::vector<KernelBufferArgSnapshot> buffer_args_;
+    std::vector<KernelScalarArgSnapshot> scalar_args_;
+    std::vector<KernelLocalArgSnapshot> local_args_;
 
     void set_arg_raw(int index, std::size_t size, const void* ptr);
     void remember_buffer_arg(int index, cl_mem mem);
+    void remember_scalar_arg(int index, std::size_t size, const void* ptr);
+    void remember_local_arg(int index, std::size_t bytes);
     void release();
 };
 
