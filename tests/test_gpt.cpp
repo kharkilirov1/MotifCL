@@ -12,7 +12,7 @@ int main() {
         motifcl::nn::GPTModel model(backend, 16, 8, 16, 4, 1, 32);
         for (auto* p : model.parameters()) {
             if (!p) continue;
-            p->data = motifcl::Tensor::randn(backend, p->data.shape(), 0.005f);
+            p->data = motifcl::Tensor::full(backend, p->data.shape(), 0.001f);
             p->data.set_requires_grad(p->trainable);
         }
         std::vector<std::int32_t> ids = {1, 2, 3, 4, 4, 3, 2, 1};
