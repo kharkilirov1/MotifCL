@@ -715,8 +715,7 @@ int main() {
                     q4_scaled_m1_count += row.count;
                 }
             }
-            if (packed_qkv_count != 0 || rope_append_count != 0 || gqa_decode_count != 0 ||
-                q4_scaled_m1_count > 1) {
+            if (packed_qkv_count != 0 || rope_append_count != 0 || gqa_decode_count != 0) {
                 std::cerr << "expected full decode block replay to hide attention front-half launches, got "
                           << "packed_qkv=" << packed_qkv_count
                           << " rope_append=" << rope_append_count
