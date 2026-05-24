@@ -10,6 +10,11 @@ int main() {
         auto backend = motifcl::Backend::create_opencl();
         motifcl::manual_seed(123);
         motifcl::nn::GPTModel model(backend, 16, 8, 16, 4, 1, 32);
+        for (auto* p : model.parameters()) {
+            if (!p) continue;
+            p->data = motifcl::Tensor::randn(backend, p->data.shape(), 0.005f);
+            p->data.set_requires_grad(p->trainable);
+        }
         std::vector<std::int32_t> ids = {1, 2, 3, 4, 4, 3, 2, 1};
         auto X = motifcl::Tensor::from_cpu(backend, {2, 4}, motifcl::DType::I32, ids.data());
         auto Y = model.forward(X);
