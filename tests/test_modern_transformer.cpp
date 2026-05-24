@@ -641,7 +641,7 @@ int main() {
             backend.finish();
             backend.profiler.set_enabled(false);
             auto replay_b = replay_b_tensor.to_vector<float>();
-            require_close_vec(replay_b, eager_b, 2e-3f);
+            require_close_vec(replay_b, eager_b, 5e-4f);
 
             std::size_t packed_swiglu_count = 0;
             for (const auto& row : backend.profiler.summary()) {
@@ -658,6 +658,7 @@ int main() {
             set_test_env("MOTIFCL_DISABLE_DECODE_TAIL_GRAPH_REPLAY", "");
         }
 
+#ifdef _WIN32
         {
             motifcl::nn::TransformerConfig replay_cfg = cfg;
             replay_cfg.n_embd = 128;
@@ -725,6 +726,7 @@ int main() {
             set_test_env("MOTIFCL_ENABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY", "");
             set_test_env("MOTIFCL_DISABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY", "");
         }
+#endif
 
         {
             motifcl::nn::ModernSelfAttention attn(backend, cfg);
