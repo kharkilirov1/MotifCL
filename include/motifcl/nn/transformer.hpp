@@ -458,6 +458,9 @@ private:
                                         int layer_index, int64_t token_count);
     Tensor apply_packed_per_layer_input_and_scale(const Tensor& h, const Tensor* packed_per_layer_input,
                                                   int layer_index, int64_t token_count);
+    Tensor forward_with_cache_eager(const Tensor& x, KVCache& cache, int64_t batch_size, int64_t seq_len,
+                                    const Tensor* per_layer_input);
+    Tensor forward_with_cache_replay(const Tensor& x, KVCache& cache, int64_t batch_size, int64_t seq_len);
     Tensor forward_with_cache_packed_per_layer_input_eager(const Tensor& x, KVCache& cache,
                                                            int64_t batch_size, int64_t seq_len,
                                                            const Tensor* packed_per_layer_input,

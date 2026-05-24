@@ -659,6 +659,76 @@ int main() {
         }
 
         {
+            motifcl::nn::TransformerConfig replay_cfg = cfg;
+            replay_cfg.n_embd = 128;
+            replay_cfg.n_head = 4;
+            replay_cfg.n_kv_head = 2;
+            replay_cfg.block_size = 4;
+            replay_cfg.mlp_hidden = 64;
+            replay_cfg.use_qkv_bias = false;
+            replay_cfg.split_qkv_projections = false;
+            replay_cfg.split_mlp_projections = false;
+            motifcl::nn::ModernGPTModel model(backend, replay_cfg);
+            model.enable_quantized_inference(motifcl::DType::Q4_0);
+
+            std::int32_t token_values[2] = {1, 2};
+            auto token_a = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, token_values);
+            auto token_b = motifcl::Tensor::from_cpu(backend, {1, 1}, motifcl::DType::I32, token_values + 1);
+            motifcl::autograd::NoGradGuard no_grad;
+
+            set_test_env("MOTIFCL_ENABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY", "");
+            set_test_env("MOTIFCL_DISABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY", "1");
+            auto eager_cache = model.create_kv_cache(backend, 1);
+            (void)model.forward_with_cache_last_logits(token_a, eager_cache);
+            auto eager_b = model.forward_with_cache_last_logits(token_b, eager_cache).to_vector<float>();
+
+            set_test_env("MOTIFCL_DISABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY", "");
+            set_test_env("MOTIFCL_ENABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY", "1");
+            auto warm_cache = model.create_kv_cache(backend, 1);
+            (void)model.forward_with_cache_last_logits(token_a, warm_cache);
+            (void)model.forward_with_cache_last_logits(token_b, warm_cache);
+            backend.finish();
+
+            auto replay_cache = model.create_kv_cache(backend, 1);
+            (void)model.forward_with_cache_last_logits(token_a, replay_cache);
+            backend.finish();
+            backend.profiler.clear();
+            backend.profiler.set_enabled(true);
+            auto replay_b_tensor = model.forward_with_cache_last_logits(token_b, replay_cache);
+            backend.finish();
+            backend.profiler.set_enabled(false);
+            auto replay_b = replay_b_tensor.to_vector<float>();
+            require_close_vec(replay_b, eager_b, 5e-4f);
+
+            std::size_t packed_qkv_count = 0;
+            std::size_t rope_append_count = 0;
+            std::size_t gqa_decode_count = 0;
+            std::size_t q4_scaled_m1_count = 0;
+            for (const auto& row : backend.profiler.summary()) {
+                if (row.name == "matmul_f32_q4_0_packed_qkv_m1_wg64x4_f32") {
+                    packed_qkv_count += row.count;
+                } else if (row.name == "rope_cache_append_decode_f32") {
+                    rope_append_count += row.count;
+                } else if (row.name == "grouped_query_attention_decode_f32") {
+                    gqa_decode_count += row.count;
+                } else if (row.name == "matmul_f32_q4_0_scaled_m1_wg64x8_f32") {
+                    q4_scaled_m1_count += row.count;
+                }
+            }
+            if (packed_qkv_count != 0 || rope_append_count != 0 || gqa_decode_count != 0 ||
+                q4_scaled_m1_count > 1) {
+                std::cerr << "expected full decode block replay to hide attention front-half launches, got "
+                          << "packed_qkv=" << packed_qkv_count
+                          << " rope_append=" << rope_append_count
+                          << " gqa=" << gqa_decode_count
+                          << " q4_scaled_m1=" << q4_scaled_m1_count << "\n";
+                return 1;
+            }
+            set_test_env("MOTIFCL_ENABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY", "");
+            set_test_env("MOTIFCL_DISABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY", "");
+        }
+
+        {
             motifcl::nn::ModernSelfAttention attn(backend, cfg);
             motifcl::nn::KVCache cache(backend, 1, cfg.block_size, cfg.n_kv_head, cfg.n_embd / cfg.n_head);
             auto x1 = motifcl::Tensor::randn(backend, {1, cfg.n_embd}, 0.02f);

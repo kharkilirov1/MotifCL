@@ -310,6 +310,30 @@ std::mutex g_decode_full_block_graph_mutex;
 std::unordered_map<const ModernTransformerBlock*, std::unordered_map<std::string, DecodeFullBlockGraphCache>>
     g_decode_full_block_graph_cache;
 
+struct DecodePlainFullBlockGraphCache {
+    bool capture_failed = false;
+    bool ready = false;
+    int input_id = 0;
+    int cache_k_id = 0;
+    int cache_v_id = 0;
+    int output_id = 0;
+    Shape input_shape;
+    Shape cache_k_shape;
+    Shape cache_v_shape;
+    Shape output_shape;
+    DType output_dtype = DType::F32;
+    int64_t offset = -1;
+    int64_t batch_size = 0;
+    int64_t seq_len = 0;
+    std::size_t node_count = 0;
+    std::size_t kernel_count = 0;
+    std::unique_ptr<autograd::GraphExecutor> executor;
+};
+
+std::mutex g_decode_plain_full_block_graph_mutex;
+std::unordered_map<const ModernTransformerBlock*, std::unordered_map<std::string, DecodePlainFullBlockGraphCache>>
+    g_decode_plain_full_block_graph_cache;
+
 bool kquant_m1_wg4_enabled() {
     return !env_enabled("MOTIFCL_DISABLE_KQUANT_M1_WG4");
 }
@@ -2528,9 +2552,168 @@ Tensor ModernTransformerBlock::forward_masked(const Tensor& x, const Tensor& mas
 
 Tensor ModernTransformerBlock::forward_with_cache(const Tensor& x, KVCache& cache, int64_t batch_size, int64_t seq_len,
                                                   const Tensor* per_layer_input) {
+    if (per_layer_input == nullptr) {
+        return forward_with_cache_replay(x, cache, batch_size, seq_len);
+    }
+    return forward_with_cache_eager(x, cache, batch_size, seq_len, per_layer_input);
+}
+
+Tensor ModernTransformerBlock::forward_with_cache_eager(const Tensor& x,
+                                                        KVCache& cache,
+                                                        int64_t batch_size,
+                                                        int64_t seq_len,
+                                                        const Tensor* per_layer_input) {
     auto attn_out = attn_.forward_with_cache(norm1_.forward(x), cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
     return finish_after_attention(h, per_layer_input);
+}
+
+Tensor ModernTransformerBlock::forward_with_cache_replay(const Tensor& x,
+                                                         KVCache& kv_cache,
+                                                         int64_t batch_size,
+                                                         int64_t seq_len) {
+    const int64_t offset = kv_cache.length;
+    const bool eligible =
+        decode_full_block_graph_replay_enabled() &&
+        !autograd::is_enabled() &&
+        !autograd::is_graph_capturing() &&
+        !use_per_layer_input_ &&
+        dropout_p_ == 0.0f &&
+        x.valid() &&
+        x.dtype() == DType::F32 &&
+        x.ndim() == 2 &&
+        x.shape()[0] == 1 &&
+        batch_size == 1 &&
+        seq_len == 1 &&
+        kv_cache.k.valid() &&
+        kv_cache.v.valid() &&
+        kv_cache.dtype == DType::F32 &&
+        offset >= 0 &&
+        offset + seq_len <= kv_cache.max_seq_len &&
+        kv_cache.k.backend_ptr() == x.backend_ptr() &&
+        kv_cache.v.backend_ptr() == x.backend_ptr();
+    if (!eligible) {
+        return forward_with_cache_eager(x, kv_cache, batch_size, seq_len, nullptr);
+    }
+
+    const std::string key = std::to_string(offset) + ":" +
+                            std::to_string(batch_size) + ":" + std::to_string(seq_len);
+    std::lock_guard<std::mutex> lock(g_decode_plain_full_block_graph_mutex);
+    auto& by_key = g_decode_plain_full_block_graph_cache[this];
+    auto& cache = by_key[key];
+    const bool cache_matches =
+        cache.ready &&
+        cache.executor &&
+        cache.offset == offset &&
+        cache.batch_size == batch_size &&
+        cache.seq_len == seq_len &&
+        cache.input_shape == x.shape() &&
+        cache.cache_k_shape == kv_cache.k.shape() &&
+        cache.cache_v_shape == kv_cache.v.shape();
+    if (cache_matches) {
+        Tensor out = Tensor::empty(x.backend(), cache.output_shape, cache.output_dtype);
+        try {
+            cache.executor->clear_bindings();
+            cache.executor->bind_tensor(cache.input_id, x);
+            cache.executor->bind_tensor(cache.cache_k_id, kv_cache.k);
+            cache.executor->bind_tensor(cache.cache_v_id, kv_cache.v);
+            cache.executor->bind_tensor(cache.output_id, out);
+            cache.executor->execute();
+            kv_cache.length = offset + seq_len;
+            return out;
+        } catch (const std::exception& e) {
+            kv_cache.length = offset;
+            cache.capture_failed = true;
+            cache.ready = false;
+            cache.executor.reset();
+            if (decode_block_graph_replay_log_enabled()) {
+                std::fprintf(stderr,
+                             "[motifcl] plain full decode block replay disabled offset=%lld after failure: %s\n",
+                             static_cast<long long>(offset),
+                             e.what());
+            }
+            return forward_with_cache_eager(x, kv_cache, batch_size, seq_len, nullptr);
+        }
+    }
+    if (cache.capture_failed) {
+        return forward_with_cache_eager(x, kv_cache, batch_size, seq_len, nullptr);
+    }
+
+    autograd::GraphCaptureGuard guard;
+    autograd::register_tensor(x.id(), x.shape(), x.dtype(), x.nbytes(), x.buffer().raw());
+    autograd::register_tensor(kv_cache.k.id(), kv_cache.k.shape(), kv_cache.k.dtype(), kv_cache.k.nbytes(),
+                              kv_cache.k.buffer().raw());
+    autograd::register_tensor(kv_cache.v.id(), kv_cache.v.shape(), kv_cache.v.dtype(), kv_cache.v.nbytes(),
+                              kv_cache.v.buffer().raw());
+    Tensor out = forward_with_cache_eager(x, kv_cache, batch_size, seq_len, nullptr);
+    auto graph = guard.finish();
+
+    const bool usable_graph =
+        !graph.empty() &&
+        graph.replayable() &&
+        graph.rebindable() &&
+        graph.tensor_specs().find(x.id()) != graph.tensor_specs().end() &&
+        graph.tensor_specs().find(kv_cache.k.id()) != graph.tensor_specs().end() &&
+        graph.tensor_specs().find(kv_cache.v.id()) != graph.tensor_specs().end() &&
+        graph.tensor_specs().find(out.id()) != graph.tensor_specs().end();
+    if (!usable_graph) {
+        cache.capture_failed = true;
+        if (decode_block_graph_replay_log_enabled()) {
+            std::fprintf(stderr,
+                         "[motifcl] plain full decode block graph unavailable offset=%lld nodes=%zu replayable=%d rebindable=%d\n",
+                         static_cast<long long>(offset),
+                         graph.size(),
+                         graph.replayable() ? 1 : 0,
+                         graph.rebindable() ? 1 : 0);
+        }
+        return out;
+    }
+
+    std::size_t kernel_count = 0;
+    for (const auto& node : graph.nodes()) kernel_count += node.kernel_launches().size();
+
+    try {
+        autograd::GraphOptimizeOptions options;
+        options.enable_buffer_reuse = true;
+        auto executor = std::make_unique<autograd::GraphExecutor>(std::move(graph), options);
+        cache.input_id = x.id();
+        cache.cache_k_id = kv_cache.k.id();
+        cache.cache_v_id = kv_cache.v.id();
+        cache.output_id = out.id();
+        cache.input_shape = x.shape();
+        cache.cache_k_shape = kv_cache.k.shape();
+        cache.cache_v_shape = kv_cache.v.shape();
+        cache.output_shape = out.shape();
+        cache.output_dtype = out.dtype();
+        cache.offset = offset;
+        cache.batch_size = batch_size;
+        cache.seq_len = seq_len;
+        cache.node_count = executor->graph().size();
+        cache.kernel_count = kernel_count;
+        cache.executor = std::move(executor);
+        cache.ready = true;
+        cache.capture_failed = false;
+        if (decode_block_graph_replay_log_enabled()) {
+            std::fprintf(stderr,
+                         "[motifcl] captured plain full decode block graph offset=%lld nodes=%zu kernels=%zu mode=%s arena=%zu\n",
+                         static_cast<long long>(offset),
+                         cache.node_count,
+                         cache.kernel_count,
+                         cache.executor->execution_mode().c_str(),
+                         cache.executor->arena_bytes());
+        }
+    } catch (const std::exception& e) {
+        cache.capture_failed = true;
+        cache.ready = false;
+        cache.executor.reset();
+        if (decode_block_graph_replay_log_enabled()) {
+            std::fprintf(stderr,
+                         "[motifcl] plain full decode block graph capture failed offset=%lld: %s\n",
+                         static_cast<long long>(offset),
+                         e.what());
+        }
+    }
+    return out;
 }
 
 Tensor ModernTransformerBlock::forward_with_shared_kv_cache(const Tensor& x,
