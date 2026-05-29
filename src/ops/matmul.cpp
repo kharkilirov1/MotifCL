@@ -9,6 +9,7 @@
 #include <motifcl/runtime/native_matmul.hpp>
 #include <motifcl/runtime/vulkan_backend.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
@@ -19,6 +20,12 @@
 namespace motifcl {
 
 namespace {
+
+// Programmatic override for the Q4_0 M1 wg64x8 kernel selection so tests can flip the kernel
+// path without mutating the process environment at runtime. setenv/unsetenv reallocate the
+// global environ array and race POCL worker threads that call getenv() during kernel build,
+// which produced intermittent segfaults. -1 follows the env default, 0 forces off, 1 forces on.
+std::atomic<int> g_q4_0_m1_wg64x8_override{-1};
 
 std::size_t round_up(std::size_t x, std::size_t multiple) {
     return ((x + multiple - 1) / multiple) * multiple;
@@ -197,6 +204,8 @@ bool enable_q4_0_m1_wg64x4() {
 }
 
 bool enable_q4_0_m1_wg64x8() {
+    const int override_state = g_q4_0_m1_wg64x8_override.load(std::memory_order_relaxed);
+    if (override_state >= 0) return override_state != 0;
     const char* disabled = std::getenv("MOTIFCL_DISABLE_Q4_0_M1_WG64X8");
     return !(disabled && *disabled && std::string(disabled) != "0" &&
              std::string(disabled) != "false" && std::string(disabled) != "FALSE");
@@ -1241,6 +1250,10 @@ Tensor matmul_f16_accum_f32(const Tensor& a, const Tensor& b) {
     k.launch2d(round_up(static_cast<std::size_t>(N), 16), round_up(static_cast<std::size_t>(M), 16), 16, 16);
     autograd::record_op(kernel_name, {a.id(), b.id()}, {out.id()});
     return out;
+}
+
+void set_q4_0_m1_wg64x8_override(int state) {
+    g_q4_0_m1_wg64x8_override.store(state, std::memory_order_relaxed);
 }
 
 } // namespace motifcl

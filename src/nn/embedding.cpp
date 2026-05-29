@@ -41,7 +41,10 @@ Tensor position_embedding_backward(const Tensor& grad_out, const Shape& position
     const int embed_dim = static_cast<int>(position_shape[1]);
     MCL_CHECK(position_shape[0] >= seq_len, "position_embedding_backward position table shorter than sequence");
     MCL_CHECK(grad_out.numel() == batch * seq_len * embed_dim, "position_embedding_backward grad_out shape mismatch");
-    auto out = Tensor::empty(grad_out.backend(), position_shape, DType::F32);
+    // The kernel only writes the first seq_len rows; positions seq_len..rows-1 receive no
+    // gradient, so zero-initialize the full table to keep those rows finite (Tensor::empty
+    // would leave them uninitialized and intermittently non-finite on some drivers).
+    auto out = Tensor::zeros(grad_out.backend(), position_shape, DType::F32);
     auto k = grad_out.backend().kernels.get("position_embedding_backward_f32_i32");
     int n = static_cast<int>(seq_len * embed_dim);
     k.set_arg(0, grad_out.buffer());
