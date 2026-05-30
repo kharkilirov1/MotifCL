@@ -155,6 +155,8 @@ TransformerConfig normalize_config(TransformerConfig cfg) {
         cfg.head_dim = cfg.n_embd / cfg.n_head;
     }
     MCL_CHECK(cfg.head_dim > 0, "TransformerConfig head_dim must be positive");
+    if (cfg.v_head_dim <= 0) cfg.v_head_dim = cfg.head_dim;
+    MCL_CHECK(cfg.v_head_dim > 0, "TransformerConfig v_head_dim must be positive");
     if (!cfg.layer_head_dims.empty()) {
         MCL_CHECK(static_cast<int>(cfg.layer_head_dims.size()) == cfg.n_layer,
                   "TransformerConfig layer_head_dims must match n_layer");
@@ -1647,7 +1649,8 @@ ModernSelfAttention::ModernSelfAttention(Backend& backend, const TransformerConf
     : qkv_proj_(backend,
                 normalize_config(raw_config).n_embd,
                 normalize_config(raw_config).n_head * normalize_config(raw_config).head_dim +
-                    2 * normalize_config(raw_config).n_kv_head * normalize_config(raw_config).head_dim,
+                    normalize_config(raw_config).n_kv_head * normalize_config(raw_config).head_dim +
+                    normalize_config(raw_config).n_kv_head * normalize_config(raw_config).v_head_dim,
                 normalize_config(raw_config).use_qkv_bias,
                 normalize_config(raw_config).skip_weight_init),
       q_proj_(backend,
@@ -1662,24 +1665,26 @@ ModernSelfAttention::ModernSelfAttention(Backend& backend, const TransformerConf
               normalize_config(raw_config).skip_weight_init),
       v_proj_(backend,
               normalize_config(raw_config).n_embd,
-              normalize_config(raw_config).n_kv_head * normalize_config(raw_config).head_dim,
+              normalize_config(raw_config).n_kv_head * normalize_config(raw_config).v_head_dim,
               normalize_config(raw_config).use_qkv_bias,
               normalize_config(raw_config).skip_weight_init),
       o_proj_(backend,
-              normalize_config(raw_config).n_head * normalize_config(raw_config).head_dim,
+              normalize_config(raw_config).n_head * normalize_config(raw_config).v_head_dim,
               normalize_config(raw_config).n_embd,
               normalize_config(raw_config).use_qkv_bias,
               normalize_config(raw_config).skip_weight_init),
       q_norm_(backend, normalize_config(raw_config).head_dim, normalize_config(raw_config).rms_norm_eps),
       k_norm_(backend, normalize_config(raw_config).head_dim, normalize_config(raw_config).rms_norm_eps),
-      v_norm_(backend, normalize_config(raw_config).head_dim, normalize_config(raw_config).rms_norm_eps) {
+      v_norm_(backend, normalize_config(raw_config).v_head_dim, normalize_config(raw_config).rms_norm_eps) {
     const auto cfg = normalize_config(raw_config);
     n_embd_ = cfg.n_embd;
     n_head_ = cfg.n_head;
     n_kv_head_ = cfg.n_kv_head;
     head_dim_ = cfg.head_dim;
+    v_head_dim_ = cfg.v_head_dim;
     q_dim_ = cfg.n_head * head_dim_;
     kv_dim_ = cfg.n_kv_head * head_dim_;
+    v_dim_ = cfg.n_kv_head * v_head_dim_;
     use_rope_ = cfg.use_rope;
     rope_split_half_ = cfg.rope_split_half;
     rope_theta_ = cfg.rope_theta;
@@ -1702,11 +1707,11 @@ QKV ModernSelfAttention::project_qkv(const Tensor& x) {
         }
         return {q_proj_.forward(x), k_proj_.forward(x), v_proj_.forward(x)};
     }
-    if (can_use_fused_packed_qkv_q4_0_decode(x, qkv_proj_, q_dim_, kv_dim_)) {
+    if (v_dim_ == kv_dim_ && can_use_fused_packed_qkv_q4_0_decode(x, qkv_proj_, q_dim_, kv_dim_)) {
         return fused_packed_qkv_q4_0_decode(x, qkv_proj_, q_dim_, kv_dim_);
     }
     auto packed = qkv_proj_.forward(x);
-    return motifcl::qkv_split(packed, q_dim_, kv_dim_);
+    return motifcl::qkv_split(packed, q_dim_, kv_dim_, v_dim_);
 }
 
 Tensor ModernSelfAttention::apply_rope(const Tensor& x, int n_head, int64_t batch_size,
@@ -1746,7 +1751,7 @@ void apply_v_norm_if_enabled(ModernSelfAttention& self, Tensor& v) {
     if (!self.v_norm_enabled()) return;
     const auto rows = v.shape()[0];
     const auto v_shape = v.shape();
-    v = self.v_norm().forward(v.view({rows * self.n_kv_head(), self.head_dim()})).view(v_shape);
+    v = self.v_norm().forward(v.view({rows * self.n_kv_head(), self.v_head_dim()})).view(v_shape);
 }
 
 bool can_use_fused_qk_norm_rope_decode(const Tensor& q,

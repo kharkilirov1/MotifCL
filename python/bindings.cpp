@@ -275,8 +275,12 @@ PYBIND11_MODULE(_motifcl, m) {
     m.def("multihead_attention", &motifcl::multihead_attention,
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("n_head"),
           py::arg("causal") = false, py::arg("batch_size") = 1, py::arg("seq_len") = 0);
-    m.def("qkv_split", &motifcl::qkv_split,
+    m.def("qkv_split",
+          static_cast<motifcl::QKV (*)(const motifcl::Tensor&, int64_t, int64_t)>(&motifcl::qkv_split),
           py::arg("packed"), py::arg("q_dim"), py::arg("kv_dim"));
+    m.def("qkv_split",
+          static_cast<motifcl::QKV (*)(const motifcl::Tensor&, int64_t, int64_t, int64_t)>(&motifcl::qkv_split),
+          py::arg("packed"), py::arg("q_dim"), py::arg("k_dim"), py::arg("v_dim"));
     m.def("rope", &motifcl::rope,
           py::arg("x"), py::arg("n_head"), py::arg("batch_size"), py::arg("seq_len"),
           py::arg("theta") = 10000.0f, py::arg("rotary_dim") = 0, py::arg("token_offset") = 0);
@@ -416,6 +420,7 @@ PYBIND11_MODULE(_motifcl, m) {
         .def_readwrite("n_head", &motifcl::nn::TransformerConfig::n_head)
         .def_readwrite("n_kv_head", &motifcl::nn::TransformerConfig::n_kv_head)
         .def_readwrite("head_dim", &motifcl::nn::TransformerConfig::head_dim)
+        .def_readwrite("v_head_dim", &motifcl::nn::TransformerConfig::v_head_dim)
         .def_readwrite("n_layer", &motifcl::nn::TransformerConfig::n_layer)
         .def_readwrite("mlp_hidden", &motifcl::nn::TransformerConfig::mlp_hidden)
         .def_readwrite("dropout", &motifcl::nn::TransformerConfig::dropout)
@@ -543,6 +548,7 @@ PYBIND11_MODULE(_motifcl, m) {
         .def("n_head", &motifcl::nn::ModernSelfAttention::n_head)
         .def("n_kv_head", &motifcl::nn::ModernSelfAttention::n_kv_head)
         .def("head_dim", &motifcl::nn::ModernSelfAttention::head_dim)
+        .def("v_head_dim", &motifcl::nn::ModernSelfAttention::v_head_dim)
         .def("enable_quantized_inference", &motifcl::nn::ModernSelfAttention::enable_quantized_inference,
              py::arg("qdtype") = motifcl::DType::Q4_0)
         .def("disable_quantized_inference", &motifcl::nn::ModernSelfAttention::disable_quantized_inference)

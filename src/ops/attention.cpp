@@ -246,8 +246,11 @@ struct GroupedAttentionShape {
     int64_t n_head = 0;
     int64_t n_kv_head = 0;
     int64_t head_dim = 0;
+    int64_t v_head_dim = 0;
     int64_t q_channels = 0;
-    int64_t kv_channels = 0;
+    int64_t k_channels = 0;
+    int64_t v_channels = 0;
+    int64_t out_channels = 0;
 };
 
 struct AttentionMaskShape {
@@ -307,7 +310,7 @@ GroupedAttentionShape validate_attention_args(const Tensor& q, const Tensor& k, 
                   std::string(op) + " quantized k/v require row-wise scales");
     }
     MCL_CHECK(q.ndim() == 2 && k.ndim() == 2 && v.ndim() == 2, std::string(op) + " expects flattened rank-2 tensors");
-    MCL_CHECK(k.shape() == v.shape(), std::string(op) + " k/v shape mismatch");
+    MCL_CHECK(k.shape()[0] == v.shape()[0], std::string(op) + " k/v row mismatch");
     MCL_CHECK(q.backend_ptr() == k.backend_ptr() && q.backend_ptr() == v.backend_ptr(), std::string(op) + " requires one backend");
     MCL_CHECK(n_head > 0 && n_kv_head > 0 && n_head % n_kv_head == 0, std::string(op) + " requires n_head % n_kv_head == 0");
     MCL_CHECK(batch_size > 0, std::string(op) + " invalid batch size");
@@ -330,14 +333,21 @@ GroupedAttentionShape validate_attention_args(const Tensor& q, const Tensor& k, 
     s.n_head = n_head;
     s.n_kv_head = n_kv_head;
     s.q_channels = q.shape()[1];
-    s.kv_channels = k.shape()[1];
+    s.k_channels = k.shape()[1];
+    s.v_channels = v.shape()[1];
     s.head_dim = s.q_channels / n_head;
-    MCL_CHECK(s.kv_channels / n_kv_head == s.head_dim, std::string(op) + " q/kv head_dim mismatch");
+    MCL_CHECK(s.k_channels % n_kv_head == 0 && s.k_channels / n_kv_head == s.head_dim,
+              std::string(op) + " q/k head_dim mismatch");
+    MCL_CHECK(s.v_channels % n_kv_head == 0, std::string(op) + " v channels/head mismatch");
+    s.v_head_dim = s.v_channels / n_kv_head;
+    MCL_CHECK(s.v_head_dim > 0, std::string(op) + " v_head_dim must be positive");
+    s.out_channels = s.n_head * s.v_head_dim;
     validate_kernel_int64(s.batch, op, "batch");
     validate_kernel_int64(s.query_tokens, op, "query_tokens");
     validate_kernel_int64(s.key_tokens, op, "key_tokens");
     validate_kernel_int64(s.key_stride, op, "key_stride");
     validate_kernel_int64(s.head_dim, op, "head_dim");
+    validate_kernel_int64(s.v_head_dim, op, "v_head_dim");
     if (k.dtype() == DType::Q8_0 || k.dtype() == DType::Q4_0) {
         validate_quant_tensor_args(k, op, "k", k.shape()[0]);
         validate_quant_tensor_args(v, op, "v", v.shape()[0]);
@@ -506,10 +516,11 @@ struct MultiHeadAttentionBackwardNode : autograd::Node {
 struct QKVSplitBackwardNode : autograd::Node {
     Tensor packed;
     int64_t q_dim;
-    int64_t kv_dim;
+    int64_t k_dim;
+    int64_t v_dim;
     int part;
-    QKVSplitBackwardNode(Tensor packed_value, int64_t q_dim_value, int64_t kv_dim_value, int part_value)
-        : packed(std::move(packed_value)), q_dim(q_dim_value), kv_dim(kv_dim_value), part(part_value) {}
+    QKVSplitBackwardNode(Tensor packed_value, int64_t q_dim_value, int64_t k_dim_value, int64_t v_dim_value, int part_value)
+        : packed(std::move(packed_value)), q_dim(q_dim_value), k_dim(k_dim_value), v_dim(v_dim_value), part(part_value) {}
     std::vector<Tensor> inputs() const override { return {packed}; }
     void backward(const Tensor& grad_output) override {
         if (!packed.requires_grad()) return;
@@ -517,14 +528,16 @@ struct QKVSplitBackwardNode : autograd::Node {
         auto kernel = packed.backend().kernels.get("qkv_split_backward_f32");
         const int rows = static_cast<int>(packed.shape()[0]);
         const int q_dim_i = static_cast<int>(q_dim);
-        const int kv_dim_i = static_cast<int>(kv_dim);
-        const int n = rows * (q_dim_i + 2 * kv_dim_i);
+        const int k_dim_i = static_cast<int>(k_dim);
+        const int v_dim_i = static_cast<int>(v_dim);
+        const int n = rows * (q_dim_i + k_dim_i + v_dim_i);
         kernel.set_arg(0, grad_output.buffer());
         kernel.set_arg(1, grad_packed.buffer());
         kernel.set_arg(2, rows);
         kernel.set_arg(3, q_dim_i);
-        kernel.set_arg(4, kv_dim_i);
-        kernel.set_arg(5, part);
+        kernel.set_arg(4, k_dim_i);
+        kernel.set_arg(5, v_dim_i);
+        kernel.set_arg(6, part);
         kernel.launch1d(round_up(static_cast<std::size_t>(n), 256), 256);
         autograd::record_op("qkv_split_backward_f32", {grad_output.id()}, {grad_packed.id()});
         packed.backward(grad_packed);
@@ -662,32 +675,39 @@ Tensor attention_apply(const Tensor& probs, const Tensor& v) {
 }
 
 QKV qkv_split(const Tensor& packed, int64_t q_dim, int64_t kv_dim) {
-    MCL_CHECK(packed.dtype() == DType::F32 && packed.ndim() == 2, "qkv_split expects packed f32 [rows, q+2kv]");
-    MCL_CHECK(q_dim > 0 && kv_dim > 0 && packed.shape()[1] == q_dim + 2 * kv_dim, "qkv_split dimension mismatch");
+    return qkv_split(packed, q_dim, kv_dim, kv_dim);
+}
+
+QKV qkv_split(const Tensor& packed, int64_t q_dim, int64_t k_dim, int64_t v_dim) {
+    MCL_CHECK(packed.dtype() == DType::F32 && packed.ndim() == 2, "qkv_split expects packed f32 [rows, q+k+v]");
+    MCL_CHECK(q_dim > 0 && k_dim > 0 && v_dim > 0 && packed.shape()[1] == q_dim + k_dim + v_dim,
+              "qkv_split dimension mismatch");
     auto q = Tensor::empty(packed.backend(), {packed.shape()[0], q_dim}, DType::F32);
-    auto k_out = Tensor::empty(packed.backend(), {packed.shape()[0], kv_dim}, DType::F32);
-    auto v_out = Tensor::empty(packed.backend(), {packed.shape()[0], kv_dim}, DType::F32);
+    auto k_out = Tensor::empty(packed.backend(), {packed.shape()[0], k_dim}, DType::F32);
+    auto v_out = Tensor::empty(packed.backend(), {packed.shape()[0], v_dim}, DType::F32);
     auto kernel = packed.backend().kernels.get("qkv_split_f32");
     const int rows = static_cast<int>(packed.shape()[0]);
     const int q_dim_i = static_cast<int>(q_dim);
-    const int kv_dim_i = static_cast<int>(kv_dim);
-    const int max_dim = std::max(q_dim_i, kv_dim_i);
+    const int k_dim_i = static_cast<int>(k_dim);
+    const int v_dim_i = static_cast<int>(v_dim);
+    const int max_dim = std::max(q_dim_i, std::max(k_dim_i, v_dim_i));
     kernel.set_arg(0, packed.buffer());
     kernel.set_arg(1, q.buffer());
     kernel.set_arg(2, k_out.buffer());
     kernel.set_arg(3, v_out.buffer());
     kernel.set_arg(4, rows);
     kernel.set_arg(5, q_dim_i);
-    kernel.set_arg(6, kv_dim_i);
+    kernel.set_arg(6, k_dim_i);
+    kernel.set_arg(7, v_dim_i);
     kernel.launch1d(round_up(static_cast<std::size_t>(rows * max_dim), 256), 256);
     autograd::record_op("qkv_split_f32", {packed.id()}, {q.id(), k_out.id(), v_out.id()});
     if (autograd::is_enabled() && packed.requires_grad()) {
         q.set_requires_grad(true);
         k_out.set_requires_grad(true);
         v_out.set_requires_grad(true);
-        q._set_grad_fn(std::make_shared<QKVSplitBackwardNode>(packed, q_dim, kv_dim, 0));
-        k_out._set_grad_fn(std::make_shared<QKVSplitBackwardNode>(packed, q_dim, kv_dim, 1));
-        v_out._set_grad_fn(std::make_shared<QKVSplitBackwardNode>(packed, q_dim, kv_dim, 2));
+        q._set_grad_fn(std::make_shared<QKVSplitBackwardNode>(packed, q_dim, k_dim, v_dim, 0));
+        k_out._set_grad_fn(std::make_shared<QKVSplitBackwardNode>(packed, q_dim, k_dim, v_dim, 1));
+        v_out._set_grad_fn(std::make_shared<QKVSplitBackwardNode>(packed, q_dim, k_dim, v_dim, 2));
     }
     return {q, k_out, v_out};
 }
@@ -997,27 +1017,29 @@ Tensor grouped_query_attention(const Tensor& q, const Tensor& k, const Tensor& v
     require_attention_microkernel();
     auto s = validate_attention_args(q, k, v, n_head, n_kv_head, batch_size, query_len, key_len, "grouped_query_attention");
     const float scale_value = attention_scale_or_default(scale_override, s.head_dim);
+    const bool split_value_dim = s.v_head_dim != s.head_dim;
     if (k.dtype() != DType::F32) {
+        MCL_CHECK(!split_value_dim, "grouped_query_attention quantized k/v requires v_head_dim == head_dim");
         return grouped_query_attention_quantized(q, k, v, n_head, n_kv_head, 0,
                                                  causal, s, query_offset, scale_value);
     }
-    if (scale_override <= 0.0f && n_head == n_kv_head && s.query_tokens == s.key_tokens &&
+    if (!split_value_dim && scale_override <= 0.0f && n_head == n_kv_head && s.query_tokens == s.key_tokens &&
         s.key_stride == s.key_tokens && query_offset == 0) {
         return multihead_attention(q, k, v, n_head, causal, batch_size, s.query_tokens);
     }
     const bool needs_grad = autograd::is_enabled() && (q.requires_grad() || k.requires_grad() || v.requires_grad());
-    if (!needs_grad && can_use_grouped_query_decode_wg(q.backend(), s.query_tokens, s.key_tokens, causal)) {
+    if (!split_value_dim && !needs_grad && can_use_grouped_query_decode_wg(q.backend(), s.query_tokens, s.key_tokens, causal)) {
         return grouped_query_attention_decode_wg(q, k, v, n_head, n_kv_head, 0,
                                                  s.batch, s.key_tokens, s.key_stride,
                                                  query_offset, s.head_dim, scale_value);
     }
-    if (!needs_grad && can_use_grouped_query_prefill_wg(q.backend(), s.query_tokens, s.key_tokens, 0, causal)) {
+    if (!split_value_dim && !needs_grad && can_use_grouped_query_prefill_wg(q.backend(), s.query_tokens, s.key_tokens, 0, causal)) {
         return grouped_query_attention_prefill_wg(q, k, v, n_head, n_kv_head, 0,
                                                   causal,
                                                   s.batch, s.query_tokens, s.key_tokens,
                                                   s.key_stride, query_offset, s.head_dim, scale_value);
     }
-    auto out = Tensor::empty(q.backend(), q.shape(), DType::F32);
+    auto out = Tensor::empty(q.backend(), {s.batch * s.query_tokens, s.out_channels}, DType::F32);
     auto kernel = q.backend().kernels.get("grouped_query_attention_f32");
     kernel.set_arg(0, q.buffer());
     kernel.set_arg(1, k.buffer());
@@ -1029,10 +1051,11 @@ Tensor grouped_query_attention(const Tensor& q, const Tensor& k, const Tensor& v
     kernel.set_arg(7, n_head);
     kernel.set_arg(8, n_kv_head);
     kernel.set_arg(9, static_cast<int>(s.head_dim));
-    kernel.set_arg(10, causal ? 1 : 0);
-    kernel.set_arg(11, static_cast<int>(query_offset));
-    kernel.set_arg(12, static_cast<int>(s.key_stride));
-    kernel.set_arg(13, scale_value);
+    kernel.set_arg(10, static_cast<int>(s.v_head_dim));
+    kernel.set_arg(11, causal ? 1 : 0);
+    kernel.set_arg(12, static_cast<int>(query_offset));
+    kernel.set_arg(13, static_cast<int>(s.key_stride));
+    kernel.set_arg(14, scale_value);
     kernel.launch1d(round_up(static_cast<std::size_t>(out.numel()), 256), 256);
     autograd::record_op("grouped_query_attention_f32", {q.id(), k.id(), v.id()}, {out.id()});
     if (autograd::is_enabled() && (q.requires_grad() || k.requires_grad() || v.requires_grad())) {
@@ -1054,25 +1077,27 @@ Tensor grouped_query_attention_windowed(const Tensor& q, const Tensor& k, const 
     require_attention_microkernel();
     MCL_CHECK(sliding_window > 0, "grouped_query_attention_windowed expects positive sliding_window");
     auto s = validate_attention_args(q, k, v, n_head, n_kv_head, batch_size, query_len, key_len,
-                                        "grouped_query_attention_windowed");
+                                         "grouped_query_attention_windowed");
     const float scale_value = attention_scale_or_default(scale_override, s.head_dim);
+    const bool split_value_dim = s.v_head_dim != s.head_dim;
     if (k.dtype() != DType::F32) {
+        MCL_CHECK(!split_value_dim, "grouped_query_attention_windowed quantized k/v requires v_head_dim == head_dim");
         return grouped_query_attention_quantized(q, k, v, n_head, n_kv_head, sliding_window,
                                                  causal, s, query_offset, scale_value);
     }
     const bool needs_grad = autograd::is_enabled() && (q.requires_grad() || k.requires_grad() || v.requires_grad());
-    if (!needs_grad && can_use_grouped_query_decode_wg(q.backend(), s.query_tokens, s.key_tokens, causal)) {
+    if (!split_value_dim && !needs_grad && can_use_grouped_query_decode_wg(q.backend(), s.query_tokens, s.key_tokens, causal)) {
         return grouped_query_attention_decode_wg(q, k, v, n_head, n_kv_head, sliding_window,
                                                  s.batch, s.key_tokens, s.key_stride,
                                                  query_offset, s.head_dim, scale_value);
     }
-    if (!needs_grad && can_use_grouped_query_prefill_wg(q.backend(), s.query_tokens, s.key_tokens, sliding_window, causal)) {
+    if (!split_value_dim && !needs_grad && can_use_grouped_query_prefill_wg(q.backend(), s.query_tokens, s.key_tokens, sliding_window, causal)) {
         return grouped_query_attention_prefill_wg(q, k, v, n_head, n_kv_head, sliding_window,
                                                   causal,
                                                   s.batch, s.query_tokens, s.key_tokens,
                                                   s.key_stride, query_offset, s.head_dim, scale_value);
     }
-    auto out = Tensor::empty(q.backend(), q.shape(), DType::F32);
+    auto out = Tensor::empty(q.backend(), {s.batch * s.query_tokens, s.out_channels}, DType::F32);
     auto kernel = q.backend().kernels.get("grouped_query_attention_windowed_f32");
     kernel.set_arg(0, q.buffer());
     kernel.set_arg(1, k.buffer());
@@ -1084,11 +1109,12 @@ Tensor grouped_query_attention_windowed(const Tensor& q, const Tensor& k, const 
     kernel.set_arg(7, n_head);
     kernel.set_arg(8, n_kv_head);
     kernel.set_arg(9, static_cast<int>(s.head_dim));
-    kernel.set_arg(10, causal ? 1 : 0);
-    kernel.set_arg(11, static_cast<int>(query_offset));
-    kernel.set_arg(12, sliding_window);
-    kernel.set_arg(13, static_cast<int>(s.key_stride));
-    kernel.set_arg(14, scale_value);
+    kernel.set_arg(10, static_cast<int>(s.v_head_dim));
+    kernel.set_arg(11, causal ? 1 : 0);
+    kernel.set_arg(12, static_cast<int>(query_offset));
+    kernel.set_arg(13, sliding_window);
+    kernel.set_arg(14, static_cast<int>(s.key_stride));
+    kernel.set_arg(15, scale_value);
     kernel.launch1d(round_up(static_cast<std::size_t>(out.numel()), 256), 256);
     autograd::record_op("grouped_query_attention_windowed_f32", {q.id(), k.id(), v.id()}, {out.id()});
     return out;
@@ -1106,7 +1132,7 @@ Tensor grouped_query_attention_masked(const Tensor& q, const Tensor& k, const Te
               "grouped_query_attention_masked does not support quantized KV cache yet");
     MCL_CHECK(mask.backend_ptr() == q.backend_ptr(), "grouped_query_attention_masked mask must share backend with q/k/v");
     auto mask_info = validate_attention_mask(mask, s.batch, s.query_tokens, s.key_tokens, additive_mask, "grouped_query_attention_masked");
-    auto out = Tensor::empty(q.backend(), q.shape(), DType::F32);
+    auto out = Tensor::empty(q.backend(), {s.batch * s.query_tokens, s.out_channels}, DType::F32);
     auto kernel = q.backend().kernels.get("grouped_query_attention_mask_" + mask_info.suffix);
     const float scale_value = attention_scale_or_default(scale_override, s.head_dim);
     kernel.set_arg(0, q.buffer());
@@ -1120,12 +1146,13 @@ Tensor grouped_query_attention_masked(const Tensor& q, const Tensor& k, const Te
     kernel.set_arg(8, n_head);
     kernel.set_arg(9, n_kv_head);
     kernel.set_arg(10, static_cast<int>(s.head_dim));
-    kernel.set_arg(11, causal ? 1 : 0);
-    kernel.set_arg(12, static_cast<int>(query_offset));
-    kernel.set_arg(13, mask_info.layout);
-    kernel.set_arg(14, mask_info.mode);
-    kernel.set_arg(15, static_cast<int>(s.key_stride));
-    kernel.set_arg(16, scale_value);
+    kernel.set_arg(11, static_cast<int>(s.v_head_dim));
+    kernel.set_arg(12, causal ? 1 : 0);
+    kernel.set_arg(13, static_cast<int>(query_offset));
+    kernel.set_arg(14, mask_info.layout);
+    kernel.set_arg(15, mask_info.mode);
+    kernel.set_arg(16, static_cast<int>(s.key_stride));
+    kernel.set_arg(17, scale_value);
     kernel.launch1d(round_up(static_cast<std::size_t>(out.numel()), 256), 256);
     autograd::record_op("grouped_query_attention_mask_" + mask_info.suffix, {q.id(), k.id(), v.id(), mask.id()}, {out.id()});
     if (autograd::is_enabled() && (q.requires_grad() || k.requires_grad() || v.requires_grad())) {
@@ -1296,7 +1323,7 @@ Tensor paged_grouped_query_attention(const Tensor& q, const Tensor& k_pages, con
               "paged_grouped_query_attention expects i32 page table [B,pages]");
     MCL_CHECK(q.ndim() == 2 && k_pages.ndim() == 2 && v_pages.ndim() == 2,
               "paged_grouped_query_attention expects flattened rank-2 tensors");
-    MCL_CHECK(k_pages.shape() == v_pages.shape(), "paged_grouped_query_attention k/v page shape mismatch");
+    MCL_CHECK(k_pages.shape()[0] == v_pages.shape()[0], "paged_grouped_query_attention k/v page row mismatch");
     MCL_CHECK(q.backend_ptr() == k_pages.backend_ptr() && q.backend_ptr() == v_pages.backend_ptr() &&
               q.backend_ptr() == page_table.backend_ptr(),
               "paged_grouped_query_attention requires one backend");
@@ -1307,8 +1334,12 @@ Tensor paged_grouped_query_attention(const Tensor& q, const Tensor& k_pages, con
     const int64_t q_channels = q.shape()[1];
     MCL_CHECK(q_channels % n_head == 0, "paged_grouped_query_attention q channels/head mismatch");
     const int64_t head_dim = q_channels / n_head;
-    const int64_t kv_channels = static_cast<int64_t>(n_kv_head) * head_dim;
-    MCL_CHECK(k_pages.shape()[1] == kv_channels, "paged_grouped_query_attention kv channels mismatch");
+    const int64_t k_channels = static_cast<int64_t>(n_kv_head) * head_dim;
+    MCL_CHECK(k_pages.shape()[1] == k_channels, "paged_grouped_query_attention k channels mismatch");
+    MCL_CHECK(v_pages.shape()[1] % n_kv_head == 0, "paged_grouped_query_attention v channels/head mismatch");
+    const int64_t v_head_dim = v_pages.shape()[1] / n_kv_head;
+    const int64_t out_channels = static_cast<int64_t>(n_head) * v_head_dim;
+    MCL_CHECK(v_head_dim > 0, "paged_grouped_query_attention v_head_dim must be positive");
     MCL_CHECK(query_len <= std::numeric_limits<int64_t>::max() / batch_size,
               "paged_grouped_query_attention q shape overflow");
     MCL_CHECK(q.shape()[0] == batch_size * query_len, "paged_grouped_query_attention q shape mismatch");
@@ -1317,7 +1348,8 @@ Tensor paged_grouped_query_attention(const Tensor& q, const Tensor& k_pages, con
     const int64_t max_paged_tokens = page_count * page_size;
     MCL_CHECK(batch_size <= std::numeric_limits<int64_t>::max() / max_paged_tokens,
               "paged_grouped_query_attention page tensor shape overflow");
-    MCL_CHECK(k_pages.shape()[0] == batch_size * page_count * page_size,
+    MCL_CHECK(k_pages.shape()[0] == batch_size * page_count * page_size &&
+                  v_pages.shape()[0] == batch_size * page_count * page_size,
               "paged_grouped_query_attention page tensor shape mismatch");
     MCL_CHECK(page_table.shape()[0] == batch_size && page_table.shape()[1] == page_count,
               "paged_grouped_query_attention page table shape mismatch");
@@ -1340,13 +1372,15 @@ Tensor paged_grouped_query_attention(const Tensor& q, const Tensor& k_pages, con
     validate_kernel_int64(page_size, "paged_grouped_query_attention", "page_size");
     validate_kernel_int64(page_count, "paged_grouped_query_attention", "page_count");
     validate_kernel_int64(head_dim, "paged_grouped_query_attention", "head_dim");
+    validate_kernel_int64(v_head_dim, "paged_grouped_query_attention", "v_head_dim");
     if (k_pages.dtype() == DType::Q8_0 || k_pages.dtype() == DType::Q4_0) {
         validate_quant_tensor_args(k_pages, "paged_grouped_query_attention", "k_pages", k_pages.shape()[0]);
         validate_quant_tensor_args(v_pages, "paged_grouped_query_attention", "v_pages", v_pages.shape()[0]);
     }
     const float scale_value = attention_scale_or_default(scale_override, head_dim);
+    const bool split_value_dim = v_head_dim != head_dim;
     const bool needs_grad = autograd::is_enabled() && (q.requires_grad() || k_pages.requires_grad() || v_pages.requires_grad());
-    if (k_pages.dtype() == DType::F32 && !needs_grad &&
+    if (!split_value_dim && k_pages.dtype() == DType::F32 && !needs_grad &&
         can_use_grouped_query_prefill_wg(q.backend(), query_len, key_len, sliding_window, causal)) {
         return paged_grouped_query_attention_prefill_wg(q, k_pages, v_pages, page_table,
                                                         n_head, n_kv_head, sliding_window, causal,
@@ -1354,8 +1388,9 @@ Tensor paged_grouped_query_attention(const Tensor& q, const Tensor& k_pages, con
                                                         query_abs_start, key_abs_start,
                                                         page_size, page_count, head_dim, scale_value);
     }
-    auto out = Tensor::empty(q.backend(), q.shape(), DType::F32);
+    auto out = Tensor::empty(q.backend(), {batch_size * query_len, out_channels}, DType::F32);
     if (k_pages.dtype() != DType::F32) {
+        MCL_CHECK(!split_value_dim, "paged_grouped_query_attention quantized pages require v_head_dim == head_dim");
         auto kernel = q.backend().kernels.get(k_pages.dtype() == DType::Q8_0
             ? "paged_grouped_query_attention_q8_0_f32"
             : "paged_grouped_query_attention_q4_0_f32");
@@ -1401,13 +1436,14 @@ Tensor paged_grouped_query_attention(const Tensor& q, const Tensor& k_pages, con
     kernel.set_arg(8, n_head);
     kernel.set_arg(9, n_kv_head);
     kernel.set_arg(10, static_cast<int>(head_dim));
-    kernel.set_arg(11, causal ? 1 : 0);
-    kernel.set_arg(12, static_cast<int>(query_abs_start));
-    kernel.set_arg(13, static_cast<int>(key_abs_start));
-    kernel.set_arg(14, static_cast<int>(page_size));
-    kernel.set_arg(15, static_cast<int>(page_count));
-    kernel.set_arg(16, sliding_window);
-    kernel.set_arg(17, scale_value);
+    kernel.set_arg(11, static_cast<int>(v_head_dim));
+    kernel.set_arg(12, causal ? 1 : 0);
+    kernel.set_arg(13, static_cast<int>(query_abs_start));
+    kernel.set_arg(14, static_cast<int>(key_abs_start));
+    kernel.set_arg(15, static_cast<int>(page_size));
+    kernel.set_arg(16, static_cast<int>(page_count));
+    kernel.set_arg(17, sliding_window);
+    kernel.set_arg(18, scale_value);
     kernel.launch1d(round_up(static_cast<std::size_t>(out.numel()), 256), 256);
     autograd::record_op("paged_grouped_query_attention_f32", {q.id(), k_pages.id(), v_pages.id(), page_table.id()}, {out.id()});
     return out;
@@ -1948,10 +1984,13 @@ MultiHeadAttentionGradients grouped_query_attention_backward_fused(const Tensor&
                                                                    int64_t key_len, int64_t query_offset) {
     require_attention_microkernel();
     auto s = validate_attention_args(q, k, v, n_head, n_kv_head, batch_size, query_len, key_len, "grouped_query_attention_backward");
-    MCL_CHECK(grad_out.dtype() == DType::F32 && grad_out.shape() == q.shape(), "grouped_query_attention_backward grad_out mismatch");
+    MCL_CHECK(grad_out.dtype() == DType::F32 && grad_out.ndim() == 2 &&
+                   grad_out.shape()[0] == s.batch * s.query_tokens &&
+                   grad_out.shape()[1] == s.out_channels,
+              "grouped_query_attention_backward grad_out mismatch");
     MCL_CHECK(k.dtype() == DType::F32 && v.dtype() == DType::F32,
               "grouped_query_attention_backward supports f32 k/v only; quantized KV backward is not implemented");
-    if (supports_staged_grouped_attention_backward_kernel(q.backend(), s)) {
+    if (s.v_head_dim == s.head_dim && supports_staged_grouped_attention_backward_kernel(q.backend(), s)) {
         return grouped_query_attention_backward_staged(q, k, v, grad_out, n_head, n_kv_head,
                                                        causal, query_offset, s);
     }
@@ -1974,9 +2013,11 @@ MultiHeadAttentionGradients grouped_query_attention_backward_fused(const Tensor&
     kernel.set_arg(10, n_head);
     kernel.set_arg(11, n_kv_head);
     kernel.set_arg(12, static_cast<int>(s.head_dim));
-    kernel.set_arg(13, causal ? 1 : 0);
-    kernel.set_arg(14, static_cast<int>(query_offset));
-    kernel.set_arg(15, scale_value);
+    kernel.set_arg(13, static_cast<int>(s.v_head_dim));
+    kernel.set_arg(14, causal ? 1 : 0);
+    kernel.set_arg(15, static_cast<int>(query_offset));
+    kernel.set_arg(16, static_cast<int>(s.key_stride));
+    kernel.set_arg(17, scale_value);
     kernel.launch1d(round_up(total, 256), 256);
     autograd::record_op("grouped_query_attention_backward_f32", {q.id(), k.id(), v.id(), grad_out.id()}, {dq.id(), dk.id(), dv.id()});
     return {dq, dk, dv};
@@ -1990,12 +2031,15 @@ MultiHeadAttentionGradients grouped_query_attention_backward_masked_fused(const 
                                                                           bool additive_mask) {
     require_attention_microkernel();
     auto s = validate_attention_args(q, k, v, n_head, n_kv_head, batch_size, query_len, key_len, "grouped_query_attention_backward_masked");
-    MCL_CHECK(grad_out.dtype() == DType::F32 && grad_out.shape() == q.shape(), "grouped_query_attention_backward_masked grad_out mismatch");
+    MCL_CHECK(grad_out.dtype() == DType::F32 && grad_out.ndim() == 2 &&
+                  grad_out.shape()[0] == s.batch * s.query_tokens &&
+                  grad_out.shape()[1] == s.out_channels,
+              "grouped_query_attention_backward_masked grad_out mismatch");
     MCL_CHECK(k.dtype() == DType::F32 && v.dtype() == DType::F32,
               "grouped_query_attention_backward_masked supports f32 k/v only; quantized KV backward is not implemented");
     MCL_CHECK(mask.backend_ptr() == q.backend_ptr(), "grouped_query_attention_backward_masked mask must share backend");
     auto mask_info = validate_attention_mask(mask, s.batch, s.query_tokens, s.key_tokens, additive_mask, "grouped_query_attention_backward_masked");
-    if (supports_staged_grouped_attention_backward_kernel(q.backend(), s)) {
+    if (s.v_head_dim == s.head_dim && supports_staged_grouped_attention_backward_kernel(q.backend(), s)) {
         return grouped_query_attention_backward_masked_staged(q, k, v, mask, grad_out, n_head, n_kv_head,
                                                               causal, query_offset, additive_mask, s, mask_info);
     }
@@ -2019,11 +2063,13 @@ MultiHeadAttentionGradients grouped_query_attention_backward_masked_fused(const 
     kernel.set_arg(11, n_head);
     kernel.set_arg(12, n_kv_head);
     kernel.set_arg(13, static_cast<int>(s.head_dim));
-    kernel.set_arg(14, causal ? 1 : 0);
-    kernel.set_arg(15, static_cast<int>(query_offset));
-    kernel.set_arg(16, mask_info.layout);
-    kernel.set_arg(17, mask_info.mode);
-    kernel.set_arg(18, scale_value);
+    kernel.set_arg(14, static_cast<int>(s.v_head_dim));
+    kernel.set_arg(15, causal ? 1 : 0);
+    kernel.set_arg(16, static_cast<int>(query_offset));
+    kernel.set_arg(17, static_cast<int>(s.key_stride));
+    kernel.set_arg(18, mask_info.layout);
+    kernel.set_arg(19, mask_info.mode);
+    kernel.set_arg(20, scale_value);
     kernel.launch1d(round_up(total, 256), 256);
     autograd::record_op("grouped_query_attention_backward_mask_" + mask_info.suffix,
                         {q.id(), k.id(), v.id(), mask.id(), grad_out.id()},

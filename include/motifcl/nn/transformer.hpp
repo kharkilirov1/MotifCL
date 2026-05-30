@@ -56,6 +56,7 @@ struct TransformerConfig {
     int n_head = 0;
     int n_kv_head = 0;
     int head_dim = 0;
+    int v_head_dim = 0;
     int n_layer = 0;
     int mlp_hidden = 0;
     float dropout = 0.0f;
@@ -236,6 +237,7 @@ public:
     int n_head() const { return n_head_; }
     int n_kv_head() const { return n_kv_head_; }
     int head_dim() const { return head_dim_; }
+    int v_head_dim() const { return v_head_dim_; }
     int attention_window() const { return attention_window_; }
     void set_attention_window(int window);
     bool qk_norm_enabled() const { return use_qk_norm_; }
@@ -282,8 +284,10 @@ private:
     int n_head_ = 0;
     int n_kv_head_ = 0;
     int head_dim_ = 0;
+    int v_head_dim_ = 0;
     int q_dim_ = 0;
     int kv_dim_ = 0;
+    int v_dim_ = 0;
     bool use_rope_ = true;
     bool rope_split_half_ = false;
     float rope_theta_ = 10000.0f;
