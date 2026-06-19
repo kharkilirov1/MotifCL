@@ -1,0 +1,6 @@
+# generated training artifacts
+*.jsonl
+*.log
+rdr_results*.json
+*.pt
+__pycache__/
