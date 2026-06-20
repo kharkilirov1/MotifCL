@@ -217,6 +217,8 @@ def evaluate(model, rows, max_n=None):
 #  Main
 # --------------------------------------------------------------------------- #
 def run(args, cfg, log_prefix=""):
+    global MAX_NEW
+    MAX_NEW = args.max_new
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     by_split = load(args.data)
@@ -271,6 +273,8 @@ def main():
                     help="use a single global REINFORCE baseline instead of per-difficulty")
     ap.add_argument("--log_every", type=int, default=250)
     ap.add_argument("--eval_n", type=int, default=400, help="cap eval rows per split")
+    ap.add_argument("--max_new", type=int, default=8,
+                    help="max answer tokens to generate at eval (raise for trajectories)")
     ap.add_argument("--seed", type=int, default=0)
     # model size (defaults sized up a bit from rdr.Cfg so n_recur >= d_max)
     ap.add_argument("--d_model", type=int, default=96)
