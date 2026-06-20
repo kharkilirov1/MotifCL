@@ -58,6 +58,24 @@ python train.py --data rdr_dataset.jsonl --steps 3000 --ablate
   unseen harder difficulties — evidence the *mechanism* (not memorisation)
   transfers.
 
+## Run on a Kaggle GPU (moderate scale-up)
+
+`kaggle_rdr.py` is a **single self-contained file** (model + dataset + exact
+verifier + trainer + eval, all inline, CUDA-ready) for a free Kaggle T4. It trains
+two models at the same moderate scale — **full RDR** vs a **depth-1 baseline** —
+and prints an interp/extrap comparison, so you can see whether the recurrent-depth
+mechanism earns its keep at larger scale.
+
+1. New Kaggle Notebook → Settings → Accelerator → **GPU T4 x1**.
+2. Paste the whole file into one cell (or add it as a script), **Run All**.
+3. Read the `=== SUMMARY ===` block at the end; full results land in
+   `kaggle_rdr_results.json`.
+
+Scale lives in the `CONFIG` block at the top (`D_MODEL`, `N_RECUR`, `BATCH`,
+`STEPS`, dataset `D_TRAIN`/`D_MAX`). Lower `BATCH`/`D_MODEL` if you hit OOM. The
+default (`d_model=256`, `n_recur=8`, `batch=128`, `12000` steps) finishes well
+inside one free session.
+
 This is a **mechanism probe**, calibrated to a small from-scratch model. For scale,
 swap the toy modules for the open implementations referenced in `rdr.py`
 (MoR, Kimi-Linear/Attention-Residuals, Titans) and replace the stub verifier hook
