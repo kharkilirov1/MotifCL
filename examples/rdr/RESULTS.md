@@ -167,3 +167,45 @@ step 3000 | ce 0.58 | reward 0.60 | depth 3.3
 Artifacts (`rdr_dataset.jsonl`, `rdr_traj.jsonl`, `rdr_results_full*.json`,
 `rdr_traj_ablation.json`, `*.log`) are git-ignored; regenerate with the commands
 in `README.md`.
+
+---
+
+# Experiment 4 — does the model behave differently at inference?
+
+Reasonable worry: training uses **teacher forcing** and **sampled** router depth,
+while inference is **autoregressive** with **argmax** depth — so maybe the reported
+numbers misrepresent inference. `diagnose.py` measures both gaps directly on one
+full RDR trained on the trajectory task (2500 steps), per difficulty.
+
+```
+=== val_interp (n=200) ===
+diff |  TF acc  AR acc    gap | argmax d   sampled d (mean±std)
+  1  |  0.143   0.143   0.000 |   3.39       3.39 ± 0.51
+  2  |  0.185   0.185   0.000 |   3.75       3.75 ± 0.46
+  3  |  0.044   0.044   0.000 |   3.61       3.61 ± 0.51
+  4  |  0.061   0.061   0.000 |   3.58       3.59 ± 0.52
+=== test_extrap (n=200) ===
+  5  |  0.000   0.000   0.000 |   3.77       3.77 ± 0.58
+  6  |  0.000   0.000   0.000 |   3.71       3.72 ± 0.50
+```
+
+**Both suspected gaps are ~zero, and that is not a coincidence:**
+
+1. **Teacher-forced vs autoregressive accuracy is identical at every difficulty
+   (gap 0.000).** With *greedy* decoding and an *exact-match* metric the two
+   coincide by construction: an example is TF-correct iff argmax equals the truth
+   at every answer position given the true prefix — and then autoregression feeds
+   exactly those correct tokens back, reproducing the same string, so it is
+   AR-correct too. Exact match is all-or-nothing, so any TF error also fails AR.
+   (Teacher forcing would only flatter the model under *partial/per-token* credit,
+   which this verifier does not give.)
+2. **Argmax depth ≈ mean sampled depth (±0.5), and the sampled distribution is
+   itself flat across difficulty.** Collapsing the router to its mode at inference
+   hides nothing — there is no difficulty-dependent depth policy underneath.
+
+**So the real gap was never train-vs-inference.** The drop from training reward
+(~0.6, on *seen* train instances, with memorisation) to val (~0.11, *unseen*) to
+extrap (0.000, *harder*) is the **generalisation** axis — seen → unseen → longer —
+which is exactly the bottleneck identified in Experiments 1–3. The one genuine
+forward-pass difference that remains (sampled depth in training, argmax at
+inference) is empirically benign here: argmax ≈ mean and results are stable.
