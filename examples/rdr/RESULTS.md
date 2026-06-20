@@ -90,5 +90,80 @@ step 2400 | ce 0.59 | reward 0.62 | depth 3.3
 step 3000 | ce 0.58 | reward 0.60 | depth 3.3
 ```
 
-Artifacts (`rdr_dataset.jsonl`, `rdr_results_full*.json`, `train_full*.log`) are
-git-ignored; regenerate with the commands in `README.md`.
+---
+
+# Experiment 3 — forced-unrolling + ablation grid
+
+To put depth on the critical path, `build_traj.py` changes the target from the
+**final value** to the **full trajectory** of intermediate states (one per hop):
+emitting state *t* requires state *t-1* plus exactly one more step, so the
+iteration cannot be solved by a single parallel shortcut. Difficulty == hops ==
+trajectory length == sequential steps. Then the section-6 ablation grid is run on
+this task (4 configs × 2000 steps, batch 48, `--max_new 28`, eval n=150/split).
+
+## Ablation results (exact full-trajectory match)
+
+| Config | `use_recurrence` | `use_attnres` | `use_rlvr` | **interp** | **extrap** |
+|--------|:---:|:---:|:---:|---:|---:|
+| full RDR        | ✓ | ✓ | ✓ | 0.080 | **0.000** |
+| − RLVR          | ✓ | ✓ | ✗ | 0.087 | 0.000 |
+| − AttnRes       | ✓ | ✗ | ✓ | 0.087 | 0.000 |
+| − recurrence    | ✗ | ✗ | ✓ | **0.120** | 0.000 |
+
+Mean router depth per difficulty (interp), still **flat** in every recurrent config:
+
+```
+full RDR    d1 3.15  d2 3.39  d3 3.25  d4 3.27
+- RLVR      d1 3.80  d2 3.51  d3 3.73  d4 3.78
+- AttnRes   d1 2.81  d2 2.58  d3 2.67  d4 2.73
+- recurrence  (depth fixed at 1.0)
+```
+
+Per-difficulty accuracy falls off a cliff after 2 hops in *every* config
+(e.g. full RDR d2 0.21 → d3 0.03), i.e. the model learns a shallow ≤2-step
+pattern rather than the iteration.
+
+## What this tells us
+
+1. **Length extrapolation is the real wall: every config scores 0.000 on the
+   harder split.** Forcing the trajectory output makes systematic generalisation
+   *strictly harder* than the final-value task (which managed ~0.15) — errors
+   compound over the longer required output and nothing here generalises the
+   iteration to unseen lengths. This is the clearest single finding.
+2. **The recurrence machinery does not earn its keep at this scale — it slightly
+   hurts.** Removing components never lowers interp accuracy, and the *simplest*
+   model (no loop, depth 1) is the **best** (0.120 vs 0.080 for full RDR). The
+   loop adds optimisation difficulty and RL variance without a capability gain on
+   these tasks.
+3. **Depth is still flat across difficulty**, now confirmed under a task where
+   sequential computation is unavoidable — because the unrolling lives on the
+   *token* axis (one emitted state per hop), not the *depth* axis, so per-token
+   depth need not grow with difficulty either.
+
+### Bottom line for the mechanism study
+
+Across three experiments — final-value, bug-fixed credit assignment, and
+forced-unrolling — the central RDR claim (*adaptive depth that scales with
+problem difficulty and improves systematic generalisation*) is **not supported at
+toy scale on these tasks**. The honest reading is that this probe sharpens nothing
+latent here: a depth-1 model is as good or better, and the binding constraint is
+**length/compositional generalisation**, which none of recurrence, AttnRes, or
+RLVR address. Testing the claim properly would need either much larger scale (the
+open MoR / Kimi-Linear / Titans implementations the spec points to) or a task
+where a *single* output token provably requires difficulty-many *sequential*
+internal steps that cannot be offloaded to the token axis.
+
+## Training curve (Run 2, teacher-forced exact-match reward)
+
+```
+step    1 | ce 5.68 | reward 0.00 | depth 3.5
+step  600 | ce 0.93 | reward 0.33 | depth 4.8
+step 1000 | ce 1.05 | reward 0.19 | depth 5.1
+step 1700 | ce 0.80 | reward 0.33 | depth 2.8
+step 2400 | ce 0.59 | reward 0.62 | depth 3.3
+step 3000 | ce 0.58 | reward 0.60 | depth 3.3
+```
+
+Artifacts (`rdr_dataset.jsonl`, `rdr_traj.jsonl`, `rdr_results_full*.json`,
+`rdr_traj_ablation.json`, `*.log`) are git-ignored; regenerate with the commands
+in `README.md`.
