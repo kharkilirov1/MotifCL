@@ -36,6 +36,7 @@ from build_dataset import verify
 PAD, BOS, EOS = 256, 257, 258
 VOCAB = 259
 MAX_NEW = 8            # max answer tokens to generate at eval
+DEVICE = "cpu"        # set in run(); model + batches live here
 
 
 # --------------------------------------------------------------------------- #
@@ -172,7 +173,7 @@ def generate(model, prompt_ids):
     out_chars = []
     mean_depth = None
     for _ in range(MAX_NEW):
-        x = torch.tensor([ids], dtype=torch.long)
+        x = torch.tensor([ids], dtype=torch.long, device=DEVICE)
         logits, _m, depths, _lp = model(x, sample=False)
         if mean_depth is None:                       # depth measured on the prompt
             mean_depth = depths[0, :prompt_len].float().mean().item()
@@ -217,15 +218,17 @@ def evaluate(model, rows, max_n=None):
 #  Main
 # --------------------------------------------------------------------------- #
 def run(args, cfg, log_prefix=""):
-    global MAX_NEW
+    global MAX_NEW, DEVICE
     MAX_NEW = args.max_new
+    DEVICE = args.device
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     by_split = load(args.data)
     train_rows = by_split["train"]
-    print(f"{log_prefix}data: " + ", ".join(f"{k}={len(v)}" for k, v in by_split.items()))
+    print(f"{log_prefix}data: " + ", ".join(f"{k}={len(v)}" for k, v in by_split.items())
+          + f"  | device={DEVICE}")
 
-    model = RDR(cfg)
+    model = RDR(cfg).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     print(f"{log_prefix}model params: {n_params/1e3:.1f}K  "
@@ -235,6 +238,7 @@ def run(args, cfg, log_prefix=""):
     t0 = time.time()
     for stepi in range(1, args.steps + 1):
         batch = collate(random.sample(train_rows, min(args.batch, len(train_rows))))
+        batch = tuple(t.to(DEVICE) for t in batch)
         m = train_step(model, batch, opt, args.ponder,
                        per_diff_baseline=not args.global_baseline)
         if stepi % args.log_every == 0 or stepi == 1:
@@ -276,6 +280,8 @@ def main():
     ap.add_argument("--max_new", type=int, default=8,
                     help="max answer tokens to generate at eval (raise for trajectories)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", default=("cuda" if torch.cuda.is_available() else "cpu"),
+                    help="cpu or cuda")
     # model size (defaults sized up a bit from rdr.Cfg so n_recur >= d_max)
     ap.add_argument("--d_model", type=int, default=96)
     ap.add_argument("--n_recur", type=int, default=6)
