@@ -2,5 +2,6 @@
 *.jsonl
 *.log
 rdr_results*.json
+rdr_*ablation.json
 *.pt
 __pycache__/
