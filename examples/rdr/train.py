@@ -73,7 +73,8 @@ def collate(batch):
         ids[i, :n] = torch.tensor(r["_ids"])
         ans[i, :n] = torch.tensor(r["_ans"], dtype=torch.bool)
         real[i, :n] = True
-    return ids, ans, real
+    diffs = torch.tensor([r["difficulty"] for r in batch], dtype=torch.long)
+    return ids, ans, real, diffs
 
 
 # --------------------------------------------------------------------------- #
@@ -106,28 +107,49 @@ def exact_reward(logits, ids, ans):
 # --------------------------------------------------------------------------- #
 #  Train step
 # --------------------------------------------------------------------------- #
-def train_step(model, batch, opt, ponder_coef):
+def group_baseline(values, groups):
+    """Per-group mean control variate: returns advantage = values - mean_over_group.
+    `groups` (B,) is the difficulty label of each example. This is a training-time
+    variance-reduction trick only — the label never enters the model, it only
+    centres the REINFORCE advantage *within* a difficulty so the router gets a
+    clean 'did extra depth help THIS difficulty?' signal."""
+    adv = values.clone()
+    for g in groups.unique():
+        m = groups == g
+        adv[m] = values[m] - values[m].mean()
+    return adv
+
+def train_step(model, batch, opt, ponder_coef, per_diff_baseline=True):
     cfg = model.cfg
-    ids, ans, real = batch
+    ids, ans, real, diffs = batch
     logits, _mtp, depths, logp = model(ids, sample=cfg.use_rlvr)
 
     ce = answer_ce(logits, ids, ans)
     loss = ce
     reward = exact_reward(logits, ids, ans)
 
-    metrics = {"ce": ce.item(), "reward": reward.mean().item()}
-    # mean depth over REAL tokens only
-    md = (depths.float() * real).sum() / real.sum().clamp_min(1)
-    metrics["mean_depth"] = md.item()
+    # per-example mean depth over REAL tokens (normalised to [0,1] for the cost)
+    md_ex = (depths.float() * real).sum(1) / real.sum(1).clamp_min(1)   # (B,)
+    md = md_ex.mean()
+    metrics = {"ce": ce.item(), "reward": reward.mean().item(), "mean_depth": md.item()}
 
     if cfg.use_rlvr:
-        baseline = reward.mean()
-        # REINFORCE: exact verifier reward shapes router depth choices.
+        # FIX (Bug A): the depth cost must act on the router. `depths` are sampled
+        # (non-differentiable), so a separate `ponder*depth` loss term has zero
+        # gradient. Instead fold the cost into the REINFORCE RETURN, so the router
+        # only goes deeper when the extra depth actually buys reward:
+        #     return = reward - lambda * (depth / N_r)
+        ret = reward - ponder_coef * (md_ex / cfg.n_recur)             # (B,)
+        # FIX (Bug B): centre the advantage WITHIN each difficulty (per-diff
+        # baseline), else a global mean drowns the 'harder => deeper' signal.
+        if per_diff_baseline:
+            adv = group_baseline(ret, diffs)
+        else:
+            adv = ret - ret.mean()
         # logp is per-token; weight by real-token mask, average per example.
-        lp = (logp * real).sum(1) / real.sum(1).clamp_min(1)        # (B,)
-        reinforce = -((reward - baseline).detach() * lp).mean()
-        ponder = ponder_coef * md
-        loss = ce + reinforce + ponder
+        lp = (logp * real).sum(1) / real.sum(1).clamp_min(1)           # (B,)
+        reinforce = -(adv.detach() * lp).mean()
+        loss = ce + reinforce
         metrics["reinforce"] = reinforce.item()
 
     opt.zero_grad()
@@ -155,10 +177,9 @@ def generate(model, prompt_ids):
         if mean_depth is None:                       # depth measured on the prompt
             mean_depth = depths[0, :prompt_len].float().mean().item()
         nxt = logits[0, -1].argmax().item()
-        if nxt == EOS:
+        if nxt >= 128:               # EOS / PAD / BOS or any special -> stop decoding
             break
-        if nxt < 128:
-            out_chars.append(chr(nxt))
+        out_chars.append(chr(nxt))
         ids.append(nxt)
     return "".join(out_chars), mean_depth
 
@@ -212,7 +233,8 @@ def run(args, cfg, log_prefix=""):
     t0 = time.time()
     for stepi in range(1, args.steps + 1):
         batch = collate(random.sample(train_rows, min(args.batch, len(train_rows))))
-        m = train_step(model, batch, opt, args.ponder)
+        m = train_step(model, batch, opt, args.ponder,
+                       per_diff_baseline=not args.global_baseline)
         if stepi % args.log_every == 0 or stepi == 1:
             dt = time.time() - t0
             print(f"{log_prefix}step {stepi:5d} | loss {m['loss']:.3f} ce {m['ce']:.3f} "
@@ -243,7 +265,10 @@ def main():
     ap.add_argument("--steps", type=int, default=4000)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=2e-3)
-    ap.add_argument("--ponder", type=float, default=0.01)
+    ap.add_argument("--ponder", type=float, default=0.05,
+                    help="depth cost lambda, folded into the REINFORCE return")
+    ap.add_argument("--global_baseline", action="store_true",
+                    help="use a single global REINFORCE baseline instead of per-difficulty")
     ap.add_argument("--log_every", type=int, default=250)
     ap.add_argument("--eval_n", type=int, default=400, help="cap eval rows per split")
     ap.add_argument("--seed", type=int, default=0)
