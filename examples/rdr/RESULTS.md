@@ -209,3 +209,66 @@ extrap (0.000, *harder*) is the **generalisation** axis — seen → unseen → 
 which is exactly the bottleneck identified in Experiments 1–3. The one genuine
 forward-pass difference that remains (sampled depth in training, argmax at
 inference) is empirically benign here: argmax ≈ mean and results are stable.
+
+---
+
+# Experiment 5 — the anchor variant (span-anchor subquadratic attention)
+
+`anchor_rdr.py` implements the ANCHOR formalization (span landmarks, anchor score,
+local-window ∪ top-k-landmark sparse attention with one exact softmax, Gumbel-TopK
+selection, optional depth-persistent landmarks). Since short final-value tasks give
+span selection nothing to select, it is tested on a **long-context KEYVAL retrieval**
+task: many `key:val` pairs then `GET key =`, answer is that key's value; difficulty
+= number of pairs = context length = needle distance (train 2..10, extrap 11..16,
+sequences up to 77 tokens). Substrate attention is compared across
+{linear, full, anchor, anchor+depth-residual}, 2500 steps each.
+
+> ⚠️ **Bug found and fixed first.** linear and full produced *bit-identical*
+> training curves — because the recurrent core started from `e` (the prelude
+> output) and **discarded the substrate output `x`**, inherited from the original
+> `rdr.py`. The whole sequence substrate (and any attention in it) was dead code
+> w.r.t. the output. Fixed in `anchor_rdr.py` by starting the core from `x`. (The
+> same latent bug still sits in `rdr.py`/`kaggle_rdr.py` — noted, not yet changed.)
+
+## Results (KEYVAL retrieval accuracy, autoregressive + exact verify)
+
+| Substrate attention | train reward (TF) | **interp** | **extrap** |
+|---------------------|:---:|---:|---:|
+| linear              | ~0.40 (plateaus)  | **0.310** | 0.225 |
+| full                | ~0.40 (plateaus)  | **0.310** | **0.230** |
+| anchor              | **1.000** (ce→0)  | 0.190 | 0.105 |
+| anchor + depth-res  | **1.000** (ce→0)  | 0.095 | 0.125 |
+
+## Reading (a clean, counter-intuitive result)
+
+1. **The anchor mechanism works — almost too well.** It is the only variant that
+   *solves training*: exact-match reward climbs to **1.0** and CE to **0** by
+   ~step 750, while linear/full plateau near 0.40 and never fit the data. The
+   span-anchor attention genuinely lets the model pick out the right pair.
+2. **But it overfits and generalises worse.** Despite memorising the training set
+   perfectly, anchor reaches only **0.19** interp / **0.11** extrap — *below* the
+   "weaker" linear/full (0.31 / 0.23). Adding depth-persistent landmarks makes it
+   worse still (0.095 / 0.125): more capacity → more memorisation, not more
+   generalisation. The precise, high-capacity retrieval head fits specific training
+   sequences instead of inducing the general "look up the queried key" rule.
+3. **At this scale full ≈ linear.** Full attention's range advantage does not show
+   up (both 0.31) — the bottleneck is representational capacity, not attention
+   span, so this toy regime cannot reward the anchor mechanism's actual strength
+   (cheap long-range access). Both linear and full also degrade with more pairs
+   (linear d2 0.46 → d10 0.05), i.e. nobody truly learns scalable retrieval here.
+
+### Bottom line
+
+The anchor variant is **mechanistically real** (it alone fits the retrieval task)
+but at toy scale its capacity is a liability: it memorises rather than generalises,
+so on held-out data it *loses* to plain attention. This mirrors the whole study's
+theme — the bottleneck is **generalisation**, and adding a more powerful mechanism
+without more data/regularisation/scale moves memorisation, not generalisation. A
+fair test of the anchor mechanism's intended benefit (subquadratic long-range
+retrieval) needs (a) a regime where attention *span* is the bottleneck (much longer
+context than 77 tokens, where full attention is actually expensive) and (b) enough
+data/regularisation that the precise head cannot just memorise — i.e. the Kaggle
+GPU scale-up, not CPU toy scale.
+
+Artifacts (`*.jsonl`, `*_results.json`, `*.log`) are git-ignored; regenerate with
+`python anchor_rdr.py` (see `README.md`).
