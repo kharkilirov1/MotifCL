@@ -281,9 +281,14 @@ class RecurrentCore(nn.Module):
     def forward(self, x, e, sample=True):
         cfg = self.cfg
         N_r = cfg.n_recur if cfg.use_recurrence else 1
-        depths, logp = self.router(e, sample=sample)
+        # NOTE: the original rdr.py skeleton started the loop from `e` (the prelude
+        # output) and DISCARDED `x` (the substrate output) -- which makes the whole
+        # sequence substrate, and any attention variant in it, dead code w.r.t. the
+        # output. To actually test substrate attention we start from `x` and let the
+        # router read it too; `e` stays as a per-step injection signal.
+        depths, logp = self.router(x, sample=sample)
         if not cfg.use_recurrence: depths = torch.ones_like(depths)
-        current = e; stack = e.unsqueeze(2)
+        current = x; stack = x.unsqueeze(2)
         for t in range(1, N_r + 1):
             inp = self.attnres(stack, t - 1) if cfg.use_attnres else current
             out = self.block(inp, lora=self.loras[t - 1])
