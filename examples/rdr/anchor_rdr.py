@@ -37,6 +37,7 @@ import torch.nn.functional as F
 
 PAD, BOS, EOS = 256, 257, 258
 VOCAB = 259
+MAX_NEW = 4            # answer tokens to generate at eval (set from --max_new)
 
 
 @dataclass
@@ -53,6 +54,7 @@ class Cfg:
     use_recurrence: bool = True
     use_attnres: bool = True
     use_rlvr: bool = True
+    dropout: float = 0.0               # regularisation (combat the anchor overfit)
     # --- substrate attention selection ---
     attn_kind: str = "anchor"          # 'linear' | 'full' | 'anchor'
     sparse_attn_window: int = 8        # w : local window
@@ -93,6 +95,7 @@ class AnchorAttention(nn.Module):
         self.depth_res = cfg.landmark_depth_residual
         self.qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model)
         self.o = nn.Linear(cfg.d_model, cfg.d_model)
+        self.drop = nn.Dropout(cfg.dropout)
         # anchor score (Section 2)
         self.prior = nn.Linear(cfg.d_model, 1)
         self.wp = nn.Parameter(torch.tensor(1.0)); self.wr = nn.Parameter(torch.tensor(1.0))
@@ -182,7 +185,7 @@ class AnchorAttention(nn.Module):
         vv = torch.cat([v, vL], dim=2)                             # (B,H,N+nb,dh)
         out = w @ vv                                               # (B,H,N,dh)
         out = out.transpose(1, 2).reshape(B, N, D)
-        return self.o(out), landmarks_out
+        return self.drop(self.o(out)), landmarks_out
 
 
 # ------------------------------ FFN / LoRA / MoE ---------------------------- #
@@ -191,10 +194,11 @@ class FFN(nn.Module):
         super().__init__()
         h = cfg.d_model * cfg.ff_mult
         self.w1 = nn.Linear(cfg.d_model, h); self.w2 = nn.Linear(h, cfg.d_model)
+        self.drop = nn.Dropout(cfg.dropout)
     def forward(self, x, lora=None):
         h = self.w1(x)
         if lora is not None: h = h + lora(x)
-        return self.w2(F.gelu(h))
+        return self.w2(self.drop(F.gelu(h)))
 
 class LoRA(nn.Module):
     def __init__(self, di, do, r):
@@ -221,12 +225,13 @@ class PlainAttention(nn.Module):
         super().__init__()
         self.h, self.dh, self.full = cfg.n_heads, cfg.d_model // cfg.n_heads, full
         self.qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model); self.o = nn.Linear(cfg.d_model, cfg.d_model)
+        self.drop = nn.Dropout(cfg.dropout)
     def forward(self, x):
         B, N, D = x.shape
         q, k, v = self.qkv(x).chunk(3, -1)
         q, k, v = [t.view(B, N, self.h, self.dh).transpose(1, 2) for t in (q, k, v)]
         a = full_attention(q, k, v) if self.full else linear_attention(q, k, v)
-        return self.o(a.transpose(1, 2).reshape(B, N, D))
+        return self.drop(self.o(a.transpose(1, 2).reshape(B, N, D)))
 
 
 class Block(nn.Module):
@@ -303,6 +308,7 @@ class RDR(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.vocab, cfg.d_model)
+        self.edrop = nn.Dropout(cfg.dropout)
         self.prelude = Block(cfg, attn_kind="linear", moe=True)
         self.substrate = nn.ModuleList([Block(cfg, attn_kind=cfg.attn_kind)
                                         for _ in range(cfg.n_sub_layers)])
@@ -312,7 +318,7 @@ class RDR(nn.Module):
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab)
         self.mtp_head = nn.Linear(cfg.d_model, cfg.vocab)
     def forward(self, ids, sample=True):
-        x = self.prelude(self.embed(ids)); e = x
+        x = self.prelude(self.edrop(self.embed(ids))); e = x
         prev_lm = None
         for lyr in self.substrate:
             if lyr.kind == "anchor":
@@ -388,23 +394,36 @@ def group_baseline(values, groups):
         mm = groups == gg; adv[mm] = values[mm] - values[mm].mean()
     return adv
 
-def train_step(model, batch, opt, ponder):
+def train_step(model, batch, opt, ponder, scaler=None):
     cfg = model.cfg; ids, ans, real, diffs = batch
-    logits, _m, depths, logp = model(ids, sample=cfg.use_rlvr)
-    ce = answer_ce(logits, ids, ans); reward = exact_reward(logits, ids, ans)
-    md_ex = (depths.float() * real).sum(1) / real.sum(1).clamp_min(1); loss = ce
-    if cfg.use_rlvr:
-        ret = reward - ponder * (md_ex / cfg.n_recur); adv = group_baseline(ret, diffs)
-        lp = (logp * real).sum(1) / real.sum(1).clamp_min(1)
-        loss = ce + -(adv.detach() * lp).mean()
-    opt.zero_grad(); loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); opt.step()
+    use_amp = scaler is not None
+    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+        logits, _m, depths, logp = model(ids, sample=cfg.use_rlvr)
+        ce = answer_ce(logits, ids, ans)
+        loss = ce
+        if cfg.use_rlvr:
+            reward = exact_reward(logits, ids, ans)
+            md_ex = (depths.float() * real).sum(1) / real.sum(1).clamp_min(1)
+            ret = reward - ponder * (md_ex / cfg.n_recur); adv = group_baseline(ret, diffs)
+            lp = (logp * real).sum(1) / real.sum(1).clamp_min(1)
+            loss = ce + -(adv.detach() * lp).mean()
+        else:
+            reward = exact_reward(logits, ids, ans)
+            md_ex = (depths.float() * real).sum(1) / real.sum(1).clamp_min(1)
+    opt.zero_grad()
+    if use_amp:
+        scaler.scale(loss).backward(); scaler.unscale_(opt)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        scaler.step(opt); scaler.update()
+    else:
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); opt.step()
     return dict(ce=ce.item(), reward=reward.mean().item(), depth=md_ex.mean().item())
 
 @torch.no_grad()
-def generate(model, prompt, device, max_new=4):
+def generate(model, prompt, device, max_new=None):
     ids = list(prompt); out = []
-    for _ in range(max_new):
+    for _ in range(max_new or MAX_NEW):
         x = torch.tensor([ids], dtype=torch.long, device=device)
         logits, _m, _d, _l = model(x, sample=False)
         nxt = logits[0, -1].argmax().item()
@@ -424,15 +443,22 @@ def evaluate(model, rows, device, eval_n):
                 diff_acc={d: do[d] / dt[d] for d in sorted(dt)})
 
 
-def train_one(cfg, by, device, steps, batch, lr, ponder, eval_n, log_every, tag, seed):
+def train_one(cfg, by, device, steps, batch, lr, ponder, eval_n, log_every, tag, seed,
+              weight_decay=0.0, amp=False):
     torch.manual_seed(seed); random.seed(seed)
     model = RDR(cfg).to(device); npar = sum(p.numel() for p in model.parameters())
-    opt = torch.optim.Adam(model.parameters(), lr=lr); tr = by["train"]; t0 = time.time()
-    print(f"\n[{tag}] params {npar/1e3:.0f}K  attn={cfg.attn_kind} "
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scaler = None
+    if amp and device == "cuda":
+        try:    scaler = torch.amp.GradScaler("cuda")     # torch >= 2.4
+        except (AttributeError, TypeError): scaler = torch.cuda.amp.GradScaler()
+    tr = by["train"]; t0 = time.time()
+    print(f"\n[{tag}] params {npar/1e6:.2f}M  attn={cfg.attn_kind} "
           f"w={cfg.sparse_attn_window} k={cfg.sparse_attn_topk} B={cfg.sparse_attn_block} "
-          f"depthres={cfg.landmark_depth_residual}", flush=True)
+          f"depthres={cfg.landmark_depth_residual} drop={cfg.dropout} wd={weight_decay} "
+          f"amp={scaler is not None}", flush=True)
     for s in range(1, steps + 1):
-        m = train_step(model, collate(random.sample(tr, min(batch, len(tr))), device), opt, ponder)
+        m = train_step(model, collate(random.sample(tr, min(batch, len(tr))), device), opt, ponder, scaler)
         if s % log_every == 0 or s == 1:
             print(f"[{tag}] step {s:5d} | ce {m['ce']:.3f} reward {m['reward']:.3f} "
                   f"depth {m['depth']:.2f} | {time.time()-t0:.0f}s", flush=True)
@@ -454,33 +480,54 @@ def main():
     ap.add_argument("--n_pairs_train", type=int, default=10)   # d_train
     ap.add_argument("--n_pairs_max", type=int, default=16)     # d_max (extrap)
     ap.add_argument("--n_per_cell", type=int, default=1500)
-    ap.add_argument("--eval_n", type=int, default=200)
+    ap.add_argument("--eval_n", type=int, default=300)
     ap.add_argument("--log_every", type=int, default=500)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--kinds", default="linear,full,anchor")
     ap.add_argument("--depth_res", action="store_true",
                     help="also run anchor with landmark depth-residual (Section 5)")
+    # --- model size ---
+    ap.add_argument("--n_heads", type=int, default=4)
+    ap.add_argument("--n_sub_layers", type=int, default=4)
+    ap.add_argument("--n_recur", type=int, default=4)
+    ap.add_argument("--n_experts", type=int, default=4)
+    ap.add_argument("--ff_mult", type=int, default=2)
+    # --- anchor knobs (Section 9) ---
+    ap.add_argument("--window", type=int, default=8)
+    ap.add_argument("--topk", type=int, default=4)
+    ap.add_argument("--block", type=int, default=6)
+    # --- regularisation / speed ---
+    ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--weight_decay", type=float, default=0.01)
+    ap.add_argument("--amp", action="store_true", help="fp16 mixed precision on CUDA")
+    ap.add_argument("--max_new", type=int, default=4, help="answer tokens to generate")
     args = ap.parse_args()
 
+    global MAX_NEW
+    MAX_NEW = args.max_new
     device = "cuda" if torch.cuda.is_available() else "cpu"
     by = build_dataset(args.n_per_cell, args.n_pairs_train, args.n_pairs_max, 0.15, args.seed)
     maxlen = max(len(r["_ids"]) for v in by.values() for r in v)
     print(f"device {device} | data " + ", ".join(f"{k}={len(v)}" for k, v in by.items())
           + f" | max_seq_len {maxlen}", flush=True)
 
-    base = dict(vocab=VOCAB, d_model=args.d_model, n_heads=4, n_sub_layers=4,
-                n_recur=4, n_experts=4, ff_mult=2)
+    base = dict(vocab=VOCAB, d_model=args.d_model, n_heads=args.n_heads,
+                n_sub_layers=args.n_sub_layers, n_recur=args.n_recur,
+                n_experts=args.n_experts, ff_mult=args.ff_mult, dropout=args.dropout)
+    sp = dict(sparse_attn_window=args.window, sparse_attn_topk=args.topk,
+              sparse_attn_block=args.block)
+
+    def run(kind, depthres=False, tag=None):
+        cfg = Cfg(**base, attn_kind=kind, landmark_depth_residual=depthres, **sp)
+        return train_one(cfg, by, device, args.steps, args.batch, args.lr, args.ponder,
+                         args.eval_n, args.log_every, tag or kind, args.seed,
+                         weight_decay=args.weight_decay, amp=args.amp)
+
     out = {}
     for kind in args.kinds.split(","):
-        cfg = Cfg(**base, attn_kind=kind, sparse_attn_window=8, sparse_attn_topk=4,
-                  sparse_attn_block=6)
-        out[kind] = train_one(cfg, by, device, args.steps, args.batch, args.lr,
-                              args.ponder, args.eval_n, args.log_every, kind, args.seed)
+        out[kind] = run(kind)
     if args.depth_res:
-        cfg = Cfg(**base, attn_kind="anchor", sparse_attn_window=8, sparse_attn_topk=4,
-                  sparse_attn_block=6, landmark_depth_residual=True)
-        out["anchor+dres"] = train_one(cfg, by, device, args.steps, args.batch, args.lr,
-                                       args.ponder, args.eval_n, args.log_every, "anchor+dres", args.seed)
+        out["anchor+dres"] = run("anchor", depthres=True, tag="anchor+dres")
 
     print("\n=== SUMMARY (KEYVAL retrieval acc: interp / extrap) ===", flush=True)
     for tag, o in out.items():

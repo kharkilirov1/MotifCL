@@ -34,6 +34,34 @@ python train.py --data rdr_dataset.jsonl --steps 3000 --batch 48
 python train.py --data rdr_dataset.jsonl --steps 3000 --ablate
 ```
 
+## Run the ANCHOR variant locally at scale (GPU)
+
+`anchor_rdr.py` is the self-contained, GPU-ready, **bug-fixed** model (the
+substrate is load-bearing here, unlike `rdr.py`/`kaggle_rdr.py`). It compares
+substrate attention in {linear, full, anchor, anchor+depth-residual} on a
+**long-context KEYVAL retrieval** task, with dropout + weight decay + AMP so the
+high-capacity anchor head is forced to *generalise* rather than memorise. Every
+size/regulariser/anchor knob is a CLI flag; it auto-detects CUDA.
+
+Recommended scaled run (tune `--batch`/`--n_pairs_max` down if you OOM):
+
+```bash
+python anchor_rdr.py \
+  --kinds linear,full,anchor --depth_res --amp \
+  --d_model 256 --n_heads 8 --n_sub_layers 6 --n_recur 6 --n_experts 8 --ff_mult 4 \
+  --n_pairs_train 32 --n_pairs_max 48 --n_per_cell 2000 \
+  --window 16 --topk 8 --block 8 \
+  --dropout 0.1 --weight_decay 0.05 \
+  --batch 96 --steps 20000 --lr 1e-3 --eval_n 400 --log_every 500
+```
+
+Read the `=== SUMMARY ===` block (interp / extrap retrieval accuracy per
+attention type); full results land in `anchor_rdr_results.json`. The scientific
+question: at scale + longer context + regularisation, does the span-anchor head
+finally *generalise* (beat plain attention on held-out, harder splits), or does it
+still overfit as it did at CPU toy scale? `--kinds anchor` alone runs just the
+anchor model; drop `--amp` if your GPU/torch dislikes fp16.
+
 ## How the pieces connect
 
 - **Tokenisation**: byte/char level. Specials live above the byte range so they
