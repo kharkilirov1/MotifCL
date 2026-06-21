@@ -3,5 +3,6 @@
 *.log
 rdr_results*.json
 rdr_*ablation.json
+*_results.json
 *.pt
 __pycache__/
