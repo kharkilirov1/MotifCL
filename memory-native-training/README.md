@@ -9,6 +9,12 @@ benchmarks, formal spec) as a self-contained research project. It is an **extens
 MotifCL**, not a standalone engine — the C++ sources use MotifCL's `Tensor` / `Backend` /
 autograd / matmul. See [`apply_to_motifcl.md`](apply_to_motifcl.md) to build it.
 
+> **Want it without the engine?** [`pytorch/`](pytorch/) is an **engine-independent PyTorch
+> port** — `pip install` and run on stock CPU/CUDA, no MotifCL build. It realizes the learning
+> dynamics and the optimizer-state saving today; the sub-byte packed-kernel win is on its
+> roadmap (Triton). This is the path to making the method accessible to everyone, not just the
+> OpenCL/RX 580 setup. Start there if you just want to use or reproduce the method.
+
 ## The method (two independent memory levers)
 
 | Pool | Lever | On attention | Result (verified) |
