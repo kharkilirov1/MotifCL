@@ -1,0 +1,43 @@
+diff --git a/src/ops/matmul.cpp b/src/ops/matmul.cpp
+index 31ac72a..f6becc9 100644
+--- a/src/ops/matmul.cpp
++++ b/src/ops/matmul.cpp
+@@ -1097,14 +1097,36 @@ struct MatMulBackward : autograd::Node {
+     }
+ };
+ 
++// f16 x f16 -> f32 matmul backward. grad_output is f32; compute grads through the f32
++// transpose-matmul path (accurate) and cast back to f16 to match the f16 inputs.
++struct F16MatMulBackward : autograd::Node {
++    Tensor a, b;
++    F16MatMulBackward(Tensor a, Tensor b) : a(std::move(a)), b(std::move(b)) {}
++    std::vector<Tensor> inputs() const override { return {a, b}; }
++    void backward(const Tensor& grad_output) override {
++        if (a.requires_grad()) {
++            auto ga = matmul_transpose_b(grad_output, cast_f16_to_f32(b));
++            a.backward(cast_f32_to_f16(ga));
++        }
++        if (b.requires_grad()) {
++            auto gb = matmul_transpose_a(cast_f16_to_f32(a), grad_output);
++            b.backward(cast_f32_to_f16(gb));
++        }
++    }
++};
++
+ } // namespace
+ 
+ Tensor matmul(const Tensor& a, const Tensor& b) {
+     const auto selected_backend = selected_matmul_backend();
+     if (a.dtype() == DType::F16 || b.dtype() == DType::F16) {
+         MCL_CHECK(a.dtype() == DType::F16 && b.dtype() == DType::F16, "f16 matmul expects both inputs to be f16");
+-        MCL_CHECK(!a.requires_grad() && !b.requires_grad(), "f16 matmul autograd is not implemented; use f32 training path for now");
+-        return matmul_f16_accum_f32(a, b);
++        auto out = matmul_f16_accum_f32(a, b);
++        if (autograd::is_enabled() && (a.requires_grad() || b.requires_grad())) {
++            out.set_requires_grad(true);
++            out._set_grad_fn(std::make_shared<F16MatMulBackward>(a, b));
++        }
++        return out;
+     }
+     if (a.dtype() == DType::F32 && is_k_quant_dtype(b.dtype()) && a.ndim() == 2 && a.shape()[0] == 1) {
+         MCL_CHECK(!a.requires_grad() && !b.requires_grad(), "F32/K-quant decode matmul does not support autograd");

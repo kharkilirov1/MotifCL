@@ -1,0 +1,17 @@
+# build artifacts
+build/
+*.exe
+*.obj
+*.lib
+*.o
+*.a
+# python
+__pycache__/
+*.pyc
+.venv/
+# data
+*.gguf
+benchmarks/python/tinyshakespeare.txt
+# editor
+.vscode/
+.idea/
