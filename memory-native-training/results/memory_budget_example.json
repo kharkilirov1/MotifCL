@@ -1,0 +1,41 @@
+{
+  "shape": {
+    "layers": 24,
+    "d_model": 2048,
+    "vocab": 50257,
+    "linear_param_factor": 12.0,
+    "tied_lm_head": true
+  },
+  "linear_params": 1207959552,
+  "embedding_params_counted": 102926336,
+  "linear_row_count_estimate": 589824,
+  "budgets": [
+    {
+      "name": "BF16 AdamW-style",
+      "persistent_weights_GiB": 2.4417,
+      "gradients_GiB": 2.4417,
+      "optimizer_state_GiB": 14.6503,
+      "saved_activations_GiB": 2.25,
+      "misc_GiB": 1.0,
+      "total_GiB": 22.7837
+    },
+    {
+      "name": "finite-state 5b + 4b acts",
+      "persistent_weights_GiB": 0.897,
+      "gradients_GiB": 0.0,
+      "optimizer_state_GiB": 0.0,
+      "saved_activations_GiB": 0.0938,
+      "misc_GiB": 1.0,
+      "total_GiB": 1.9908
+    },
+    {
+      "name": "visible ternary entropy lower-bound",
+      "persistent_weights_GiB": 0.4146,
+      "gradients_GiB": 0.0,
+      "optimizer_state_GiB": 0.0,
+      "saved_activations_GiB": 0.0938,
+      "misc_GiB": 1.0,
+      "total_GiB": 1.5084
+    }
+  ]
+}
