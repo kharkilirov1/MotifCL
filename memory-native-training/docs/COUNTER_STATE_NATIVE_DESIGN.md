@@ -194,7 +194,9 @@ Stochastic rounding обязателен и должен быть несмещё
 - Корректность: encode/decode битово; forward численно; update — teacher-recovery
   + `grad_x` сверка; обучение — parity vs ternary-QAT (целевая изоляция ≤ +3%).
 - Stochastic: фиксировать `seed`, проверять несмещённость средним по прогонам.
-- Perf-gate: `tools/perf_truth_gate.py` (срез 5), baseline — F32/Q8 linear.
+- Perf-gate: engine-only (`tools/perf_truth_gate.py` paired with the deep-v2 engine, **not
+  vendored** — см. `results/DEEP_V2_VERIFICATION.md`). PyTorch-эквивалент скорости —
+  `results/KERNEL.md` (fused update ×45.9) и `pytorch/results/SUMMARY.md`.
 
 ## 9. Ограничения и открытые вопросы
 
