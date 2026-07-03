@@ -1,0 +1,41 @@
+// Grouped-query attention backward, stage 2 of 3:
+//   dq[tq,h,d] = scale * sum_tk ds[h,tq,tk] * k[tk,g,d]
+// One wave64 workgroup per (query token, head), lanes over head_dim.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer KBuf { float k[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DsBuf { float ds[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer DqBuf { float dq[]; };
+
+layout(push_constant) uniform Push {
+    uint query_tokens;
+    uint key_tokens;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    float scale;
+} p;
+
+void main() {
+    const uint tq = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint lane = gl_LocalInvocationID.x;
+    if (tq >= p.query_tokens || h >= p.n_head) return;
+
+    const uint group_size = p.n_head / p.n_kv_head;
+    const uint g = h / group_size;
+    const uint q_stride = p.n_head * p.head_dim;
+    const uint kv_stride = p.n_kv_head * p.head_dim;
+    const uint kv_off = g * p.head_dim;
+    const uint row_base = (h * p.query_tokens + tq) * p.key_tokens;
+
+    for (uint d = lane; d < p.head_dim; d += 64u) {
+        float acc = 0.0;
+        for (uint tk = 0u; tk < p.key_tokens; ++tk) {
+            acc += ds[row_base + tk] * k[tk * kv_stride + kv_off + d];
+        }
+        dq[tq * q_stride + h * p.head_dim + d] = acc * p.scale;
+    }
+}

@@ -1,0 +1,54 @@
+// Grouped-query attention backward, stage 3 of 3:
+//   dv[tk,g,d] =         sum_{h in group g} sum_tq p[h,tq,tk]  * dout[tq,h,d]
+//   dk[tk,g,d] = scale * sum_{h in group g} sum_tq ds[h,tq,tk] * q[tq,h,d]
+// One wave64 workgroup per (key token, kv head), lanes over head_dim.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DoutBuf { float dout[]; };
+layout(std430, set = 0, binding = 2) readonly buffer PBuf { float p_in[]; };
+layout(std430, set = 0, binding = 3) readonly buffer DsBuf { float ds[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer DkBuf { float dk[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer DvBuf { float dv[]; };
+
+layout(push_constant) uniform Push {
+    uint query_tokens;
+    uint key_tokens;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    float scale;
+} p;
+
+void main() {
+    const uint tk = gl_WorkGroupID.x;
+    const uint g = gl_WorkGroupID.y;
+    const uint lane = gl_LocalInvocationID.x;
+    if (tk >= p.key_tokens || g >= p.n_kv_head) return;
+
+    const uint group_size = p.n_head / p.n_kv_head;
+    const uint q_stride = p.n_head * p.head_dim;
+    const uint kv_stride = p.n_kv_head * p.head_dim;
+    const uint kv_base = tk * kv_stride + g * p.head_dim;
+
+    for (uint d = lane; d < p.head_dim; d += 64u) {
+        float acc_v = 0.0;
+        float acc_k = 0.0;
+        for (uint hi = 0u; hi < group_size; ++hi) {
+            const uint h = g * group_size + hi;
+            const uint row_base = h * p.query_tokens * p.key_tokens + tk;
+            for (uint tq = 0u; tq < p.query_tokens; ++tq) {
+                const float prob = p_in[row_base + tq * p.key_tokens];
+                const float dsv = ds[row_base + tq * p.key_tokens];
+                const float go = dout[tq * q_stride + h * p.head_dim + d];
+                const float qv = q[tq * q_stride + h * p.head_dim + d];
+                acc_v += prob * go;
+                acc_k += dsv * qv;
+            }
+        }
+        dv[kv_base + d] = acc_v;
+        dk[kv_base + d] = acc_k * p.scale;
+    }
+}

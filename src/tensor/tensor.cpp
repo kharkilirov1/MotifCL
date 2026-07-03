@@ -159,7 +159,9 @@ Tensor::Tensor(Backend& backend, Shape shape, DType dtype, std::shared_ptr<Stora
     impl_->dtype = dtype;
     impl_->offset = offset;
     if (autograd::is_enabled() || autograd::is_graph_capturing()) {
-        const cl_mem mem = impl_->storage && impl_->storage->buffer.valid() ? impl_->storage->buffer.raw() : nullptr;
+        const cl_mem mem = (backend.is_opencl() && impl_->storage && impl_->storage->buffer.valid())
+            ? impl_->storage->buffer.raw()
+            : nullptr;
         autograd::register_tensor(impl_->id, impl_->shape, impl_->dtype, nbytes(), mem);
     }
 }
@@ -180,6 +182,7 @@ Storage& Tensor::storage() const {
 }
 
 Buffer& Tensor::buffer() const {
+    MCL_CHECK(backend().is_opencl(), "Tensor::buffer() is only valid for OpenCL-backed tensors");
     return storage().buffer;
 }
 
@@ -290,7 +293,11 @@ void Tensor::to_cpu(void* out, std::size_t bytes) const {
     MCL_CHECK(valid(), "invalid tensor");
     if (bytes == 0) bytes = nbytes();
     MCL_CHECK(bytes <= nbytes(), "to_cpu byte count exceeds tensor size");
-    buffer().download(out, bytes, offset());
+    if (storage().vulkan_buffer.valid()) {
+        storage().vulkan_buffer.download(out, bytes, offset());
+    } else {
+        storage().buffer.download(out, bytes, offset());
+    }
 }
 
 float Tensor::item() const {
@@ -311,7 +318,13 @@ Tensor Tensor::from_cpu(Backend& backend, const Shape& shape, DType dtype, const
     auto bytes = dtype_storage_nbytes(dtype, static_cast<std::size_t>(shape.numel()));
     auto storage = std::make_shared<Storage>(backend, bytes);
     Tensor t(backend, shape, dtype, storage);
-    if (bytes > 0 && data != nullptr) t.buffer().upload(data, bytes);
+    if (bytes > 0 && data != nullptr) {
+        if (backend.is_vulkan()) {
+            t.storage().vulkan_buffer.upload(data, bytes);
+        } else {
+            t.buffer().upload(data, bytes);
+        }
+    }
     return t;
 }
 

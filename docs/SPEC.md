@@ -1,8 +1,9 @@
 # MotifCL Specification
 
 ## Overview
-MotifCL is a C++17/OpenCL neural compute framework for legacy AMD GPUs (RX 580 / gfx803).
+MotifCL is a Vulkan-first C++17 neural compute framework for legacy AMD GPUs (RX 580 / gfx803), with OpenCL as the optional legacy backend (`-DMOTIFCL_ENABLE_OPENCL=OFF` builds without any OpenCL loader).
 It provides a layered architecture: Runtime → Tensor Engine → Ops → Autograd → NN API → Motif Research modules → Python bindings.
+The runtime layer is the persistent Vulkan runtime (cached pipelines, device-local pooled buffers, batched command submission, embedded SPIR-V kernels); the OpenCL runtime remains for regression parity and not-yet-ported legacy paths (causal/masked attention, most quantized layouts, decode replay tooling).
 
 ## Architecture Layers
 ```

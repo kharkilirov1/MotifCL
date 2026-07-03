@@ -84,14 +84,14 @@ struct SwiGLUBackwardNode : autograd::Node {
 };
 
 bool vulkan_swiglu_supported(const Tensor& packed) {
-    return packed.dtype() == DType::F32 &&
-           packed.ndim() == 2 &&
-           packed.shape()[0] > 0 &&
-           packed.shape()[1] > 0 &&
-           (packed.shape()[1] % 2) == 0 &&
-           packed.shape()[0] <= 4096 &&
-           (packed.shape()[1] / 2) <= 4096 &&
-           !packed.requires_grad();
+    const bool base = packed.dtype() == DType::F32 &&
+                      packed.ndim() == 2 &&
+                      packed.shape()[0] > 0 &&
+                      packed.shape()[1] > 0 &&
+                      (packed.shape()[1] % 2) == 0;
+    if (!base) return false;
+    if (packed.backend().is_vulkan()) return true;
+    return packed.shape()[0] <= 4096 && (packed.shape()[1] / 2) <= 4096 && !packed.requires_grad();
 }
 
 Tensor swiglu_vulkan_f32(const Tensor& packed, const VulkanF32TensorResult& result) {
@@ -100,6 +100,19 @@ Tensor swiglu_vulkan_f32(const Tensor& packed, const VulkanF32TensorResult& resu
     const auto expected = static_cast<std::size_t>(packed.shape()[0] * hidden);
     MCL_CHECK(result.output.size() == expected, "vulkan swiglu f32 returned unexpected output size");
     auto out = Tensor::from_cpu(packed.backend(), {packed.shape()[0], hidden}, DType::F32, result.output.data());
+    autograd::record_op("swiglu_vulkan_f32", {packed.id()}, {out.id()});
+    return out;
+}
+
+Tensor swiglu_vulkan_f32_device(const Tensor& packed) {
+    const auto hidden = packed.shape()[1] / 2;
+    auto out = Tensor::empty(packed.backend(), {packed.shape()[0], hidden}, DType::F32);
+    const auto result = run_vulkan_swiglu(packed.backend().vulkan_runtime(),
+                                          packed.storage().vulkan_buffer,
+                                          out.storage().vulkan_buffer,
+                                          static_cast<std::size_t>(packed.shape()[0]),
+                                          static_cast<std::size_t>(hidden));
+    MCL_CHECK(result.success, std::string("vulkan swiglu f32 failed: ") + result.error);
     autograd::record_op("swiglu_vulkan_f32", {packed.id()}, {out.id()});
     return out;
 }
@@ -120,7 +133,19 @@ Tensor relu_backward_op(const Tensor& x, const Tensor& grad_out) {
 }
 
 Tensor gelu(const Tensor& x) {
-    auto out = unary(x, "gelu_f32");
+    Tensor out;
+    if (x.backend().is_vulkan()) {
+        MCL_CHECK(x.dtype() == DType::F32, "gelu supports f32 only");
+        out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+        const auto result = run_vulkan_gelu(x.backend().vulkan_runtime(),
+                                            x.storage().vulkan_buffer,
+                                            out.storage().vulkan_buffer,
+                                            static_cast<std::size_t>(x.numel()));
+        MCL_CHECK(result.success, std::string("vulkan gelu failed: ") + result.error);
+        autograd::record_op("gelu_vulkan_f32", {x.id()}, {out.id()});
+    } else {
+        out = unary(x, "gelu_f32");
+    }
     if (autograd::is_enabled() && x.requires_grad()) {
         out.set_requires_grad(true);
         out._set_grad_fn(std::make_shared<GeluBackwardNode>(x));
@@ -129,6 +154,19 @@ Tensor gelu(const Tensor& x) {
 }
 
 Tensor gelu_backward_op(const Tensor& x, const Tensor& grad_out) {
+    if (x.backend().is_vulkan()) {
+        MCL_CHECK(x.dtype() == DType::F32 && grad_out.dtype() == DType::F32, "gelu_backward supports f32 only");
+        MCL_CHECK(x.shape() == grad_out.shape(), "gelu_backward shape mismatch");
+        auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+        const auto result = run_vulkan_gelu_backward(x.backend().vulkan_runtime(),
+                                                     x.storage().vulkan_buffer,
+                                                     grad_out.storage().vulkan_buffer,
+                                                     out.storage().vulkan_buffer,
+                                                     static_cast<std::size_t>(x.numel()));
+        MCL_CHECK(result.success, std::string("vulkan gelu backward failed: ") + result.error);
+        autograd::record_op("gelu_backward_vulkan_f32", {x.id(), grad_out.id()}, {out.id()});
+        return out;
+    }
     return unary_backward_kernel(x, grad_out, "gelu_backward_f32");
 }
 
@@ -138,8 +176,16 @@ Tensor swiglu(const Tensor& packed) {
     MCL_CHECK(packed.dtype() == DType::F32, "swiglu supports f32 only");
     MCL_CHECK(packed.ndim() == 2 && packed.shape()[1] % 2 == 0, "swiglu expects [rows, 2*hidden]");
     const auto selected_backend = selected_activation_backend();
-    if (selected_backend.kind == MicrokernelBackendKind::Vulkan &&
+    if ((packed.backend().is_vulkan() || selected_backend.kind == MicrokernelBackendKind::Vulkan) &&
         vulkan_swiglu_supported(packed)) {
+        if (packed.backend().is_vulkan()) {
+            auto out = swiglu_vulkan_f32_device(packed);
+            if (autograd::is_enabled() && packed.requires_grad()) {
+                out.set_requires_grad(true);
+                out._set_grad_fn(std::make_shared<SwiGLUBackwardNode>(packed));
+            }
+            return out;
+        }
         const auto rows = static_cast<std::size_t>(packed.shape()[0]);
         const auto hidden = static_cast<std::size_t>(packed.shape()[1] / 2);
         const auto packed_host = packed.to_vector<float>();
@@ -148,6 +194,7 @@ Tensor swiglu(const Tensor& packed) {
         MCL_CHECK(!strict_vulkan_activation_required(),
                   std::string("vulkan swiglu f32 failed: ") + result.error);
     }
+    MCL_CHECK(!packed.backend().is_vulkan(), "vulkan backend does not support this swiglu shape");
     const int rows = static_cast<int>(packed.shape()[0]);
     const int hidden = static_cast<int>(packed.shape()[1] / 2);
     auto out = Tensor::empty(packed.backend(), {packed.shape()[0], hidden}, DType::F32);
@@ -169,6 +216,18 @@ Tensor swiglu_backward_op(const Tensor& packed, const Tensor& grad_out) {
     MCL_CHECK(packed.dtype() == DType::F32 && grad_out.dtype() == DType::F32, "swiglu_backward supports f32 only");
     MCL_CHECK(packed.ndim() == 2 && packed.shape()[1] % 2 == 0, "swiglu_backward expects packed [rows, 2*hidden]");
     MCL_CHECK(grad_out.shape() == Shape({packed.shape()[0], packed.shape()[1] / 2}), "swiglu_backward grad_out shape mismatch");
+    if (packed.backend().is_vulkan()) {
+        auto out = Tensor::empty(packed.backend(), packed.shape(), DType::F32);
+        const auto result = run_vulkan_swiglu_backward(packed.backend().vulkan_runtime(),
+                                                       packed.storage().vulkan_buffer,
+                                                       grad_out.storage().vulkan_buffer,
+                                                       out.storage().vulkan_buffer,
+                                                       static_cast<std::size_t>(packed.shape()[0]),
+                                                       static_cast<std::size_t>(packed.shape()[1] / 2));
+        MCL_CHECK(result.success, std::string("vulkan swiglu backward failed: ") + result.error);
+        autograd::record_op("swiglu_backward_vulkan_f32", {packed.id(), grad_out.id()}, {out.id()});
+        return out;
+    }
     const int rows = static_cast<int>(packed.shape()[0]);
     const int hidden = static_cast<int>(packed.shape()[1] / 2);
     auto out = Tensor::empty(packed.backend(), packed.shape(), DType::F32);

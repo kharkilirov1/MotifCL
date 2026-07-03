@@ -248,9 +248,23 @@ bool decode_full_block_graph_replay_enabled() {
            !env_enabled("MOTIFCL_DISABLE_DECODE_FULL_BLOCK_GRAPH_REPLAY");
 }
 
+bool packed_ple_decode_tail_graph_replay_enabled() {
+    // Packed PLE tails carry extra non-input tensor dependencies through the
+    // replay graph.  Keep this path opt-in until the rebind coverage for those
+    // dependencies is proven on the same correctness gate as the plain decode
+    // replay path.
+    return decode_block_graph_replay_enabled() &&
+           env_enabled("MOTIFCL_ENABLE_PACKED_PLE_DECODE_BLOCK_GRAPH_REPLAY");
+}
+
+bool packed_ple_decode_full_block_graph_replay_enabled() {
+    return decode_full_block_graph_replay_enabled() &&
+           env_enabled("MOTIFCL_ENABLE_PACKED_PLE_DECODE_FULL_BLOCK_GRAPH_REPLAY");
+}
+
 void bind_decode_attention_replay_offsets(autograd::GraphExecutor& executor,
-                                          int64_t offset,
-                                          int64_t seq_len) {
+                                           int64_t offset,
+                                           int64_t seq_len) {
     MCL_CHECK(offset >= 0 && seq_len > 0, "decode graph replay offset binding expects positive decode range");
     MCL_CHECK(offset <= std::numeric_limits<int>::max() - seq_len,
               "decode graph replay offset exceeds OpenCL scalar range");
@@ -2779,7 +2793,7 @@ Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input_replay(
                                                                                 int64_t token_count) {
     const int64_t offset = kv_cache.length;
     const bool eligible =
-        decode_full_block_graph_replay_enabled() &&
+        packed_ple_decode_full_block_graph_replay_enabled() &&
         !autograd::is_enabled() &&
         !autograd::is_graph_capturing() &&
         use_per_layer_input_ &&
@@ -3112,7 +3126,7 @@ Tensor ModernTransformerBlock::decode_tail_after_attention_packed_replay(const T
                                                                          int layer_index,
                                                                          int64_t token_count) {
     const bool eligible =
-        decode_block_graph_replay_enabled() &&
+        packed_ple_decode_tail_graph_replay_enabled() &&
         !autograd::is_enabled() &&
         !autograd::is_graph_capturing() &&
         use_per_layer_input_ &&

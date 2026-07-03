@@ -4,6 +4,7 @@
 #include <motifcl/autograd/node.hpp>
 #include <motifcl/core/error.hpp>
 #include <motifcl/runtime/backend.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 
 #include <cmath>
 #include <memory>
@@ -95,6 +96,24 @@ Tensor softmax_cross_entropy(const Tensor& logits, const Tensor& targets) {
 
     const int rows = static_cast<int>(logits.shape()[0]);
     const int cols = static_cast<int>(logits.shape()[1]);
+    if (logits.backend().is_vulkan()) {
+        auto partial = Tensor::empty(logits.backend(), {rows}, DType::F32);
+        auto out = Tensor::empty(logits.backend(), {}, DType::F32);
+        const auto run = run_vulkan_softmax_cross_entropy(logits.backend().vulkan_runtime(),
+                                                          logits.storage().vulkan_buffer,
+                                                          targets.storage().vulkan_buffer,
+                                                          partial.storage().vulkan_buffer,
+                                                          out.storage().vulkan_buffer,
+                                                          static_cast<std::size_t>(rows),
+                                                          static_cast<std::size_t>(cols));
+        MCL_CHECK(run.success, std::string("vulkan softmax_cross_entropy failed: ") + run.error);
+        autograd::record_op("softmax_cross_entropy_vulkan_f32", {logits.id(), targets.id()}, {out.id()});
+        if (autograd::is_enabled() && logits.requires_grad()) {
+            out.set_requires_grad(true);
+            out._set_grad_fn(std::make_shared<SoftmaxCrossEntropyBackwardNode>(logits, targets));
+        }
+        return out;
+    }
     auto partial = Tensor::empty(logits.backend(), {rows}, DType::F32);
     auto k = logits.backend().kernels.get("softmax_cross_entropy_partial_f32_i32");
     k.set_arg(0, logits.buffer());
@@ -121,6 +140,19 @@ Tensor softmax_cross_entropy_backward_op(const Tensor& logits, const Tensor& tar
     auto out = Tensor::empty(logits.backend(), logits.shape(), DType::F32);
     const int rows = static_cast<int>(logits.shape()[0]);
     const int cols = static_cast<int>(logits.shape()[1]);
+    if (logits.backend().is_vulkan()) {
+        const auto run = run_vulkan_softmax_cross_entropy_backward(logits.backend().vulkan_runtime(),
+                                                                   logits.storage().vulkan_buffer,
+                                                                   targets.storage().vulkan_buffer,
+                                                                   grad_out.storage().vulkan_buffer,
+                                                                   out.storage().vulkan_buffer,
+                                                                   static_cast<std::size_t>(rows),
+                                                                   static_cast<std::size_t>(cols));
+        MCL_CHECK(run.success, std::string("vulkan softmax_cross_entropy backward failed: ") + run.error);
+        autograd::record_op("softmax_cross_entropy_backward_vulkan_f32",
+                            {logits.id(), targets.id(), grad_out.id()}, {out.id()});
+        return out;
+    }
     auto k = logits.backend().kernels.get("softmax_cross_entropy_backward_f32_i32");
     k.set_arg(0, logits.buffer());
     k.set_arg(1, targets.buffer());

@@ -1,0 +1,26 @@
+// GELU backward (tanh approximation), matching kernels/activation.cl
+// gelu_backward_f32.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DyBuf { float dy[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer DxBuf { float dx[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+} p;
+
+void main() {
+    const uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+    const float v = x[gid];
+    const float c = 0.7978845608028654;
+    const float inner = c * (v + 0.044715 * v * v * v);
+    const float th = tanh(inner);
+    const float sech2 = 1.0 - th * th;
+    const float inner_grad = c * (1.0 + 3.0 * 0.044715 * v * v);
+    const float grad = 0.5 * (1.0 + th) + 0.5 * v * sech2 * inner_grad;
+    dx[gid] = dy[gid] * grad;
+}

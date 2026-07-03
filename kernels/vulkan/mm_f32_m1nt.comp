@@ -1,0 +1,37 @@
+// C[1,N] = A[1,K] * B[N,K]^T, row-major F32 decode matmul against a
+// row-major weight matrix (transpose-B, M = 1).  One wave64 workgroup per
+// output element: coalesced reads of the B row + shared-memory reduction.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { float A[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BBuf { float B[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer CBuf { float C[]; };
+
+layout(push_constant) uniform Push {
+    uint K;
+    uint N;
+} p;
+
+shared float partial[64];
+
+void main() {
+    const uint n = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    float acc = 0.0;
+    for (uint k = lane; k < p.K; k += 64u) {
+        acc += A[k] * B[n * p.K + k];
+    }
+    partial[lane] = acc;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            partial[lane] += partial[lane + stride];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        C[n] = partial[0];
+    }
+}

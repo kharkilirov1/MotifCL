@@ -6,9 +6,30 @@
 #include <motifcl/runtime/opencl_context.hpp>
 #include <motifcl/runtime/profiler.hpp>
 
+#include <atomic>
 #include <utility>
 
 namespace motifcl {
+namespace {
+// Device-memory accounting. Every device buffer is created/destroyed through Buffer, so
+// these counters track live device bytes and the high-water mark since the last reset.
+std::atomic<std::size_t> g_dev_bytes_current{0};
+std::atomic<std::size_t> g_dev_bytes_peak{0};
+void track_alloc(std::size_t n) {
+    std::size_t cur = g_dev_bytes_current.fetch_add(n, std::memory_order_relaxed) + n;
+    std::size_t prev = g_dev_bytes_peak.load(std::memory_order_relaxed);
+    while (cur > prev && !g_dev_bytes_peak.compare_exchange_weak(prev, cur, std::memory_order_relaxed)) {}
+}
+void track_free(std::size_t n) {
+    if (n) g_dev_bytes_current.fetch_sub(n, std::memory_order_relaxed);
+}
+} // namespace
+
+std::size_t device_bytes_current() { return g_dev_bytes_current.load(std::memory_order_relaxed); }
+std::size_t device_bytes_peak() { return g_dev_bytes_peak.load(std::memory_order_relaxed); }
+void device_bytes_reset_peak() {
+    g_dev_bytes_peak.store(g_dev_bytes_current.load(std::memory_order_relaxed), std::memory_order_relaxed);
+}
 
 Buffer::Buffer(OpenCLContext& ctx,
                std::size_t nbytes,
@@ -26,6 +47,7 @@ Buffer::Buffer(OpenCLContext& ctx,
     cl_int err = CL_SUCCESS;
     mem_ = clCreateBuffer(state_->context, flags, nbytes, nullptr, &err);
     MCL_CHECK_CL(err);
+    track_alloc(nbytes_);
 }
 
 Buffer::~Buffer() { release(); }
@@ -53,6 +75,7 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
 void Buffer::release() {
     if (mem_) {
         clReleaseMemObject(mem_);
+        track_free(nbytes_);
         mem_ = nullptr;
     }
     ctx_ = nullptr;

@@ -1,0 +1,89 @@
+// Compact-counter fused row stats (pass 1 of the memory-native update),
+// bit-exact port of kernels/compact_counter.cl counter_row_stats_fused_f32:
+// one wave64 workgroup per output row computes
+//   g_sq  = sum_i grad_w[row,i]^2        (grad_w recomputed on the fly)
+//   grad_s= sum_i grad_w[row,i] * t[row,i]
+// then v/denom/scale_new per row. state is the packed 6-bit counter code
+// stream (3 bytes per group of 4 weights).
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer StateBuf { uint8_t state[]; };
+layout(std430, set = 0, binding = 1) readonly buffer ScaleBuf { float scale[]; };
+layout(std430, set = 0, binding = 2) buffer VBuf { float v[]; };
+layout(std430, set = 0, binding = 3) readonly buffer GradOutBuf { float grad_out[]; };
+layout(std430, set = 0, binding = 4) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer ScaleNewBuf { float scale_new[]; };
+layout(std430, set = 0, binding = 6) writeonly buffer DenomBuf { float denom[]; };
+
+layout(push_constant) uniform Push {
+    int C;
+    int in_features;
+    int out_features;
+    int N;
+    float lr_scale;
+    float rms_beta;
+    float rms_eps;
+} p;
+
+shared float lg[64];
+shared float lgs[64];
+
+void cc_decode(int code, int C, out int t, out int c) {
+    const int lv = 2 * C - 1;
+    t = code / lv - 1;
+    c = code % lv - (C - 1);
+}
+
+void main() {
+    const int row = int(gl_WorkGroupID.x);
+    const int lid = int(gl_LocalInvocationID.x);
+    if (row >= p.out_features) return;
+    const int gpr = p.in_features / 4;
+
+    float g_sq = 0.0;
+    float grad_s = 0.0;
+    for (int g = lid; g < gpr; g += 64) {
+        const int base = (row * gpr + g) * 3;
+        const int b0 = int(uint(state[base]));
+        const int b1 = int(uint(state[base + 1]));
+        const int b2 = int(uint(state[base + 2]));
+        int cc[4];
+        cc[0] = b0 & 0x3F;
+        cc[1] = ((b0 >> 6) | (b1 << 2)) & 0x3F;
+        cc[2] = ((b1 >> 4) | (b2 << 4)) & 0x3F;
+        cc[3] = (b2 >> 2) & 0x3F;
+        for (int k = 0; k < 4; ++k) {
+            const int i = g * 4 + k;
+            float gw = 0.0;
+            for (int r = 0; r < p.N; ++r) {
+                gw += grad_out[r * p.out_features + row] * x[r * p.in_features + i];
+            }
+            g_sq += gw * gw;
+            int t;
+            int c;
+            cc_decode(cc[k], p.C, t, c);
+            grad_s += gw * float(t);
+        }
+    }
+    lg[lid] = g_sq;
+    lgs[lid] = grad_s;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (uint(lid) < stride) {
+            lg[lid] += lg[lid + int(stride)];
+            lgs[lid] += lgs[lid + int(stride)];
+        }
+        barrier();
+    }
+    if (lid == 0) {
+        const float gsq = lg[0] / float(p.in_features);
+        const float gs = lgs[0] / sqrt(float(p.in_features));
+        const float vv = p.rms_beta * v[row] + (1.0 - p.rms_beta) * gsq;
+        v[row] = vv;
+        denom[row] = max(sqrt(vv), p.rms_eps);
+        scale_new[row] = clamp(scale[row] - p.lr_scale * gs, 1e-5, 10.0);
+    }
+}

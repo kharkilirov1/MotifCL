@@ -12,12 +12,19 @@ option(MOTIFCL_BUILD_TOOLS "Build command-line tools" ON)
 option(MOTIFCL_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(MOTIFCL_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(MOTIFCL_INSTALL "Enable install/export rules" ON)
+option(MOTIFCL_ENABLE_OPENCL "Build OpenCL-backed MotifCL runtime/library" ON)
 option(MOTIFCL_ENABLE_SANITIZERS "Enable ASan/UBSan on supported compilers" OFF)
+option(MOTIFCL_ENABLE_FAST_MATH "Enable non-IEEE fast-math compiler flags for performance builds" OFF)
+option(MOTIFCL_ENABLE_NATIVE_ARCH "Enable host-native CPU codegen flags for local optimized builds" OFF)
+option(MOTIFCL_ENABLE_LTO "Enable interprocedural optimization/link-time optimization for release builds" OFF)
+option(MOTIFCL_OPENCL_FAST_RELAXED_MATH "Build OpenCL kernels with fast relaxed math options" OFF)
+option(MOTIFCL_ANDROID_MI9_TUNING "Enable Android/MI 9 arm64 host-side tuning flags" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerOptions)
 include(GNUInstallDirs)
 
+if(MOTIFCL_ENABLE_OPENCL)
 find_package(OpenCL QUIET)
 if(NOT OpenCL_FOUND)
     if(WIN32 AND MSVC)
@@ -85,6 +92,7 @@ if(NOT OpenCL_FOUND)
     )
     message(STATUS "Using vendored minimal OpenCL headers and library: ${MOTIFCL_OPENCL_LIBRARY}")
 endif()
+endif()
 
 set(MOTIFCL_SOURCES
     src/core/error.cpp
@@ -100,7 +108,6 @@ set(MOTIFCL_SOURCES
     src/runtime/backend.cpp
     src/runtime/microkernel.cpp
     src/runtime/native_matmul.cpp
-    src/runtime/vulkan_backend.cpp
     src/runtime/profiler.cpp
     src/tensor/storage.cpp
     src/tensor/allocator.cpp
@@ -122,6 +129,7 @@ set(MOTIFCL_SOURCES
     src/autograd/backward.cpp
     src/nn/module.cpp
     src/nn/linear.cpp
+    src/nn/compact_counter.cpp
     src/nn/embedding.cpp
     src/nn/rmsnorm.cpp
     src/nn/attention.cpp
@@ -143,6 +151,26 @@ set(MOTIFCL_SOURCES
     src/gguf.cpp
 )
 
+add_library(motifcl_vulkan_runtime src/runtime/vulkan_backend.cpp)
+add_library(MotifCL::vulkan_runtime ALIAS motifcl_vulkan_runtime)
+set_target_properties(motifcl_vulkan_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(motifcl_vulkan_runtime
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_link_libraries(motifcl_vulkan_runtime PRIVATE ${CMAKE_DL_LIBS})
+motifcl_apply_compiler_options(motifcl_vulkan_runtime)
+
+if(NOT MOTIFCL_ENABLE_OPENCL)
+    # OpenCL-off build: the full library still compiles against the vendored
+    # CL type declarations, but links a local no-op stub instead of any
+    # OpenCL loader. Backend::create_opencl() then fails at runtime with the
+    # normal "no OpenCL platforms found" error; the Vulkan backend is the
+    # only live GPU path.
+    list(APPEND MOTIFCL_SOURCES src/runtime/opencl_disabled_stub.cpp)
+endif()
+
 add_library(motifcl ${MOTIFCL_SOURCES})
 add_library(MotifCL::motifcl ALIAS motifcl)
 set_target_properties(motifcl PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -159,10 +187,31 @@ target_compile_definitions(motifcl
         MOTIFCL_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
         MOTIFCL_BINARY_KERNEL_DIR="${CMAKE_BINARY_DIR}/kernels"
         MOTIFCL_INSTALL_KERNEL_DIR="${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/motifcl/kernels"
+        $<$<BOOL:${MOTIFCL_OPENCL_FAST_RELAXED_MATH}>:MOTIFCL_OPENCL_FAST_RELAXED_MATH=1>
 )
 
-target_link_libraries(motifcl PUBLIC OpenCL::OpenCL PRIVATE ${CMAKE_DL_LIBS})
+if(MOTIFCL_ENABLE_OPENCL)
+    target_link_libraries(motifcl
+        PUBLIC OpenCL::OpenCL
+        PRIVATE motifcl_vulkan_runtime ${CMAKE_DL_LIBS}
+    )
+else()
+    target_include_directories(motifcl PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/opencl>)
+    target_link_libraries(motifcl PRIVATE motifcl_vulkan_runtime ${CMAKE_DL_LIBS})
+endif()
 motifcl_apply_compiler_options(motifcl)
+
+if(MOTIFCL_ENABLE_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT _motifcl_ipo_supported OUTPUT _motifcl_ipo_error)
+    if(_motifcl_ipo_supported)
+        set_property(TARGET motifcl PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+        set_property(TARGET motifcl PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+    else()
+        message(WARNING "MOTIFCL_ENABLE_LTO requested but IPO/LTO is not supported: ${_motifcl_ipo_error}")
+    endif()
+endif()
 
 add_custom_target(motifcl_copy_kernels ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -172,8 +221,17 @@ add_custom_target(motifcl_copy_kernels ALL
 )
 add_dependencies(motifcl motifcl_copy_kernels)
 
+if(NOT MOTIFCL_ENABLE_OPENCL)
+    message(STATUS "MOTIFCL_ENABLE_OPENCL=OFF: motifcl builds against the local OpenCL stub; "
+                   "Backend::create_opencl() fails at runtime and Vulkan is the only GPU backend.")
+endif()
+
 if(MOTIFCL_BUILD_EXAMPLES)
-    add_subdirectory(examples/cpp)
+    if(TARGET motifcl)
+        add_subdirectory(examples/cpp)
+    else()
+        message(STATUS "Skipping examples because motifcl core target is disabled.")
+    endif()
 endif()
 
 if(MOTIFCL_BUILD_TESTS)
@@ -182,14 +240,22 @@ if(MOTIFCL_BUILD_TESTS)
 endif()
 
 if(MOTIFCL_BUILD_TOOLS)
-    add_subdirectory(tools)
+    if(TARGET motifcl)
+        add_subdirectory(tools)
+    else()
+        message(STATUS "Skipping tools because motifcl core target is disabled.")
+    endif()
 endif()
 
 if(MOTIFCL_BUILD_BENCHMARKS)
-    add_subdirectory(benchmarks)
+    if(TARGET motifcl)
+        add_subdirectory(benchmarks)
+    else()
+        message(STATUS "Skipping benchmarks because motifcl core target is disabled.")
+    endif()
 endif()
 
-if(MOTIFCL_BUILD_PYTHON)
+if(MOTIFCL_BUILD_PYTHON AND TARGET motifcl)
     set(PYBIND11_FINDPYTHON ON)
     if(WIN32 AND NOT DEFINED Python_FIND_REGISTRY)
         set(Python_FIND_REGISTRY NEVER)
@@ -226,19 +292,28 @@ if(MOTIFCL_BUILD_PYTHON)
     else()
         message(WARNING "pybind11 or Python development module not found; Python bindings are present but will not be built. Install pybind11/Python dev files or set -DMOTIFCL_BUILD_PYTHON=OFF.")
     endif()
+elseif(MOTIFCL_BUILD_PYTHON)
+    message(STATUS "Skipping Python bindings because MOTIFCL_ENABLE_OPENCL=OFF disables the current motifcl core target.")
 endif()
 
 if(MOTIFCL_INSTALL)
     include(CMakePackageConfigHelpers)
-    install(TARGETS motifcl
+    if(TARGET motifcl)
+        set(_motifcl_install_targets motifcl motifcl_vulkan_runtime)
+    else()
+        set(_motifcl_install_targets motifcl_vulkan_runtime)
+    endif()
+    install(TARGETS ${_motifcl_install_targets}
         EXPORT MotifCLTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
     install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-    install(DIRECTORY third_party/opencl/CL DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-    install(DIRECTORY kernels DESTINATION ${CMAKE_INSTALL_DATADIR}/motifcl)
+    if(MOTIFCL_ENABLE_OPENCL)
+        install(DIRECTORY third_party/opencl/CL DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+        install(DIRECTORY kernels DESTINATION ${CMAKE_INSTALL_DATADIR}/motifcl)
+    endif()
     install(EXPORT MotifCLTargets
         NAMESPACE MotifCL::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/MotifCL

@@ -1,0 +1,39 @@
+// Row softmax backward: dx = y * (dy - sum(dy * y)), one wave64 workgroup
+// per row with a shared-memory dot reduction.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer YBuf { float y[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DyBuf { float dy[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer DxBuf { float dx[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint cols;
+} p;
+
+shared float scratch[64];
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (row >= p.rows) return;
+    const uint base = row * p.cols;
+
+    float dot = 0.0;
+    for (uint c = lane; c < p.cols; c += 64u) {
+        dot += dy[base + c] * y[base + c];
+    }
+    scratch[lane] = dot;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) scratch[lane] += scratch[lane + stride];
+        barrier();
+    }
+    dot = scratch[0];
+
+    for (uint c = lane; c < p.cols; c += 64u) {
+        dx[base + c] = y[base + c] * (dy[base + c] - dot);
+    }
+}

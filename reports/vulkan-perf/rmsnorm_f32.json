@@ -1,0 +1,9 @@
+{
+  "op": "rmsnorm_f32",
+  "vulkan_device": "Radeon RX 580 Series",
+  "opencl_device": "Ellesmere",
+  "methodology": "median wall-time of 50 runs after 5 warmup; gpu_us from VK_QUERY_TYPE_TIMESTAMP; ratio = opencl_wall / vulkan_wall",
+  "rows": [
+    {"shape": "512x1024", "dtype": "f32", "median_us": 222.7, "min_us": 187.3, "p99_us": 312.3, "gpu_median_us": 46.4, "achieved_gbs": 18.8339, "opencl_baseline_us": 339.6, "ratio": 1.52492, "target_ratio": 0.4, "result": "PASS"}
+  ]
+}

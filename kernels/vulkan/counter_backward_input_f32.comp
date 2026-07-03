@@ -1,0 +1,47 @@
+// Memory-native counter backward-to-input, matching
+// kernels/compact_counter.cl counter_backward_input_f32:
+//   grad_x[r,i] = sum_o grad_out[r,o] * scale[o] * t[o,i]
+// with the ternary t decoded from packed state on the fly (no dense weight).
+// One invocation per (r, i).
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer GradOutBuf { float grad_out[]; };
+layout(std430, set = 0, binding = 1) readonly buffer StateBuf { uint8_t state[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ScaleBuf { float scale[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer GradXBuf { float grad_x[]; };
+
+layout(push_constant) uniform Push {
+    int C;
+    int in_features;
+    int out_features;
+    int N;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    if (gid >= p.N * p.in_features) return;
+    const int r = gid / p.in_features;
+    const int i = gid - r * p.in_features;
+    const int gpr = p.in_features / 4;
+    const int g = i >> 2;
+    const int k = i & 3;
+    const int lv = 2 * p.C - 1;
+    float acc = 0.0;
+    for (int o = 0; o < p.out_features; ++o) {
+        const int base = (o * gpr + g) * 3;
+        const int b0 = int(uint(state[base]));
+        const int b1 = int(uint(state[base + 1]));
+        const int b2 = int(uint(state[base + 2]));
+        int code;
+        if (k == 0) code = b0 & 0x3F;
+        else if (k == 1) code = ((b0 >> 6) | (b1 << 2)) & 0x3F;
+        else if (k == 2) code = ((b1 >> 4) | (b2 << 4)) & 0x3F;
+        else code = (b2 >> 2) & 0x3F;
+        const int t = code / lv - 1;
+        acc += grad_out[r * p.out_features + o] * scale[o] * float(t);
+    }
+    grad_x[gid] = acc;
+}

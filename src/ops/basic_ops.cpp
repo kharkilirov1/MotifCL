@@ -43,14 +43,14 @@ bool strict_vulkan_elementwise_required() {
 }
 
 bool vulkan_add_supported(const Tensor& a, const Tensor& b) {
-    return a.dtype() == DType::F32 &&
-           b.dtype() == DType::F32 &&
-           a.shape() == b.shape() &&
-           a.backend_ptr() == b.backend_ptr() &&
-           a.numel() > 0 &&
-           a.numel() <= static_cast<int64_t>(1u << 20u) &&
-           !a.requires_grad() &&
-           !b.requires_grad();
+    const bool base = a.dtype() == DType::F32 &&
+                      b.dtype() == DType::F32 &&
+                      a.shape() == b.shape() &&
+                      a.backend_ptr() == b.backend_ptr() &&
+                      a.numel() > 0;
+    if (!base) return false;
+    if (a.backend().is_vulkan()) return true;
+    return a.numel() <= static_cast<int64_t>(1u << 20u) && !a.requires_grad() && !b.requires_grad();
 }
 
 Tensor add_vulkan_f32(const Tensor& a, const Tensor& b, const VulkanF32TensorResult& result) {
@@ -58,6 +58,18 @@ Tensor add_vulkan_f32(const Tensor& a, const Tensor& b, const VulkanF32TensorRes
     MCL_CHECK(result.output.size() == static_cast<std::size_t>(a.numel()),
               "vulkan add f32 returned unexpected output size");
     auto out = Tensor::from_cpu(a.backend(), a.shape(), DType::F32, result.output.data());
+    autograd::record_op("add_vulkan_f32", {a.id(), b.id()}, {out.id()});
+    return out;
+}
+
+Tensor add_vulkan_f32_device(const Tensor& a, const Tensor& b) {
+    auto out = Tensor::empty(a.backend(), a.shape(), DType::F32);
+    const auto result = run_vulkan_add(a.backend().vulkan_runtime(),
+                                       a.storage().vulkan_buffer,
+                                       b.storage().vulkan_buffer,
+                                       out.storage().vulkan_buffer,
+                                       static_cast<std::size_t>(a.numel()));
+    MCL_CHECK(result.success, std::string("vulkan add f32 failed: ") + result.error);
     autograd::record_op("add_vulkan_f32", {a.id(), b.id()}, {out.id()});
     return out;
 }
@@ -339,8 +351,13 @@ Tensor ones_like(const Tensor& x) { return Tensor::ones(x.backend(), x.shape(), 
 Tensor add(const Tensor& a, const Tensor& b) {
     if (a.shape() != b.shape()) return add_broadcast(a, b);
     const auto selected_backend = selected_elementwise_backend();
-    if (selected_backend.kind == MicrokernelBackendKind::Vulkan &&
+    if ((a.backend().is_vulkan() || selected_backend.kind == MicrokernelBackendKind::Vulkan) &&
         vulkan_add_supported(a, b)) {
+        if (a.backend().is_vulkan()) {
+            auto out = add_vulkan_f32_device(a, b);
+            attach_binary_grad(out, a, b, std::make_shared<AddBackward>(a, b));
+            return out;
+        }
         const auto a_host = a.to_vector<float>();
         const auto b_host = b.to_vector<float>();
         const auto result = run_vulkan_add(a_host, b_host);
@@ -348,6 +365,7 @@ Tensor add(const Tensor& a, const Tensor& b) {
         MCL_CHECK(!strict_vulkan_elementwise_required(),
                   std::string("vulkan add f32 failed: ") + result.error);
     }
+    MCL_CHECK(!a.backend().is_vulkan(), "vulkan backend does not support this add shape");
     auto out = elementwise_binary(a, b, "add_f32");
     attach_binary_grad(out, a, b, std::make_shared<AddBackward>(a, b));
     return out;

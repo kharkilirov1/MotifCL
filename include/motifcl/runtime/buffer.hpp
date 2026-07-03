@@ -48,4 +48,12 @@ private:
     void release();
 };
 
+// Device-buffer byte accounting. Counts every clCreateBuffer/clReleaseMemObject routed
+// through Buffer, so peak() is the high-water mark of live device memory since the last
+// reset. Used by the memory-native "truth gate" to assert that a training step does not
+// silently re-materialise a dense weight-sized buffer.
+std::size_t device_bytes_current();
+std::size_t device_bytes_peak();
+void device_bytes_reset_peak();
+
 } // namespace motifcl

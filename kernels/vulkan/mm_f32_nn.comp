@@ -1,0 +1,44 @@
+// C[M,N] = A[M,K] * B[K,N], row-major F32.
+// 16x16 shared-memory tile per workgroup, one output element per invocation.
+// Tuned for GCN wave64 (256 invocations = 4 waves per group).
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { float A[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BBuf { float B[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer CBuf { float C[]; };
+
+layout(push_constant) uniform Push {
+    uint M;
+    uint K;
+    uint N;
+} p;
+
+shared float As[16][16];
+// Padded second dimension so column reads hit distinct LDS banks.
+shared float Bs[16][17];
+
+void main() {
+    const uint tx = gl_LocalInvocationID.x;
+    const uint ty = gl_LocalInvocationID.y;
+    const uint col = gl_WorkGroupID.x * 16u + tx;
+    const uint row = gl_WorkGroupID.y * 16u + ty;
+
+    float acc = 0.0;
+    const uint tiles = (p.K + 15u) / 16u;
+    for (uint t = 0u; t < tiles; ++t) {
+        const uint ak = t * 16u + tx;
+        const uint bk = t * 16u + ty;
+        As[ty][tx] = (row < p.M && ak < p.K) ? A[row * p.K + ak] : 0.0;
+        Bs[ty][tx] = (bk < p.K && col < p.N) ? B[bk * p.N + col] : 0.0;
+        barrier();
+        for (uint i = 0u; i < 16u; ++i) {
+            acc += As[ty][i] * Bs[i][tx];
+        }
+        barrier();
+    }
+    if (row < p.M && col < p.N) {
+        C[row * p.N + col] = acc;
+    }
+}

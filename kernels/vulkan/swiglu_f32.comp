@@ -1,0 +1,27 @@
+// SwiGLU forward over packed [rows, 2*hidden] (gate | up):
+//   out[r,c] = silu(gate) * up = gate * sigmoid(gate) * up
+// Elementwise, one invocation per output element (coalesced).
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer PackedBuf { float packed_in[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint hidden;
+} p;
+
+void main() {
+    const uint gid = gl_GlobalInvocationID.x;
+    const uint n = p.rows * p.hidden;
+    if (gid >= n) return;
+    const uint row = gid / p.hidden;
+    const uint col = gid - row * p.hidden;
+    const uint base = row * (p.hidden * 2u);
+    const float gate = packed_in[base + col];
+    const float up = packed_in[base + p.hidden + col];
+    const float sig = 1.0 / (1.0 + exp(-gate));
+    outv[gid] = gate * sig * up;
+}

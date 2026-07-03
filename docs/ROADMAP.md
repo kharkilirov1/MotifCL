@@ -28,9 +28,11 @@ compatibility pass.
 
 2. **FP16 training coverage**
    - Existing: FP16 cast kernels, FP16 inference matmul, FP32-master
-     `MixedPrecisionAdam`, dynamic loss scaling.
-   - Missing: broad FP16 backward kernels for training ops, especially matmul
-     backward variants and fused transformer training paths.
+     `MixedPrecisionAdam`, dynamic loss scaling, and **f16 `matmul` autograd**
+     via an f32-accurate backward + cast (`F16MatMulBackward`; gradient match
+     vs f32 ~4e-4, regression `tests/test_f16_matmul_autograd.cpp`).
+   - Missing: remaining FP16 backward kernels for other training ops and fused
+     transformer training paths.
 
 3. **Graph execution**
    - Existing: capture/replay, tensor specs, same-shape `cl_mem` rebinding,

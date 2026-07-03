@@ -3,8 +3,10 @@
 #include <motifcl/autograd/graph.hpp>
 #include <motifcl/core/error.hpp>
 #include <motifcl/runtime/backend.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 
 #include <cmath>
+#include <string>
 
 namespace motifcl {
 
@@ -15,6 +17,18 @@ std::size_t round_up(std::size_t x, std::size_t multiple) { return ((x + multipl
 void sgd_update(Tensor& param, const Tensor& grad, float lr) {
     MCL_CHECK(param.dtype() == DType::F32 && grad.dtype() == DType::F32, "sgd_update supports f32 only");
     MCL_CHECK(param.shape() == grad.shape(), "sgd_update shape mismatch");
+    MCL_CHECK(param.backend_ptr() == grad.backend_ptr(), "sgd_update requires tensors on the same backend");
+    if (param.backend().is_vulkan()) {
+        const auto result = run_vulkan_sgd_update(param.backend().vulkan_runtime(),
+                                                  param.storage().vulkan_buffer,
+                                                  grad.storage().vulkan_buffer,
+                                                  param.storage().vulkan_buffer,
+                                                  static_cast<std::size_t>(param.numel()),
+                                                  lr);
+        MCL_CHECK(result.success, std::string("vulkan sgd_update failed: ") + result.error);
+        autograd::record_op("sgd_update_vulkan_f32", {param.id(), grad.id()}, {param.id()});
+        return;
+    }
     auto k = param.backend().kernels.get("sgd_update_f32");
     int n = static_cast<int>(param.numel());
     k.set_arg(0, param.buffer());

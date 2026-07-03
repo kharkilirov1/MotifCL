@@ -1,0 +1,27 @@
+// RMSNorm backward w.r.t. weight, stage 2:
+//   dw[c] = sum_r dy[r,c] * x[r,c] * row_inv[r]
+// One invocation per column; reads are coalesced across the wave.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DyBuf { float dy[]; };
+layout(std430, set = 0, binding = 2) readonly buffer InvBuf { float row_inv[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer DwBuf { float dw[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint cols;
+} p;
+
+void main() {
+    const uint col = gl_GlobalInvocationID.x;
+    if (col >= p.cols) return;
+    float acc = 0.0;
+    for (uint r = 0u; r < p.rows; ++r) {
+        const uint idx = r * p.cols + col;
+        acc += dy[idx] * x[idx] * row_inv[r];
+    }
+    dw[col] = acc;
+}

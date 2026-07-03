@@ -7,6 +7,7 @@ set(MOTIFCL_BENCHMARKS
     bench_softmax
     bench_attention
     bench_lora
+    bench_vulkan_perf
 )
 
 foreach(bench ${MOTIFCL_BENCHMARKS})

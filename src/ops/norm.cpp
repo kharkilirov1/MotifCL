@@ -1,5 +1,7 @@
 #include <motifcl/ops/norm.hpp>
 
+#include <motifcl/ops/basic_ops.hpp>
+
 #include <motifcl/autograd/graph.hpp>
 #include <motifcl/autograd/node.hpp>
 #include <motifcl/core/error.hpp>
@@ -42,20 +44,22 @@ void require_rmsnorm_inputs(const Tensor& x, const Tensor& weight, const char* o
 }
 
 bool vulkan_rmsnorm_supported(const Tensor& x, const Tensor& weight, float eps) {
-    return x.dtype() == DType::F32 &&
-           weight.dtype() == DType::F32 &&
-           x.ndim() == 2 &&
-           weight.ndim() == 1 &&
-           x.shape()[0] > 0 &&
-           x.shape()[1] > 0 &&
-           x.shape()[1] == weight.shape()[0] &&
-           x.shape()[0] <= 4096 &&
-           x.shape()[1] <= 256 &&
-           x.backend_ptr() == weight.backend_ptr() &&
-           std::isfinite(eps) &&
-           eps > 0.0f &&
-           !x.requires_grad() &&
-           !weight.requires_grad();
+    const bool base = x.dtype() == DType::F32 &&
+                      weight.dtype() == DType::F32 &&
+                      x.ndim() == 2 &&
+                      weight.ndim() == 1 &&
+                      x.shape()[0] > 0 &&
+                      x.shape()[1] > 0 &&
+                      x.shape()[1] == weight.shape()[0] &&
+                      x.backend_ptr() == weight.backend_ptr() &&
+                      std::isfinite(eps) &&
+                      eps > 0.0f;
+    if (!base) return false;
+    // Vulkan-backed tensors use the cached wave-per-row kernels: any shape,
+    // autograd handled by RMSNormBackwardNode.
+    if (x.backend().is_vulkan()) return true;
+    // Legacy staged host-roundtrip path keeps its original envelope.
+    return x.shape()[0] <= 4096 && x.shape()[1] <= 256 && !x.requires_grad() && !weight.requires_grad();
 }
 
 Tensor rmsnorm_vulkan_f32(const Tensor& x, const Tensor& weight, const VulkanF32TensorResult& result) {
@@ -63,6 +67,22 @@ Tensor rmsnorm_vulkan_f32(const Tensor& x, const Tensor& weight, const VulkanF32
     MCL_CHECK(result.output.size() == static_cast<std::size_t>(x.numel()),
               "vulkan rmsnorm f32 returned unexpected output size");
     auto out = Tensor::from_cpu(x.backend(), x.shape(), DType::F32, result.output.data());
+    autograd::record_op("rmsnorm_vulkan_f32", {x.id(), weight.id()}, {out.id()});
+    return out;
+}
+
+Tensor rmsnorm_vulkan_f32_device(const Tensor& x, const Tensor& weight, float eps) {
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    const auto rows = static_cast<std::size_t>(x.shape()[0]);
+    const auto cols = static_cast<std::size_t>(x.shape()[1]);
+    const auto result = run_vulkan_rmsnorm(x.backend().vulkan_runtime(),
+                                           x.storage().vulkan_buffer,
+                                           weight.storage().vulkan_buffer,
+                                           out.storage().vulkan_buffer,
+                                           rows,
+                                           cols,
+                                           eps);
+    MCL_CHECK(result.success, std::string("vulkan rmsnorm f32 failed: ") + result.error);
     autograd::record_op("rmsnorm_vulkan_f32", {x.id(), weight.id()}, {out.id()});
     return out;
 }
@@ -78,8 +98,16 @@ struct RMSNormBackwardNode : autograd::Node {
     std::vector<Tensor> inputs() const override { return {x, weight}; }
 
     void backward(const Tensor& grad_output) override {
-        if (x.requires_grad()) x.backward(rmsnorm_backward_x(x, weight, grad_output, eps));
-        if (weight.requires_grad()) weight.backward(rmsnorm_backward_weight(x, weight, grad_output, eps));
+        // The rmsnorm output is often re-viewed by the caller (per-head q/k
+        // norm runs on [rows*heads, head_dim] and views back to
+        // [rows, heads*head_dim]); the engine then delivers the gradient in
+        // the view's shape. Storage is shared and contiguous, so re-view the
+        // gradient back to x's shape before the kernel-shape checks.
+        const Tensor grad = grad_output.shape() == x.shape()
+            ? grad_output
+            : grad_output.view(x.shape());
+        if (x.requires_grad()) x.backward(rmsnorm_backward_x(x, weight, grad, eps));
+        if (weight.requires_grad()) weight.backward(rmsnorm_backward_weight(x, weight, grad, eps));
     }
 };
 }
@@ -87,8 +115,16 @@ struct RMSNormBackwardNode : autograd::Node {
 Tensor rmsnorm(const Tensor& x, const Tensor& weight, float eps) {
     require_rmsnorm_inputs(x, weight, "rmsnorm");
     const auto selected_backend = selected_norm_backend();
-    if (selected_backend.kind == MicrokernelBackendKind::Vulkan &&
+    if ((x.backend().is_vulkan() || selected_backend.kind == MicrokernelBackendKind::Vulkan) &&
         vulkan_rmsnorm_supported(x, weight, eps)) {
+        if (x.backend().is_vulkan()) {
+            auto out = rmsnorm_vulkan_f32_device(x, weight, eps);
+            if (autograd::is_enabled() && (x.requires_grad() || weight.requires_grad())) {
+                out.set_requires_grad(true);
+                out._set_grad_fn(std::make_shared<RMSNormBackwardNode>(x, weight, eps));
+            }
+            return out;
+        }
         const auto rows = static_cast<std::size_t>(x.shape()[0]);
         const auto cols = static_cast<std::size_t>(x.shape()[1]);
         const auto x_host = x.to_vector<float>();
@@ -98,6 +134,7 @@ Tensor rmsnorm(const Tensor& x, const Tensor& weight, float eps) {
         MCL_CHECK(!strict_vulkan_norm_required(),
                   std::string("vulkan rmsnorm f32 failed: ") + result.error);
     }
+    MCL_CHECK(!x.backend().is_vulkan(), "vulkan backend does not support this rmsnorm shape");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     const bool use_wg = supports_norm_workgroup(x.backend());
     const std::string kernel_name = use_wg ? "rmsnorm_rowwise_wg_f32" : "rmsnorm_rowwise_f32";
@@ -126,6 +163,20 @@ Tensor rmsnorm(const Tensor& x, const Tensor& weight, float eps) {
 Tensor rmsnorm_backward_x(const Tensor& x, const Tensor& weight, const Tensor& grad_out, float eps) {
     require_rmsnorm_inputs(x, weight, "rmsnorm_backward_x");
     MCL_CHECK(grad_out.dtype() == DType::F32 && grad_out.shape() == x.shape(), "rmsnorm_backward_x grad_out shape/dtype mismatch");
+    if (x.backend().is_vulkan()) {
+        auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+        const auto result = run_vulkan_rmsnorm_backward_x(x.backend().vulkan_runtime(),
+                                                          x.storage().vulkan_buffer,
+                                                          weight.storage().vulkan_buffer,
+                                                          grad_out.storage().vulkan_buffer,
+                                                          out.storage().vulkan_buffer,
+                                                          static_cast<std::size_t>(x.shape()[0]),
+                                                          static_cast<std::size_t>(x.shape()[1]),
+                                                          eps);
+        MCL_CHECK(result.success, std::string("vulkan rmsnorm backward_x failed: ") + result.error);
+        autograd::record_op("rmsnorm_backward_x_vulkan_f32", {x.id(), weight.id(), grad_out.id()}, {out.id()});
+        return out;
+    }
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     const bool use_wg = supports_norm_workgroup(x.backend());
     const std::string kernel_name = use_wg ? "rmsnorm_backward_x_wg_f32" : "rmsnorm_backward_x_f32";
@@ -158,6 +209,12 @@ Tensor rmsnorm_backward_x_residual(const Tensor& x, const Tensor& weight, const 
               "rmsnorm_backward_x_residual residual_grad shape/dtype mismatch");
     MCL_CHECK(grad_out.backend_ptr() == x.backend_ptr() && residual_grad.backend_ptr() == x.backend_ptr(),
               "rmsnorm_backward_x_residual requires tensors on same backend");
+    if (x.backend().is_vulkan()) {
+        // Composed as backward_x + residual add on the Vulkan cached path
+        // (two dispatches; the fused single-kernel variant stays OpenCL).
+        auto norm_grad = rmsnorm_backward_x(x, weight, grad_out, eps);
+        return add(norm_grad, residual_grad);
+    }
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     const bool use_wg = supports_norm_workgroup(x.backend());
     const std::string kernel_name = use_wg ? "rmsnorm_backward_x_residual_wg_f32" : "rmsnorm_backward_x_residual_f32";
@@ -185,6 +242,21 @@ Tensor rmsnorm_backward_x_residual(const Tensor& x, const Tensor& weight, const 
 Tensor rmsnorm_backward_weight(const Tensor& x, const Tensor& weight, const Tensor& grad_out, float eps) {
     require_rmsnorm_inputs(x, weight, "rmsnorm_backward_weight");
     MCL_CHECK(grad_out.dtype() == DType::F32 && grad_out.shape() == x.shape(), "rmsnorm_backward_weight grad_out shape/dtype mismatch");
+    if (x.backend().is_vulkan()) {
+        auto out = Tensor::empty(x.backend(), weight.shape(), DType::F32);
+        auto row_inv = Tensor::empty(x.backend(), {x.shape()[0]}, DType::F32);
+        const auto result = run_vulkan_rmsnorm_backward_weight(x.backend().vulkan_runtime(),
+                                                               x.storage().vulkan_buffer,
+                                                               grad_out.storage().vulkan_buffer,
+                                                               row_inv.storage().vulkan_buffer,
+                                                               out.storage().vulkan_buffer,
+                                                               static_cast<std::size_t>(x.shape()[0]),
+                                                               static_cast<std::size_t>(x.shape()[1]),
+                                                               eps);
+        MCL_CHECK(result.success, std::string("vulkan rmsnorm backward_weight failed: ") + result.error);
+        autograd::record_op("rmsnorm_backward_weight_vulkan_f32", {x.id(), grad_out.id()}, {out.id()});
+        return out;
+    }
     auto out = Tensor::empty(x.backend(), weight.shape(), DType::F32);
     if (supports_norm_workgroup(x.backend())) {
         int rows = static_cast<int>(x.shape()[0]);

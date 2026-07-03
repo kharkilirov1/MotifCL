@@ -38,6 +38,71 @@
       }
     },
     {
+      "name": "rx580-release",
+      "displayName": "RX 580 optimized release build",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/rx580-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "MOTIFCL_BUILD_TESTS": "ON",
+        "MOTIFCL_BUILD_EXAMPLES": "ON",
+        "MOTIFCL_BUILD_TOOLS": "ON",
+        "MOTIFCL_BUILD_BENCHMARKS": "ON",
+        "MOTIFCL_BUILD_PYTHON": "OFF",
+        "MOTIFCL_WARNINGS_AS_ERRORS": "ON",
+        "MOTIFCL_ENABLE_FAST_MATH": "OFF",
+        "MOTIFCL_ENABLE_LTO": "ON",
+        "MOTIFCL_OPENCL_FAST_RELAXED_MATH": "ON"
+      }
+    },
+    {
+      "name": "android-mi9-arm64",
+      "displayName": "Android MI 9 native arm64 OpenCL build",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/android-mi9-arm64",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake",
+        "ANDROID_ABI": "arm64-v8a",
+        "ANDROID_PLATFORM": "android-29",
+        "ANDROID_STL": "c++_static",
+        "CMAKE_BUILD_TYPE": "Release",
+        "MOTIFCL_OPENCL_LIBRARY": "$env{MOTIFCL_ANDROID_OPENCL_ARM64_LIB}",
+        "MOTIFCL_BUILD_TESTS": "OFF",
+        "MOTIFCL_BUILD_EXAMPLES": "OFF",
+        "MOTIFCL_BUILD_TOOLS": "ON",
+        "MOTIFCL_BUILD_BENCHMARKS": "OFF",
+        "MOTIFCL_BUILD_PYTHON": "OFF",
+        "MOTIFCL_INSTALL": "OFF",
+        "MOTIFCL_ENABLE_FAST_MATH": "OFF",
+        "MOTIFCL_OPENCL_FAST_RELAXED_MATH": "ON",
+        "MOTIFCL_ANDROID_MI9_TUNING": "ON"
+      }
+    },
+    {
+      "name": "macos-release",
+      "displayName": "macOS optimized release build",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/macos-release",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+        "MOTIFCL_BUILD_TESTS": "ON",
+        "MOTIFCL_BUILD_EXAMPLES": "ON",
+        "MOTIFCL_BUILD_TOOLS": "ON",
+        "MOTIFCL_BUILD_BENCHMARKS": "ON",
+        "MOTIFCL_BUILD_PYTHON": "OFF",
+        "MOTIFCL_ENABLE_FAST_MATH": "OFF",
+        "MOTIFCL_ENABLE_LTO": "ON",
+        "MOTIFCL_OPENCL_FAST_RELAXED_MATH": "ON"
+      }
+    },
+    {
       "name": "asan",
       "displayName": "ASan/UBSan build",
       "generator": "Ninja",
@@ -79,6 +144,26 @@
       "configurePreset": "release"
     },
     {
+      "name": "rx580-release",
+      "configurePreset": "rx580-release"
+    },
+    {
+      "name": "android-mi9-arm64",
+      "configurePreset": "android-mi9-arm64",
+      "targets": [
+        "motifcl_dump_opencl_info"
+      ],
+      "environment": {
+        "MOTIFCL_MATMUL_F32_TILE": "8",
+        "MOTIFCL_FA_TILE": "8",
+        "MOTIFCL_FA_WG": "64"
+      }
+    },
+    {
+      "name": "macos-release",
+      "configurePreset": "macos-release"
+    },
+    {
       "name": "asan",
       "configurePreset": "asan"
     },
@@ -98,6 +183,13 @@
     {
       "name": "asan",
       "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "rx580-release",
+      "configurePreset": "rx580-release",
       "output": {
         "outputOnFailure": true
       }

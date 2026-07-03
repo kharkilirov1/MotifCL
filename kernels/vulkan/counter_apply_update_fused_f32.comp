@@ -1,0 +1,104 @@
+// Compact-counter fused stochastic-rounding tick (pass 2), bit-exact port of
+// kernels/compact_counter.cl counter_apply_update_fused_f32: one invocation
+// per packed group of 4 weights, grad_w recomputed on the fly, identical
+// hash-based stochastic rounding (same seed => same state bytes).
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) buffer StateBuf { uint8_t state[]; };
+layout(std430, set = 0, binding = 1) readonly buffer ScaleBuf { float scale[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ScaleNewBuf { float scale_new[]; };
+layout(std430, set = 0, binding = 3) readonly buffer DenomBuf { float denom[]; };
+layout(std430, set = 0, binding = 4) readonly buffer GradOutBuf { float grad_out[]; };
+layout(std430, set = 0, binding = 5) readonly buffer XBuf { float x[]; };
+
+layout(push_constant) uniform Push {
+    int C;
+    int in_features;
+    int out_features;
+    int N;
+    int n_groups;
+    float lr;
+    uint seed;
+} p;
+
+uint cc_hash_u32(uint h) {
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+    return h;
+}
+
+float cc_uniform01(uint h) {
+    return float(cc_hash_u32(h) & 0x00ffffffu) * (1.0 / 16777216.0);
+}
+
+void cc_decode(int code, int C, out int t, out int c) {
+    const int lv = 2 * C - 1;
+    t = code / lv - 1;
+    c = code % lv - (C - 1);
+}
+
+int cc_encode(int t, int c, int C) {
+    const int lv = 2 * C - 1;
+    return (t + 1) * lv + (c + (C - 1));
+}
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    if (gid >= p.n_groups) return;
+    const int gpr = p.in_features / 4;
+    const int row = gid / gpr;
+    const int g = gid - row * gpr;
+    const int base = gid * 3;
+
+    const int b0 = int(uint(state[base]));
+    const int b1 = int(uint(state[base + 1]));
+    const int b2 = int(uint(state[base + 2]));
+    int cc[4];
+    cc[0] = b0 & 0x3F;
+    cc[1] = ((b0 >> 6) | (b1 << 2)) & 0x3F;
+    cc[2] = ((b1 >> 4) | (b2 << 4)) & 0x3F;
+    cc[3] = (b2 >> 2) & 0x3F;
+
+    const float s_old = scale[row];
+    const float s_new = scale_new[row];
+    const float dn = denom[row];
+    const float Cf = float(p.C);
+    int nc[4];
+    for (int k = 0; k < 4; ++k) {
+        const int i = g * 4 + k;
+        const int elem = row * p.in_features + i;
+        float gw = 0.0;
+        for (int r = 0; r < p.N; ++r) {
+            gw += grad_out[r * p.out_features + row] * x[r * p.in_features + i];
+        }
+        int t;
+        int c;
+        cc_decode(cc[k], p.C, t, c);
+        const float tick = -p.lr * (gw / dn) * (Cf / s_new);
+        const float c_reb = float(c) * (s_old / s_new);
+        const float val = c_reb + tick;
+        const float f = floor(val);
+        const float rnd = cc_uniform01(p.seed ^ cc_hash_u32(uint(elem)));
+        const float ccv = f + ((rnd < (val - f)) ? 1.0 : 0.0);
+        const float carry = trunc(ccv / Cf);
+        float rem = ccv - carry * Cf;
+        const int nt = t + int(carry);
+        const int ct = nt < -1 ? -1 : (nt > 1 ? 1 : nt);
+        if (ct != nt) {
+            rem = (ccv > 0.0 ? 1.0 : (ccv < 0.0 ? -1.0 : 0.0)) * (Cf - 1.0);
+        }
+        int ri = int(rem);
+        ri = ri < -(p.C - 1) ? -(p.C - 1) : (ri > p.C - 1 ? p.C - 1 : ri);
+        nc[k] = cc_encode(ct, ri, p.C);
+    }
+
+    state[base] = uint8_t((nc[0] & 0x3F) | ((nc[1] & 0x03) << 6));
+    state[base + 1] = uint8_t(((nc[1] >> 2) & 0x0F) | ((nc[2] & 0x0F) << 4));
+    state[base + 2] = uint8_t(((nc[2] >> 4) & 0x03) | ((nc[3] & 0x3F) << 2));
+}

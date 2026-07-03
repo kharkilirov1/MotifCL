@@ -1,0 +1,87 @@
+// Grouped-query attention forward, non-causal, batch=1.
+//   q  [query_tokens, n_head    * head_dim]
+//   k  [key_tokens,   n_kv_head * head_dim]
+//   v  [key_tokens,   n_kv_head * head_dim]
+//   out[query_tokens, n_head    * head_dim]
+// One wave64 workgroup per (query token, head): scores + softmax kept in
+// shared memory (key_tokens <= 1024), then the weighted V sum over d lanes.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KBuf { float k[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VBuf { float v[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint query_tokens;
+    uint key_tokens;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    float scale;
+} p;
+
+shared float probs[1024];
+shared float scratch[64];
+
+void main() {
+    const uint tq = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint lane = gl_LocalInvocationID.x;
+    if (tq >= p.query_tokens || h >= p.n_head) return;
+
+    const uint group_size = p.n_head / p.n_kv_head;
+    const uint g = h / group_size;
+    const uint q_stride = p.n_head * p.head_dim;
+    const uint kv_stride = p.n_kv_head * p.head_dim;
+    const uint q_base = tq * q_stride + h * p.head_dim;
+    const uint kv_off = g * p.head_dim;
+
+    // Pass 1: scores + running max.
+    float maxv = -3.402823466e+38;
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        float dot = 0.0;
+        const uint k_base = tk * kv_stride + kv_off;
+        for (uint d = 0u; d < p.head_dim; ++d) {
+            dot += q[q_base + d] * k[k_base + d];
+        }
+        const float score = dot * p.scale;
+        probs[tk] = score;
+        maxv = max(maxv, score);
+    }
+    scratch[lane] = maxv;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) scratch[lane] = max(scratch[lane], scratch[lane + stride]);
+        barrier();
+    }
+    maxv = scratch[0];
+    barrier();
+
+    // Pass 2: exp + sum.
+    float sum = 0.0;
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        const float e = exp(probs[tk] - maxv);
+        probs[tk] = e;
+        sum += e;
+    }
+    scratch[lane] = sum;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) scratch[lane] += scratch[lane + stride];
+        barrier();
+    }
+    const float inv_sum = 1.0 / scratch[0];
+    barrier();
+
+    // Pass 3: out[d] = sum_tk p[tk] * v[tk, g, d].
+    for (uint d = lane; d < p.head_dim; d += 64u) {
+        float acc = 0.0;
+        for (uint tk = 0u; tk < p.key_tokens; ++tk) {
+            acc += probs[tk] * v[tk * kv_stride + kv_off + d];
+        }
+        outv[q_base + d] = acc * inv_sum;
+    }
+}

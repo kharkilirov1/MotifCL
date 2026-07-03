@@ -4,10 +4,15 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -25,6 +30,10 @@
 
 namespace motifcl {
 namespace {
+
+// Embedded SPIR-V for the cached fast-dispatch kernels (see
+// kernels/vulkan/*.comp and tools/gen_vulkan_spirv.py).
+#include "vulkan_spirv_kernels.inc"
 
 using VkFlags = std::uint32_t;
 using VkDeviceSize = std::uint64_t;
@@ -83,6 +92,8 @@ constexpr VkStructureType VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET = 35;
 constexpr VkStructureType VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO = 39;
 constexpr VkStructureType VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO = 40;
 constexpr VkStructureType VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO = 42;
+constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 = 1000059000;
+constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES = 1000177000;
 
 constexpr VkQueueFlags VK_QUEUE_COMPUTE_BIT = 0x00000002u;
 constexpr VkBufferUsageFlags VK_BUFFER_USAGE_STORAGE_BUFFER_BIT = 0x00000020u;
@@ -93,6 +104,37 @@ constexpr std::int32_t VK_DESCRIPTOR_TYPE_STORAGE_BUFFER = 7;
 constexpr VkShaderStageFlags VK_SHADER_STAGE_COMPUTE_BIT = 0x00000020u;
 constexpr std::int32_t VK_PIPELINE_BIND_POINT_COMPUTE = 1;
 constexpr std::int32_t VK_COMMAND_BUFFER_LEVEL_PRIMARY = 0;
+
+// --- additions for the cached fast-dispatch path ---------------------------
+// NOTE: the two VK_MEMORY_PROPERTY_* values above are historically off by one
+// bit position (0x1 is really DEVICE_LOCAL, 0x2 is really HOST_VISIBLE); the
+// legacy chooser therefore selects DEVICE_LOCAL|HOST_VISIBLE (BAR) types and
+// works on the drivers we target.  New code uses the spec-correct kMem* bits.
+constexpr VkMemoryPropertyFlags kMemDeviceLocalBit = 0x00000001u;
+constexpr VkMemoryPropertyFlags kMemHostVisibleBit = 0x00000002u;
+constexpr VkMemoryPropertyFlags kMemHostCoherentBit = 0x00000004u;
+
+constexpr VkStructureType VK_STRUCTURE_TYPE_FENCE_CREATE_INFO = 8;
+constexpr VkStructureType VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO = 11;
+constexpr VkStructureType VK_STRUCTURE_TYPE_MEMORY_BARRIER = 46;
+
+constexpr VkBufferUsageFlags VK_BUFFER_USAGE_TRANSFER_SRC_BIT = 0x00000001u;
+constexpr VkBufferUsageFlags VK_BUFFER_USAGE_TRANSFER_DST_BIT = 0x00000002u;
+
+constexpr std::int32_t VK_QUERY_TYPE_TIMESTAMP = 2;
+constexpr VkFlags VK_QUERY_RESULT_64_BIT = 0x00000001u;
+constexpr VkFlags VK_QUERY_RESULT_WAIT_BIT = 0x00000002u;
+
+constexpr VkPipelineStageFlags VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT = 0x00000001u;
+constexpr VkPipelineStageFlags VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT = 0x00000800u;
+constexpr VkPipelineStageFlags VK_PIPELINE_STAGE_TRANSFER_BIT = 0x00001000u;
+constexpr VkPipelineStageFlags VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT = 0x00002000u;
+
+constexpr VkFlags VK_ACCESS_SHADER_READ_BIT = 0x00000020u;
+constexpr VkFlags VK_ACCESS_SHADER_WRITE_BIT = 0x00000040u;
+constexpr VkFlags VK_ACCESS_TRANSFER_WRITE_BIT = 0x00001000u;
+
+constexpr VkFlags VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT = 0x00000001u;
 
 constexpr std::uint32_t vk_make_api_version(std::uint32_t variant,
                                             std::uint32_t major,
@@ -170,6 +212,83 @@ struct VkPhysicalDeviceMemoryProperties {
     VkMemoryType memoryTypes[32];
     std::uint32_t memoryHeapCount;
     VkMemoryHeap memoryHeaps[16];
+};
+
+struct VkExtensionProperties {
+    char extensionName[256];
+    std::uint32_t specVersion;
+};
+
+struct VkPhysicalDeviceFeatures {
+    VkBool32 robustBufferAccess;
+    VkBool32 fullDrawIndexUint32;
+    VkBool32 imageCubeArray;
+    VkBool32 independentBlend;
+    VkBool32 geometryShader;
+    VkBool32 tessellationShader;
+    VkBool32 sampleRateShading;
+    VkBool32 dualSrcBlend;
+    VkBool32 logicOp;
+    VkBool32 multiDrawIndirect;
+    VkBool32 drawIndirectFirstInstance;
+    VkBool32 depthClamp;
+    VkBool32 depthBiasClamp;
+    VkBool32 fillModeNonSolid;
+    VkBool32 depthBounds;
+    VkBool32 wideLines;
+    VkBool32 largePoints;
+    VkBool32 alphaToOne;
+    VkBool32 multiViewport;
+    VkBool32 samplerAnisotropy;
+    VkBool32 textureCompressionETC2;
+    VkBool32 textureCompressionASTC_LDR;
+    VkBool32 textureCompressionBC;
+    VkBool32 occlusionQueryPrecise;
+    VkBool32 pipelineStatisticsQuery;
+    VkBool32 vertexPipelineStoresAndAtomics;
+    VkBool32 fragmentStoresAndAtomics;
+    VkBool32 shaderTessellationAndGeometryPointSize;
+    VkBool32 shaderImageGatherExtended;
+    VkBool32 shaderStorageImageExtendedFormats;
+    VkBool32 shaderStorageImageMultisample;
+    VkBool32 shaderStorageImageReadWithoutFormat;
+    VkBool32 shaderStorageImageWriteWithoutFormat;
+    VkBool32 shaderUniformBufferArrayDynamicIndexing;
+    VkBool32 shaderSampledImageArrayDynamicIndexing;
+    VkBool32 shaderStorageBufferArrayDynamicIndexing;
+    VkBool32 shaderStorageImageArrayDynamicIndexing;
+    VkBool32 shaderClipDistance;
+    VkBool32 shaderCullDistance;
+    VkBool32 shaderFloat64;
+    VkBool32 shaderInt64;
+    VkBool32 shaderInt16;
+    VkBool32 shaderResourceResidency;
+    VkBool32 shaderResourceMinLod;
+    VkBool32 sparseBinding;
+    VkBool32 sparseResidencyBuffer;
+    VkBool32 sparseResidencyImage2D;
+    VkBool32 sparseResidencyImage3D;
+    VkBool32 sparseResidency2Samples;
+    VkBool32 sparseResidency4Samples;
+    VkBool32 sparseResidency8Samples;
+    VkBool32 sparseResidency16Samples;
+    VkBool32 sparseResidencyAliased;
+    VkBool32 variableMultisampleRate;
+    VkBool32 inheritedQueries;
+};
+
+struct VkPhysicalDeviceFeatures2 {
+    VkStructureType sType;
+    void* pNext;
+    VkPhysicalDeviceFeatures features;
+};
+
+struct VkPhysicalDevice8BitStorageFeatures {
+    VkStructureType sType;
+    void* pNext;
+    VkBool32 storageBuffer8BitAccess;
+    VkBool32 uniformAndStorageBuffer8BitAccess;
+    VkBool32 storagePushConstant8;
 };
 
 struct VkBufferCreateInfo {
@@ -331,6 +450,174 @@ struct VkSubmitInfo {
     const void* pSignalSemaphores;
 };
 
+using VkFence = struct VkFence_T*;
+using VkQueryPool = struct VkQueryPool_T*;
+
+struct VkFenceCreateInfo {
+    VkStructureType sType;
+    const void* pNext;
+    VkFlags flags;
+};
+
+struct VkMemoryBarrier {
+    VkStructureType sType;
+    const void* pNext;
+    VkFlags srcAccessMask;
+    VkFlags dstAccessMask;
+};
+
+struct VkBufferCopy {
+    VkDeviceSize srcOffset;
+    VkDeviceSize dstOffset;
+    VkDeviceSize size;
+};
+
+struct VkQueryPoolCreateInfo {
+    VkStructureType sType;
+    const void* pNext;
+    VkFlags flags;
+    std::int32_t queryType;
+    std::uint32_t queryCount;
+    VkFlags pipelineStatistics;
+};
+
+// Full VkPhysicalDeviceLimits/Properties layout (Vulkan 1.0 core ABI); the
+// short prefix struct above stays for name-only probes.  A size static_assert
+// below guards the transcription on 64-bit builds.
+struct VkPhysicalDeviceLimitsFull {
+    std::uint32_t maxImageDimension1D;
+    std::uint32_t maxImageDimension2D;
+    std::uint32_t maxImageDimension3D;
+    std::uint32_t maxImageDimensionCube;
+    std::uint32_t maxImageArrayLayers;
+    std::uint32_t maxTexelBufferElements;
+    std::uint32_t maxUniformBufferRange;
+    std::uint32_t maxStorageBufferRange;
+    std::uint32_t maxPushConstantsSize;
+    std::uint32_t maxMemoryAllocationCount;
+    std::uint32_t maxSamplerAllocationCount;
+    VkDeviceSize bufferImageGranularity;
+    VkDeviceSize sparseAddressSpaceSize;
+    std::uint32_t maxBoundDescriptorSets;
+    std::uint32_t maxPerStageDescriptorSamplers;
+    std::uint32_t maxPerStageDescriptorUniformBuffers;
+    std::uint32_t maxPerStageDescriptorStorageBuffers;
+    std::uint32_t maxPerStageDescriptorSampledImages;
+    std::uint32_t maxPerStageDescriptorStorageImages;
+    std::uint32_t maxPerStageDescriptorInputAttachments;
+    std::uint32_t maxPerStageResources;
+    std::uint32_t maxDescriptorSetSamplers;
+    std::uint32_t maxDescriptorSetUniformBuffers;
+    std::uint32_t maxDescriptorSetUniformBuffersDynamic;
+    std::uint32_t maxDescriptorSetStorageBuffers;
+    std::uint32_t maxDescriptorSetStorageBuffersDynamic;
+    std::uint32_t maxDescriptorSetSampledImages;
+    std::uint32_t maxDescriptorSetStorageImages;
+    std::uint32_t maxDescriptorSetInputAttachments;
+    std::uint32_t maxVertexInputAttributes;
+    std::uint32_t maxVertexInputBindings;
+    std::uint32_t maxVertexInputAttributeOffset;
+    std::uint32_t maxVertexInputBindingStride;
+    std::uint32_t maxVertexOutputComponents;
+    std::uint32_t maxTessellationGenerationLevel;
+    std::uint32_t maxTessellationPatchSize;
+    std::uint32_t maxTessellationControlPerVertexInputComponents;
+    std::uint32_t maxTessellationControlPerVertexOutputComponents;
+    std::uint32_t maxTessellationControlPerPatchOutputComponents;
+    std::uint32_t maxTessellationControlTotalOutputComponents;
+    std::uint32_t maxTessellationEvaluationInputComponents;
+    std::uint32_t maxTessellationEvaluationOutputComponents;
+    std::uint32_t maxGeometryShaderInvocations;
+    std::uint32_t maxGeometryInputComponents;
+    std::uint32_t maxGeometryOutputComponents;
+    std::uint32_t maxGeometryOutputVertices;
+    std::uint32_t maxGeometryTotalOutputComponents;
+    std::uint32_t maxFragmentInputComponents;
+    std::uint32_t maxFragmentOutputAttachments;
+    std::uint32_t maxFragmentDualSrcAttachments;
+    std::uint32_t maxFragmentCombinedOutputResources;
+    std::uint32_t maxComputeSharedMemorySize;
+    std::uint32_t maxComputeWorkGroupCount[3];
+    std::uint32_t maxComputeWorkGroupInvocations;
+    std::uint32_t maxComputeWorkGroupSize[3];
+    std::uint32_t subPixelPrecisionBits;
+    std::uint32_t subTexelPrecisionBits;
+    std::uint32_t mipmapPrecisionBits;
+    std::uint32_t maxDrawIndexedIndexValue;
+    std::uint32_t maxDrawIndirectCount;
+    float maxSamplerLodBias;
+    float maxSamplerAnisotropy;
+    std::uint32_t maxViewports;
+    std::uint32_t maxViewportDimensions[2];
+    float viewportBoundsRange[2];
+    std::uint32_t viewportSubPixelBits;
+    std::size_t minMemoryMapAlignment;
+    VkDeviceSize minTexelBufferOffsetAlignment;
+    VkDeviceSize minUniformBufferOffsetAlignment;
+    VkDeviceSize minStorageBufferOffsetAlignment;
+    std::int32_t minTexelOffset;
+    std::uint32_t maxTexelOffset;
+    std::int32_t minTexelGatherOffset;
+    std::uint32_t maxTexelGatherOffset;
+    float minInterpolationOffset;
+    float maxInterpolationOffset;
+    std::uint32_t subPixelInterpolationOffsetBits;
+    std::uint32_t maxFramebufferWidth;
+    std::uint32_t maxFramebufferHeight;
+    std::uint32_t maxFramebufferLayers;
+    VkFlags framebufferColorSampleCounts;
+    VkFlags framebufferDepthSampleCounts;
+    VkFlags framebufferStencilSampleCounts;
+    VkFlags framebufferNoAttachmentsSampleCounts;
+    std::uint32_t maxColorAttachments;
+    VkFlags sampledImageColorSampleCounts;
+    VkFlags sampledImageIntegerSampleCounts;
+    VkFlags sampledImageDepthSampleCounts;
+    VkFlags sampledImageStencilSampleCounts;
+    VkFlags storageImageSampleCounts;
+    std::uint32_t maxSampleMaskWords;
+    VkBool32 timestampComputeAndGraphics;
+    float timestampPeriod;
+    std::uint32_t maxClipDistances;
+    std::uint32_t maxCullDistances;
+    std::uint32_t maxCombinedClipAndCullDistances;
+    std::uint32_t discreteQueuePriorities;
+    float pointSizeRange[2];
+    float lineWidthRange[2];
+    float pointSizeGranularity;
+    float lineWidthGranularity;
+    VkBool32 strictLines;
+    VkBool32 standardSampleLocations;
+    VkDeviceSize optimalBufferCopyOffsetAlignment;
+    VkDeviceSize optimalBufferCopyRowPitchAlignment;
+    VkDeviceSize nonCoherentAtomSize;
+};
+
+struct VkPhysicalDeviceSparsePropertiesFull {
+    VkBool32 residencyStandard2DBlockShape;
+    VkBool32 residencyStandard2DMultisampleBlockShape;
+    VkBool32 residencyStandard3DBlockShape;
+    VkBool32 residencyAlignedMipSize;
+    VkBool32 residencyNonResidentStrict;
+};
+
+struct VkPhysicalDevicePropertiesFull {
+    std::uint32_t apiVersion;
+    std::uint32_t driverVersion;
+    std::uint32_t vendorID;
+    std::uint32_t deviceID;
+    std::int32_t deviceType;
+    char deviceName[256];
+    std::uint8_t pipelineCacheUUID[16];
+    VkPhysicalDeviceLimitsFull limits;
+    VkPhysicalDeviceSparsePropertiesFull sparseProperties;
+};
+
+static_assert(sizeof(void*) != 8 || sizeof(VkPhysicalDeviceLimitsFull) == 504,
+              "VkPhysicalDeviceLimits transcription drifted from the Vulkan 1.0 ABI");
+static_assert(sizeof(void*) != 8 || sizeof(VkPhysicalDevicePropertiesFull) == 824,
+              "VkPhysicalDeviceProperties transcription drifted from the Vulkan 1.0 ABI");
+
 using PFN_vkGetInstanceProcAddr = PFN_vkVoidFunction (*)(VkInstance instance, const char* pName);
 using PFN_vkGetDeviceProcAddr = PFN_vkVoidFunction (*)(VkDevice device, const char* pName);
 using PFN_vkEnumerateInstanceVersion = VkResult (*)(std::uint32_t* pApiVersion);
@@ -347,6 +634,12 @@ using PFN_vkGetPhysicalDeviceQueueFamilyProperties = void (*)(VkPhysicalDevice p
                                                               VkQueueFamilyProperties* pQueueFamilyProperties);
 using PFN_vkGetPhysicalDeviceMemoryProperties = void (*)(VkPhysicalDevice physicalDevice,
                                                          VkPhysicalDeviceMemoryProperties* pMemoryProperties);
+using PFN_vkEnumerateDeviceExtensionProperties = VkResult (*)(VkPhysicalDevice physicalDevice,
+                                                              const char* pLayerName,
+                                                              std::uint32_t* pPropertyCount,
+                                                              VkExtensionProperties* pProperties);
+using PFN_vkGetPhysicalDeviceFeatures2 = void (*)(VkPhysicalDevice physicalDevice,
+                                                  VkPhysicalDeviceFeatures2* pFeatures);
 using PFN_vkCreateDevice = VkResult (*)(VkPhysicalDevice physicalDevice,
                                         const VkDeviceCreateInfo* pCreateInfo,
                                         const void* pAllocator,
@@ -419,6 +712,35 @@ using PFN_vkCmdDispatch = void (*)(VkCommandBuffer commandBuffer, std::uint32_t 
 using PFN_vkQueueSubmit = VkResult (*)(VkQueue queue, std::uint32_t submitCount,
                                        const VkSubmitInfo* pSubmits, void* fence);
 using PFN_vkQueueWaitIdle = VkResult (*)(VkQueue queue);
+
+// --- fast-dispatch path function pointers ---
+using PFN_vkCreateFence = VkResult (*)(VkDevice device, const VkFenceCreateInfo* pCreateInfo,
+                                       const void* pAllocator, VkFence* pFence);
+using PFN_vkDestroyFence = void (*)(VkDevice device, VkFence fence, const void* pAllocator);
+using PFN_vkResetFences = VkResult (*)(VkDevice device, std::uint32_t fenceCount, const VkFence* pFences);
+using PFN_vkWaitForFences = VkResult (*)(VkDevice device, std::uint32_t fenceCount, const VkFence* pFences,
+                                         VkBool32 waitAll, std::uint64_t timeout);
+using PFN_vkResetCommandPool = VkResult (*)(VkDevice device, VkCommandPool commandPool, VkFlags flags);
+using PFN_vkCmdPushConstants = void (*)(VkCommandBuffer commandBuffer, VkPipelineLayout layout,
+                                        VkShaderStageFlags stageFlags, std::uint32_t offset,
+                                        std::uint32_t size, const void* pValues);
+using PFN_vkCmdPipelineBarrier = void (*)(VkCommandBuffer commandBuffer, VkPipelineStageFlags srcStageMask,
+                                          VkPipelineStageFlags dstStageMask, VkFlags dependencyFlags,
+                                          std::uint32_t memoryBarrierCount, const VkMemoryBarrier* pMemoryBarriers,
+                                          std::uint32_t bufferMemoryBarrierCount, const void* pBufferMemoryBarriers,
+                                          std::uint32_t imageMemoryBarrierCount, const void* pImageMemoryBarriers);
+using PFN_vkCmdCopyBuffer = void (*)(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkBuffer dstBuffer,
+                                     std::uint32_t regionCount, const VkBufferCopy* pRegions);
+using PFN_vkCreateQueryPool = VkResult (*)(VkDevice device, const VkQueryPoolCreateInfo* pCreateInfo,
+                                           const void* pAllocator, VkQueryPool* pQueryPool);
+using PFN_vkDestroyQueryPool = void (*)(VkDevice device, VkQueryPool queryPool, const void* pAllocator);
+using PFN_vkCmdResetQueryPool = void (*)(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+                                         std::uint32_t firstQuery, std::uint32_t queryCount);
+using PFN_vkCmdWriteTimestamp = void (*)(VkCommandBuffer commandBuffer, VkPipelineStageFlags pipelineStage,
+                                         VkQueryPool queryPool, std::uint32_t query);
+using PFN_vkGetQueryPoolResults = VkResult (*)(VkDevice device, VkQueryPool queryPool, std::uint32_t firstQuery,
+                                               std::uint32_t queryCount, std::size_t dataSize, void* pData,
+                                               VkDeviceSize stride, VkFlags flags);
 
 struct VkPhysicalDevicePropertiesPrefix {
     std::uint32_t apiVersion;
@@ -651,6 +973,15 @@ void append_spirv_string(std::vector<std::uint32_t>& words, const char* text) {
             shift = 0;
         }
     }
+}
+
+void append_spirv_string_inst(std::vector<std::uint32_t>& words,
+                              std::uint16_t opcode,
+                              const char* text) {
+    const auto start = words.size();
+    words.push_back(0);
+    append_spirv_string(words, text);
+    words[start] = (static_cast<std::uint32_t>(words.size() - start) << 16u) | opcode;
 }
 
 void append_spirv_inst(std::vector<std::uint32_t>& words,
@@ -963,6 +1294,573 @@ std::vector<std::uint32_t> f32_matmul_spirv(std::size_t k, std::size_t n) {
     append_spirv_inst(words, op_variable, {id_ptr_buffer, id_a, storage_class_uniform});
     append_spirv_inst(words, op_variable, {id_ptr_buffer, id_b, storage_class_uniform});
     append_spirv_inst(words, op_variable, {id_ptr_buffer, id_c, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    words.insert(words.end(), body.begin(), body.end());
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
+std::vector<std::uint32_t> f32_matmul_transpose_b_spirv(std::size_t k, std::size_t n) {
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_float = 22;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_iadd = 128;
+    constexpr std::uint16_t op_imul = 132;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_fmul = 133;
+    constexpr std::uint16_t op_fadd = 129;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+
+    const auto max_constant = std::max(k, n);
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_f32 = 5;
+    const std::uint32_t id_u32 = 6;
+    const std::uint32_t id_v3u32 = 7;
+    const std::uint32_t id_ptr_input_v3u32 = 8;
+    const std::uint32_t id_global_invocation_id = 9;
+    std::uint32_t next_id = 10;
+    std::vector<std::uint32_t> constants(max_constant + 1);
+    for (std::uint32_t value = 0; value <= max_constant; ++value) constants[value] = next_id++;
+    const std::uint32_t id_runtime_array = next_id++;
+    const std::uint32_t id_buffer_struct = next_id++;
+    const std::uint32_t id_ptr_buffer = next_id++;
+    const std::uint32_t id_ptr_f32 = next_id++;
+    const std::uint32_t id_a = next_id++;
+    const std::uint32_t id_b = next_id++;
+    const std::uint32_t id_c = next_id++;
+    auto new_id = [&]() {
+        return next_id++;
+    };
+
+    std::vector<std::uint32_t> body;
+    auto emit_body = [&](std::uint16_t opcode, const std::vector<std::uint32_t>& operands) {
+        append_spirv_inst(body, opcode, operands);
+    };
+
+    const auto gid = new_id();
+    const auto col = new_id();
+    const auto row = new_id();
+    emit_body(op_load, {id_v3u32, gid, id_global_invocation_id});
+    emit_body(op_composite_extract, {id_u32, col, gid, 0});
+    emit_body(op_composite_extract, {id_u32, row, gid, 1});
+
+    std::uint32_t acc = 0;
+    for (std::uint32_t kk = 0; kk < static_cast<std::uint32_t>(k); ++kk) {
+        const auto a_row_base = new_id();
+        const auto a_index = new_id();
+        const auto b_row_base = new_id();
+        const auto b_index = new_id();
+        const auto a_ptr = new_id();
+        const auto a_val = new_id();
+        const auto b_ptr = new_id();
+        const auto b_val = new_id();
+        const auto product = new_id();
+        emit_body(op_imul, {id_u32, a_row_base, row, constants[static_cast<std::uint32_t>(k)]});
+        emit_body(op_iadd, {id_u32, a_index, a_row_base, constants[kk]});
+        emit_body(op_imul, {id_u32, b_row_base, col, constants[static_cast<std::uint32_t>(k)]});
+        emit_body(op_iadd, {id_u32, b_index, b_row_base, constants[kk]});
+        emit_body(op_access_chain, {id_ptr_f32, a_ptr, id_a, constants[0], a_index});
+        emit_body(op_load, {id_f32, a_val, a_ptr});
+        emit_body(op_access_chain, {id_ptr_f32, b_ptr, id_b, constants[0], b_index});
+        emit_body(op_load, {id_f32, b_val, b_ptr});
+        emit_body(op_fmul, {id_f32, product, a_val, b_val});
+        if (acc == 0) {
+            acc = product;
+        } else {
+            const auto sum = new_id();
+            emit_body(op_fadd, {id_f32, sum, acc, product});
+            acc = sum;
+        }
+    }
+    const auto c_row_base = new_id();
+    const auto c_index = new_id();
+    const auto c_ptr = new_id();
+    emit_body(op_imul, {id_u32, c_row_base, row, constants[static_cast<std::uint32_t>(n)]});
+    emit_body(op_iadd, {id_u32, c_index, c_row_base, col});
+    emit_body(op_access_chain, {id_ptr_f32, c_ptr, id_c, constants[0], c_index});
+    emit_body(op_store, {c_ptr, acc});
+
+    std::vector<std::uint32_t> words;
+    words.reserve(180 + body.size());
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(next_id);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_a, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_a, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_b, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_b, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_c, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_c, decoration_binding, 2});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_float, {id_f32, 32});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    for (std::uint32_t value = 0; value <= max_constant; ++value) {
+        append_spirv_inst(words, op_constant, {id_u32, constants[value], value});
+    }
+    append_spirv_inst(words, op_type_runtime_array, {id_runtime_array, id_f32});
+    append_spirv_inst(words, op_type_struct, {id_buffer_struct, id_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_buffer, storage_class_uniform, id_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32, storage_class_uniform, id_f32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_a, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_b, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_c, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    words.insert(words.end(), body.begin(), body.end());
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
+std::vector<std::uint32_t> i32_scaled_matmul_spirv(std::size_t k,
+                                                  std::size_t n,
+                                                  float scale_a,
+                                                  float scale_b) {
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_float = 22;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_convert_s_to_f = 111;
+    constexpr std::uint16_t op_iadd = 128;
+    constexpr std::uint16_t op_fadd = 129;
+    constexpr std::uint16_t op_imul = 132;
+    constexpr std::uint16_t op_fmul = 133;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+
+    const auto max_constant = std::max(k, n);
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_f32 = 5;
+    const std::uint32_t id_u32 = 6;
+    const std::uint32_t id_i32 = 7;
+    const std::uint32_t id_v3u32 = 8;
+    const std::uint32_t id_ptr_input_v3u32 = 9;
+    const std::uint32_t id_global_invocation_id = 10;
+    std::uint32_t next_id = 11;
+    std::vector<std::uint32_t> constants(max_constant + 1);
+    for (std::uint32_t value = 0; value <= max_constant; ++value) constants[value] = next_id++;
+    const std::uint32_t id_scale_a = next_id++;
+    const std::uint32_t id_scale_b = next_id++;
+    const std::uint32_t id_i32_runtime_array = next_id++;
+    const std::uint32_t id_f32_runtime_array = next_id++;
+    const std::uint32_t id_i32_buffer_struct = next_id++;
+    const std::uint32_t id_f32_buffer_struct = next_id++;
+    const std::uint32_t id_ptr_i32_buffer = next_id++;
+    const std::uint32_t id_ptr_f32_buffer = next_id++;
+    const std::uint32_t id_ptr_i32 = next_id++;
+    const std::uint32_t id_ptr_f32 = next_id++;
+    const std::uint32_t id_a = next_id++;
+    const std::uint32_t id_b = next_id++;
+    const std::uint32_t id_c = next_id++;
+    auto new_id = [&]() { return next_id++; };
+
+    std::vector<std::uint32_t> body;
+    auto emit_body = [&](std::uint16_t opcode, const std::vector<std::uint32_t>& operands) {
+        append_spirv_inst(body, opcode, operands);
+    };
+
+    const auto gid = new_id();
+    const auto col = new_id();
+    const auto row = new_id();
+    emit_body(op_load, {id_v3u32, gid, id_global_invocation_id});
+    emit_body(op_composite_extract, {id_u32, col, gid, 0});
+    emit_body(op_composite_extract, {id_u32, row, gid, 1});
+
+    std::uint32_t acc = 0;
+    for (std::uint32_t kk = 0; kk < static_cast<std::uint32_t>(k); ++kk) {
+        const auto a_row_base = new_id();
+        const auto a_index = new_id();
+        const auto b_row_base = new_id();
+        const auto b_index = new_id();
+        const auto a_ptr = new_id();
+        const auto b_ptr = new_id();
+        const auto a_i = new_id();
+        const auto b_i = new_id();
+        const auto a_f = new_id();
+        const auto b_f = new_id();
+        const auto product = new_id();
+        emit_body(op_imul, {id_u32, a_row_base, row, constants[static_cast<std::uint32_t>(k)]});
+        emit_body(op_iadd, {id_u32, a_index, a_row_base, constants[kk]});
+        emit_body(op_imul, {id_u32, b_row_base, constants[kk], constants[static_cast<std::uint32_t>(n)]});
+        emit_body(op_iadd, {id_u32, b_index, b_row_base, col});
+        emit_body(op_access_chain, {id_ptr_i32, a_ptr, id_a, constants[0], a_index});
+        emit_body(op_access_chain, {id_ptr_i32, b_ptr, id_b, constants[0], b_index});
+        emit_body(op_load, {id_i32, a_i, a_ptr});
+        emit_body(op_load, {id_i32, b_i, b_ptr});
+        emit_body(op_convert_s_to_f, {id_f32, a_f, a_i});
+        emit_body(op_convert_s_to_f, {id_f32, b_f, b_i});
+        emit_body(op_fmul, {id_f32, product, a_f, b_f});
+        if (acc == 0) {
+            acc = product;
+        } else {
+            const auto sum = new_id();
+            emit_body(op_fadd, {id_f32, sum, acc, product});
+            acc = sum;
+        }
+    }
+    const auto scaled_a = new_id();
+    const auto scaled_ab = new_id();
+    const auto c_row_base = new_id();
+    const auto c_index = new_id();
+    const auto c_ptr = new_id();
+    emit_body(op_fmul, {id_f32, scaled_a, acc, id_scale_a});
+    emit_body(op_fmul, {id_f32, scaled_ab, scaled_a, id_scale_b});
+    emit_body(op_imul, {id_u32, c_row_base, row, constants[static_cast<std::uint32_t>(n)]});
+    emit_body(op_iadd, {id_u32, c_index, c_row_base, col});
+    emit_body(op_access_chain, {id_ptr_f32, c_ptr, id_c, constants[0], c_index});
+    emit_body(op_store, {c_ptr, scaled_ab});
+
+    std::vector<std::uint32_t> words;
+    words.reserve(220 + body.size());
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(next_id);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_i32_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_decorate, {id_f32_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_i32_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_member_decorate, {id_f32_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_i32_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_f32_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_a, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_a, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_b, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_b, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_c, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_c, decoration_binding, 2});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_float, {id_f32, 32});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_int, {id_i32, 32, 1});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    for (std::uint32_t value = 0; value <= max_constant; ++value) {
+        append_spirv_inst(words, op_constant, {id_u32, constants[value], value});
+    }
+    append_spirv_inst(words, op_constant, {id_f32, id_scale_a, f32_bits(scale_a)});
+    append_spirv_inst(words, op_constant, {id_f32, id_scale_b, f32_bits(scale_b)});
+    append_spirv_inst(words, op_type_runtime_array, {id_i32_runtime_array, id_i32});
+    append_spirv_inst(words, op_type_runtime_array, {id_f32_runtime_array, id_f32});
+    append_spirv_inst(words, op_type_struct, {id_i32_buffer_struct, id_i32_runtime_array});
+    append_spirv_inst(words, op_type_struct, {id_f32_buffer_struct, id_f32_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_i32_buffer, storage_class_uniform, id_i32_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32_buffer, storage_class_uniform, id_f32_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_i32, storage_class_uniform, id_i32});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32, storage_class_uniform, id_f32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_i32_buffer, id_a, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_i32_buffer, id_b, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_f32_buffer, id_c, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    words.insert(words.end(), body.begin(), body.end());
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
+std::vector<std::uint32_t> i8_scaled_matmul_spirv(std::size_t k,
+                                                 std::size_t n,
+                                                 float scale_a,
+                                                 float scale_b) {
+    constexpr std::uint16_t op_extension = 10;
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_float = 22;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_convert_s_to_f = 111;
+    constexpr std::uint16_t op_iadd = 128;
+    constexpr std::uint16_t op_fadd = 129;
+    constexpr std::uint16_t op_imul = 132;
+    constexpr std::uint16_t op_fmul = 133;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t capability_int8 = 39;
+    constexpr std::uint32_t capability_uniform_and_storage_buffer_8bit_access = 4449;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+
+    const auto max_constant = std::max(k, n);
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_f32 = 5;
+    const std::uint32_t id_u32 = 6;
+    const std::uint32_t id_i8 = 7;
+    const std::uint32_t id_v3u32 = 8;
+    const std::uint32_t id_ptr_input_v3u32 = 9;
+    const std::uint32_t id_global_invocation_id = 10;
+    std::uint32_t next_id = 11;
+    std::vector<std::uint32_t> constants(max_constant + 1);
+    for (std::uint32_t value = 0; value <= max_constant; ++value) constants[value] = next_id++;
+    const std::uint32_t id_scale_a = next_id++;
+    const std::uint32_t id_scale_b = next_id++;
+    const std::uint32_t id_i8_runtime_array = next_id++;
+    const std::uint32_t id_f32_runtime_array = next_id++;
+    const std::uint32_t id_i8_buffer_struct = next_id++;
+    const std::uint32_t id_f32_buffer_struct = next_id++;
+    const std::uint32_t id_ptr_i8_buffer = next_id++;
+    const std::uint32_t id_ptr_f32_buffer = next_id++;
+    const std::uint32_t id_ptr_i8 = next_id++;
+    const std::uint32_t id_ptr_f32 = next_id++;
+    const std::uint32_t id_a = next_id++;
+    const std::uint32_t id_b = next_id++;
+    const std::uint32_t id_c = next_id++;
+    auto new_id = [&]() { return next_id++; };
+
+    std::vector<std::uint32_t> body;
+    auto emit_body = [&](std::uint16_t opcode, const std::vector<std::uint32_t>& operands) {
+        append_spirv_inst(body, opcode, operands);
+    };
+
+    const auto gid = new_id();
+    const auto col = new_id();
+    const auto row = new_id();
+    emit_body(op_load, {id_v3u32, gid, id_global_invocation_id});
+    emit_body(op_composite_extract, {id_u32, col, gid, 0});
+    emit_body(op_composite_extract, {id_u32, row, gid, 1});
+
+    std::uint32_t acc = 0;
+    for (std::uint32_t kk = 0; kk < static_cast<std::uint32_t>(k); ++kk) {
+        const auto a_row_base = new_id();
+        const auto a_index = new_id();
+        const auto b_row_base = new_id();
+        const auto b_index = new_id();
+        const auto a_ptr = new_id();
+        const auto b_ptr = new_id();
+        const auto a_i = new_id();
+        const auto b_i = new_id();
+        const auto a_f = new_id();
+        const auto b_f = new_id();
+        const auto product = new_id();
+        emit_body(op_imul, {id_u32, a_row_base, row, constants[static_cast<std::uint32_t>(k)]});
+        emit_body(op_iadd, {id_u32, a_index, a_row_base, constants[kk]});
+        emit_body(op_imul, {id_u32, b_row_base, constants[kk], constants[static_cast<std::uint32_t>(n)]});
+        emit_body(op_iadd, {id_u32, b_index, b_row_base, col});
+        emit_body(op_access_chain, {id_ptr_i8, a_ptr, id_a, constants[0], a_index});
+        emit_body(op_access_chain, {id_ptr_i8, b_ptr, id_b, constants[0], b_index});
+        emit_body(op_load, {id_i8, a_i, a_ptr});
+        emit_body(op_load, {id_i8, b_i, b_ptr});
+        emit_body(op_convert_s_to_f, {id_f32, a_f, a_i});
+        emit_body(op_convert_s_to_f, {id_f32, b_f, b_i});
+        emit_body(op_fmul, {id_f32, product, a_f, b_f});
+        if (acc == 0) {
+            acc = product;
+        } else {
+            const auto sum = new_id();
+            emit_body(op_fadd, {id_f32, sum, acc, product});
+            acc = sum;
+        }
+    }
+    const auto scaled_a = new_id();
+    const auto scaled_ab = new_id();
+    const auto c_row_base = new_id();
+    const auto c_index = new_id();
+    const auto c_ptr = new_id();
+    emit_body(op_fmul, {id_f32, scaled_a, acc, id_scale_a});
+    emit_body(op_fmul, {id_f32, scaled_ab, scaled_a, id_scale_b});
+    emit_body(op_imul, {id_u32, c_row_base, row, constants[static_cast<std::uint32_t>(n)]});
+    emit_body(op_iadd, {id_u32, c_index, c_row_base, col});
+    emit_body(op_access_chain, {id_ptr_f32, c_ptr, id_c, constants[0], c_index});
+    emit_body(op_store, {c_ptr, scaled_ab});
+
+    std::vector<std::uint32_t> words;
+    words.reserve(230 + body.size());
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(next_id);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    append_spirv_inst(words, op_capability, {capability_int8});
+    append_spirv_inst(words, op_capability, {capability_uniform_and_storage_buffer_8bit_access});
+    append_spirv_string_inst(words, op_extension, "SPV_KHR_8bit_storage");
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_i8_runtime_array, decoration_array_stride, 1});
+    append_spirv_inst(words, op_decorate, {id_f32_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_i8_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_member_decorate, {id_f32_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_i8_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_f32_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_a, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_a, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_b, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_b, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_c, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_c, decoration_binding, 2});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_float, {id_f32, 32});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_int, {id_i8, 8, 1});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    for (std::uint32_t value = 0; value <= max_constant; ++value) {
+        append_spirv_inst(words, op_constant, {id_u32, constants[value], value});
+    }
+    append_spirv_inst(words, op_constant, {id_f32, id_scale_a, f32_bits(scale_a)});
+    append_spirv_inst(words, op_constant, {id_f32, id_scale_b, f32_bits(scale_b)});
+    append_spirv_inst(words, op_type_runtime_array, {id_i8_runtime_array, id_i8});
+    append_spirv_inst(words, op_type_runtime_array, {id_f32_runtime_array, id_f32});
+    append_spirv_inst(words, op_type_struct, {id_i8_buffer_struct, id_i8_runtime_array});
+    append_spirv_inst(words, op_type_struct, {id_f32_buffer_struct, id_f32_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_i8_buffer, storage_class_uniform, id_i8_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32_buffer, storage_class_uniform, id_f32_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_i8, storage_class_uniform, id_i8});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32, storage_class_uniform, id_f32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_i8_buffer, id_a, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_i8_buffer, id_b, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_f32_buffer, id_c, storage_class_uniform});
     append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
     append_spirv_inst(words, op_label, {id_label});
     words.insert(words.end(), body.begin(), body.end());
@@ -1463,6 +2361,137 @@ std::vector<std::uint32_t> add_spirv() {
     return words;
 }
 
+std::vector<std::uint32_t> sgd_update_spirv(float lr) {
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_float = 22;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_fsub = 131;
+    constexpr std::uint16_t op_fmul = 133;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_f32 = 5;
+    const std::uint32_t id_u32 = 6;
+    const std::uint32_t id_v3u32 = 7;
+    const std::uint32_t id_ptr_input_v3u32 = 8;
+    const std::uint32_t id_global_invocation_id = 9;
+    const std::uint32_t id_const_u32_0 = 10;
+    const std::uint32_t id_lr = 11;
+    const std::uint32_t id_runtime_array = 12;
+    const std::uint32_t id_buffer_struct = 13;
+    const std::uint32_t id_ptr_buffer = 14;
+    const std::uint32_t id_ptr_f32 = 15;
+    const std::uint32_t id_param = 16;
+    const std::uint32_t id_grad = 17;
+    const std::uint32_t id_out = 18;
+    const std::uint32_t id_gid = 19;
+    const std::uint32_t id_index = 20;
+    const std::uint32_t id_param_ptr = 21;
+    const std::uint32_t id_grad_ptr = 22;
+    const std::uint32_t id_out_ptr = 23;
+    const std::uint32_t id_param_val = 24;
+    const std::uint32_t id_grad_val = 25;
+    const std::uint32_t id_step = 26;
+    const std::uint32_t id_new_value = 27;
+    const std::uint32_t bound = 28;
+
+    std::vector<std::uint32_t> words;
+    words.reserve(150);
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(bound);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_param, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_param, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_grad, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_grad, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_out, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_out, decoration_binding, 2});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_float, {id_f32, 32});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    append_spirv_inst(words, op_constant, {id_u32, id_const_u32_0, 0});
+    append_spirv_inst(words, op_constant, {id_f32, id_lr, f32_bits(lr)});
+    append_spirv_inst(words, op_type_runtime_array, {id_runtime_array, id_f32});
+    append_spirv_inst(words, op_type_struct, {id_buffer_struct, id_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_buffer, storage_class_uniform, id_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32, storage_class_uniform, id_f32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_param, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_grad, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_out, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    append_spirv_inst(words, op_load, {id_v3u32, id_gid, id_global_invocation_id});
+    append_spirv_inst(words, op_composite_extract, {id_u32, id_index, id_gid, 0});
+    append_spirv_inst(words, op_access_chain, {id_ptr_f32, id_param_ptr, id_param, id_const_u32_0, id_index});
+    append_spirv_inst(words, op_access_chain, {id_ptr_f32, id_grad_ptr, id_grad, id_const_u32_0, id_index});
+    append_spirv_inst(words, op_access_chain, {id_ptr_f32, id_out_ptr, id_out, id_const_u32_0, id_index});
+    append_spirv_inst(words, op_load, {id_f32, id_param_val, id_param_ptr});
+    append_spirv_inst(words, op_load, {id_f32, id_grad_val, id_grad_ptr});
+    append_spirv_inst(words, op_fmul, {id_f32, id_step, id_grad_val, id_lr});
+    append_spirv_inst(words, op_fsub, {id_f32, id_new_value, id_param_val, id_step});
+    append_spirv_inst(words, op_store, {id_out_ptr, id_new_value});
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
 std::vector<std::uint32_t> softmax_rows_spirv(std::size_t cols) {
     constexpr std::uint16_t op_ext_inst_import = 11;
     constexpr std::uint16_t op_ext_inst = 12;
@@ -1658,6 +2687,1153 @@ std::vector<std::uint32_t> softmax_rows_spirv(std::size_t cols) {
     return words;
 }
 
+std::vector<std::uint32_t> gqa_forward_spirv(std::size_t query_tokens,
+                                             std::size_t key_tokens,
+                                             std::size_t n_head,
+                                             std::size_t n_kv_head,
+                                             std::size_t head_dim,
+                                             float scale) {
+    constexpr std::uint16_t op_ext_inst_import = 11;
+    constexpr std::uint16_t op_ext_inst = 12;
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_float = 22;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_iadd = 128;
+    constexpr std::uint16_t op_fadd = 129;
+    constexpr std::uint16_t op_fsub = 131;
+    constexpr std::uint16_t op_imul = 132;
+    constexpr std::uint16_t op_fmul = 133;
+    constexpr std::uint16_t op_udiv = 134;
+    constexpr std::uint16_t op_fdiv = 136;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+    constexpr std::uint32_t glsl_exp = 27;
+    constexpr std::uint32_t glsl_fmax = 40;
+
+    const auto group_size = static_cast<std::uint32_t>(n_head / n_kv_head);
+    const auto q_stride = static_cast<std::uint32_t>(n_head * head_dim);
+    const auto kv_stride = static_cast<std::uint32_t>(n_kv_head * head_dim);
+    std::uint32_t max_constant = static_cast<std::uint32_t>(query_tokens);
+    max_constant = std::max(max_constant, static_cast<std::uint32_t>(key_tokens));
+    max_constant = std::max(max_constant, static_cast<std::uint32_t>(n_head));
+    max_constant = std::max(max_constant, static_cast<std::uint32_t>(n_kv_head));
+    max_constant = std::max(max_constant, static_cast<std::uint32_t>(head_dim));
+    max_constant = std::max(max_constant, group_size);
+    max_constant = std::max(max_constant, q_stride);
+    max_constant = std::max(max_constant, kv_stride);
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_glsl = 5;
+    const std::uint32_t id_f32 = 6;
+    const std::uint32_t id_u32 = 7;
+    const std::uint32_t id_v3u32 = 8;
+    const std::uint32_t id_ptr_input_v3u32 = 9;
+    const std::uint32_t id_global_invocation_id = 10;
+    std::uint32_t next_id = 11;
+    std::vector<std::uint32_t> constants(max_constant + 1);
+    for (std::uint32_t value = 0; value <= max_constant; ++value) constants[value] = next_id++;
+    const std::uint32_t id_scale = next_id++;
+    const std::uint32_t id_runtime_array = next_id++;
+    const std::uint32_t id_buffer_struct = next_id++;
+    const std::uint32_t id_ptr_buffer = next_id++;
+    const std::uint32_t id_ptr_f32 = next_id++;
+    const std::uint32_t id_q = next_id++;
+    const std::uint32_t id_k = next_id++;
+    const std::uint32_t id_v = next_id++;
+    const std::uint32_t id_out = next_id++;
+    auto new_id = [&]() { return next_id++; };
+
+    std::vector<std::uint32_t> body;
+    auto emit = [&](std::uint16_t opcode, const std::vector<std::uint32_t>& operands) {
+        append_spirv_inst(body, opcode, operands);
+    };
+
+    const auto gid = new_id();
+    const auto d = new_id();
+    const auto h = new_id();
+    const auto tq = new_id();
+    const auto kv_head = new_id();
+    emit(op_load, {id_v3u32, gid, id_global_invocation_id});
+    emit(op_composite_extract, {id_u32, d, gid, 0});
+    emit(op_composite_extract, {id_u32, h, gid, 1});
+    emit(op_composite_extract, {id_u32, tq, gid, 2});
+    emit(op_udiv, {id_u32, kv_head, h, constants[group_size]});
+
+    auto emit_score = [&](std::uint32_t tk) -> std::uint32_t {
+        std::uint32_t dot = 0;
+        for (std::uint32_t kd = 0; kd < static_cast<std::uint32_t>(head_dim); ++kd) {
+            const auto q_tok_base = new_id();
+            const auto q_head_base = new_id();
+            const auto q_base = new_id();
+            const auto q_index = new_id();
+            const auto q_ptr = new_id();
+            const auto q_val = new_id();
+            const auto k_tok_base = new_id();
+            const auto k_head_base = new_id();
+            const auto k_base = new_id();
+            const auto k_index = new_id();
+            const auto k_ptr = new_id();
+            const auto k_val = new_id();
+            const auto prod = new_id();
+            emit(op_imul, {id_u32, q_tok_base, tq, constants[q_stride]});
+            emit(op_imul, {id_u32, q_head_base, h, constants[static_cast<std::uint32_t>(head_dim)]});
+            emit(op_iadd, {id_u32, q_base, q_tok_base, q_head_base});
+            emit(op_iadd, {id_u32, q_index, q_base, constants[kd]});
+            emit(op_access_chain, {id_ptr_f32, q_ptr, id_q, constants[0], q_index});
+            emit(op_load, {id_f32, q_val, q_ptr});
+
+            emit(op_imul, {id_u32, k_tok_base, constants[tk], constants[kv_stride]});
+            emit(op_imul, {id_u32, k_head_base, kv_head, constants[static_cast<std::uint32_t>(head_dim)]});
+            emit(op_iadd, {id_u32, k_base, k_tok_base, k_head_base});
+            emit(op_iadd, {id_u32, k_index, k_base, constants[kd]});
+            emit(op_access_chain, {id_ptr_f32, k_ptr, id_k, constants[0], k_index});
+            emit(op_load, {id_f32, k_val, k_ptr});
+            emit(op_fmul, {id_f32, prod, q_val, k_val});
+            if (dot == 0) {
+                dot = prod;
+            } else {
+                const auto sum = new_id();
+                emit(op_fadd, {id_f32, sum, dot, prod});
+                dot = sum;
+            }
+        }
+        const auto scaled = new_id();
+        emit(op_fmul, {id_f32, scaled, dot, id_scale});
+        return scaled;
+    };
+
+    std::uint32_t max_score = emit_score(0);
+    for (std::uint32_t tk = 1; tk < static_cast<std::uint32_t>(key_tokens); ++tk) {
+        const auto score = emit_score(tk);
+        const auto next_max = new_id();
+        emit(op_ext_inst, {id_f32, next_max, id_glsl, glsl_fmax, max_score, score});
+        max_score = next_max;
+    }
+
+    std::uint32_t denom = 0;
+    for (std::uint32_t tk = 0; tk < static_cast<std::uint32_t>(key_tokens); ++tk) {
+        const auto score = emit_score(tk);
+        const auto shifted = new_id();
+        const auto e = new_id();
+        emit(op_fsub, {id_f32, shifted, score, max_score});
+        emit(op_ext_inst, {id_f32, e, id_glsl, glsl_exp, shifted});
+        if (denom == 0) {
+            denom = e;
+        } else {
+            const auto sum = new_id();
+            emit(op_fadd, {id_f32, sum, denom, e});
+            denom = sum;
+        }
+    }
+
+    std::uint32_t acc_out = 0;
+    for (std::uint32_t tk = 0; tk < static_cast<std::uint32_t>(key_tokens); ++tk) {
+        const auto score = emit_score(tk);
+        const auto shifted = new_id();
+        const auto e = new_id();
+        const auto prob = new_id();
+        emit(op_fsub, {id_f32, shifted, score, max_score});
+        emit(op_ext_inst, {id_f32, e, id_glsl, glsl_exp, shifted});
+        emit(op_fdiv, {id_f32, prob, e, denom});
+
+        const auto v_tok_base = new_id();
+        const auto v_head_base = new_id();
+        const auto v_base = new_id();
+        const auto v_index = new_id();
+        const auto v_ptr = new_id();
+        const auto v_val = new_id();
+        const auto weighted = new_id();
+        emit(op_imul, {id_u32, v_tok_base, constants[tk], constants[kv_stride]});
+        emit(op_imul, {id_u32, v_head_base, kv_head, constants[static_cast<std::uint32_t>(head_dim)]});
+        emit(op_iadd, {id_u32, v_base, v_tok_base, v_head_base});
+        emit(op_iadd, {id_u32, v_index, v_base, d});
+        emit(op_access_chain, {id_ptr_f32, v_ptr, id_v, constants[0], v_index});
+        emit(op_load, {id_f32, v_val, v_ptr});
+        emit(op_fmul, {id_f32, weighted, prob, v_val});
+        if (acc_out == 0) {
+            acc_out = weighted;
+        } else {
+            const auto sum = new_id();
+            emit(op_fadd, {id_f32, sum, acc_out, weighted});
+            acc_out = sum;
+        }
+    }
+
+    const auto out_tok_base = new_id();
+    const auto out_head_base = new_id();
+    const auto out_base = new_id();
+    const auto out_index = new_id();
+    const auto out_ptr = new_id();
+    emit(op_imul, {id_u32, out_tok_base, tq, constants[q_stride]});
+    emit(op_imul, {id_u32, out_head_base, h, constants[static_cast<std::uint32_t>(head_dim)]});
+    emit(op_iadd, {id_u32, out_base, out_tok_base, out_head_base});
+    emit(op_iadd, {id_u32, out_index, out_base, d});
+    emit(op_access_chain, {id_ptr_f32, out_ptr, id_out, constants[0], out_index});
+    emit(op_store, {out_ptr, acc_out});
+
+    std::vector<std::uint32_t> words;
+    words.reserve(300 + body.size());
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(next_id);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    words.push_back((6u << 16u) | op_ext_inst_import);
+    words.push_back(id_glsl);
+    append_spirv_string(words, "GLSL.std.450");
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_q, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_q, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_k, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_k, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_v, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_v, decoration_binding, 2});
+    append_spirv_inst(words, op_decorate, {id_out, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_out, decoration_binding, 3});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_float, {id_f32, 32});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    for (std::uint32_t value = 0; value <= max_constant; ++value) {
+        append_spirv_inst(words, op_constant, {id_u32, constants[value], value});
+    }
+    append_spirv_inst(words, op_constant, {id_f32, id_scale, f32_bits(scale)});
+    append_spirv_inst(words, op_type_runtime_array, {id_runtime_array, id_f32});
+    append_spirv_inst(words, op_type_struct, {id_buffer_struct, id_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_buffer, storage_class_uniform, id_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32, storage_class_uniform, id_f32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_q, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_k, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_v, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_out, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    words.insert(words.end(), body.begin(), body.end());
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
+std::vector<std::uint32_t> counter_increment_spirv() {
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_iadd = 128;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_shift_right_logical = 194;
+    constexpr std::uint16_t op_shift_left_logical = 196;
+    constexpr std::uint16_t op_bitwise_or = 197;
+    constexpr std::uint16_t op_bitwise_and = 199;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_u32 = 5;
+    const std::uint32_t id_v3u32 = 6;
+    const std::uint32_t id_ptr_input_v3u32 = 7;
+    const std::uint32_t id_global_invocation_id = 8;
+    std::uint32_t next_id = 9;
+    std::array<std::uint32_t, 64> constants{};
+    for (std::uint32_t value = 0; value < constants.size(); ++value) constants[value] = next_id++;
+    const std::uint32_t id_runtime_array = next_id++;
+    const std::uint32_t id_buffer_struct = next_id++;
+    const std::uint32_t id_ptr_buffer = next_id++;
+    const std::uint32_t id_ptr_u32 = next_id++;
+    const std::uint32_t id_state = next_id++;
+    const std::uint32_t id_inc = next_id++;
+    const std::uint32_t id_out = next_id++;
+    auto new_id = [&]() { return next_id++; };
+
+    std::vector<std::uint32_t> body;
+    auto emit = [&](std::uint16_t opcode, const std::vector<std::uint32_t>& operands) {
+        append_spirv_inst(body, opcode, operands);
+    };
+
+    const auto gid = new_id();
+    const auto index = new_id();
+    const auto state_ptr = new_id();
+    const auto inc_ptr = new_id();
+    const auto out_ptr = new_id();
+    const auto word = new_id();
+    const auto inc_word = new_id();
+    emit(op_load, {id_v3u32, gid, id_global_invocation_id});
+    emit(op_composite_extract, {id_u32, index, gid, 0});
+    emit(op_access_chain, {id_ptr_u32, state_ptr, id_state, constants[0], index});
+    emit(op_access_chain, {id_ptr_u32, inc_ptr, id_inc, constants[0], index});
+    emit(op_access_chain, {id_ptr_u32, out_ptr, id_out, constants[0], index});
+    emit(op_load, {id_u32, word, state_ptr});
+    emit(op_load, {id_u32, inc_word, inc_ptr});
+    std::uint32_t packed = constants[0];
+    for (std::uint32_t lane = 0; lane < 4; ++lane) {
+        const std::uint32_t shift = lane * 6;
+        const auto shifted_word = new_id();
+        const auto code = new_id();
+        const auto shifted_inc = new_id();
+        const auto inc = new_id();
+        const auto updated = new_id();
+        const auto packed_lane = new_id();
+        const auto next_packed = new_id();
+        emit(op_shift_right_logical, {id_u32, shifted_word, word, constants[shift]});
+        emit(op_bitwise_and, {id_u32, code, shifted_word, constants[63]});
+        emit(op_shift_right_logical, {id_u32, shifted_inc, inc_word, constants[shift]});
+        emit(op_bitwise_and, {id_u32, inc, shifted_inc, constants[1]});
+        emit(op_iadd, {id_u32, updated, code, inc});
+        emit(op_shift_left_logical, {id_u32, packed_lane, updated, constants[shift]});
+        emit(op_bitwise_or, {id_u32, next_packed, packed, packed_lane});
+        packed = next_packed;
+    }
+    emit(op_store, {out_ptr, packed});
+
+    std::vector<std::uint32_t> words;
+    words.reserve(180 + body.size());
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(next_id);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_state, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_state, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_inc, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_inc, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_out, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_out, decoration_binding, 2});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    for (std::uint32_t value = 0; value < constants.size(); ++value) {
+        append_spirv_inst(words, op_constant, {id_u32, constants[value], value});
+    }
+    append_spirv_inst(words, op_type_runtime_array, {id_runtime_array, id_u32});
+    append_spirv_inst(words, op_type_struct, {id_buffer_struct, id_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_buffer, storage_class_uniform, id_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_u32, storage_class_uniform, id_u32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_state, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_inc, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_buffer, id_out, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    words.insert(words.end(), body.begin(), body.end());
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
+std::vector<std::uint32_t> counter_backward_input_fused_spirv(std::size_t in_features,
+                                                              std::size_t out_features,
+                                                              std::size_t C) {
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_float = 22;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_convert_u_to_f = 112;
+    constexpr std::uint16_t op_iadd = 128;
+    constexpr std::uint16_t op_fadd = 129;
+    constexpr std::uint16_t op_fsub = 131;
+    constexpr std::uint16_t op_imul = 132;
+    constexpr std::uint16_t op_fmul = 133;
+    constexpr std::uint16_t op_udiv = 134;
+    constexpr std::uint16_t op_umod = 137;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_shift_right_logical = 194;
+    constexpr std::uint16_t op_bitwise_and = 199;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+
+    const auto gpr = static_cast<std::uint32_t>(in_features / 4);
+    const auto lv = static_cast<std::uint32_t>(2 * C - 1);
+    std::uint32_t max_constant = static_cast<std::uint32_t>(in_features);
+    max_constant = std::max(max_constant, static_cast<std::uint32_t>(out_features));
+    max_constant = std::max(max_constant, gpr);
+    max_constant = std::max(max_constant, lv);
+    max_constant = std::max(max_constant, 63u);
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_f32 = 5;
+    const std::uint32_t id_u32 = 6;
+    const std::uint32_t id_v3u32 = 7;
+    const std::uint32_t id_ptr_input_v3u32 = 8;
+    const std::uint32_t id_global_invocation_id = 9;
+    std::uint32_t next_id = 10;
+    std::vector<std::uint32_t> constants(max_constant + 1);
+    for (std::uint32_t value = 0; value <= max_constant; ++value) constants[value] = next_id++;
+    const std::uint32_t id_one_f = next_id++;
+    const std::uint32_t id_u32_runtime_array = next_id++;
+    const std::uint32_t id_f32_runtime_array = next_id++;
+    const std::uint32_t id_u32_buffer_struct = next_id++;
+    const std::uint32_t id_f32_buffer_struct = next_id++;
+    const std::uint32_t id_ptr_u32_buffer = next_id++;
+    const std::uint32_t id_ptr_f32_buffer = next_id++;
+    const std::uint32_t id_ptr_u32 = next_id++;
+    const std::uint32_t id_ptr_f32 = next_id++;
+    const std::uint32_t id_grad_out = next_id++;
+    const std::uint32_t id_state = next_id++;
+    const std::uint32_t id_scale = next_id++;
+    const std::uint32_t id_grad_x = next_id++;
+    auto new_id = [&]() { return next_id++; };
+
+    std::vector<std::uint32_t> body;
+    auto emit = [&](std::uint16_t opcode, const std::vector<std::uint32_t>& operands) {
+        append_spirv_inst(body, opcode, operands);
+    };
+
+    const auto gid = new_id();
+    const auto elem = new_id();
+    const auto r = new_id();
+    const auto i = new_id();
+    const auto group = new_id();
+    const auto lane = new_id();
+    const auto shift = new_id();
+    emit(op_load, {id_v3u32, gid, id_global_invocation_id});
+    emit(op_composite_extract, {id_u32, elem, gid, 0});
+    emit(op_udiv, {id_u32, r, elem, constants[static_cast<std::uint32_t>(in_features)]});
+    emit(op_umod, {id_u32, i, elem, constants[static_cast<std::uint32_t>(in_features)]});
+    emit(op_udiv, {id_u32, group, i, constants[4]});
+    emit(op_umod, {id_u32, lane, i, constants[4]});
+    emit(op_imul, {id_u32, shift, lane, constants[6]});
+
+    std::uint32_t acc = 0;
+    for (std::uint32_t o = 0; o < static_cast<std::uint32_t>(out_features); ++o) {
+        const auto state_row_base = new_id();
+        const auto state_index = new_id();
+        const auto state_ptr = new_id();
+        const auto word = new_id();
+        const auto shifted = new_id();
+        const auto code = new_id();
+        const auto bucket = new_id();
+        const auto bucket_f = new_id();
+        const auto t_f = new_id();
+        const auto grad_row_base = new_id();
+        const auto grad_index = new_id();
+        const auto grad_ptr = new_id();
+        const auto grad_val = new_id();
+        const auto scale_ptr = new_id();
+        const auto scale_val = new_id();
+        const auto grad_scale = new_id();
+        const auto term = new_id();
+
+        emit(op_imul, {id_u32, state_row_base, constants[o], constants[gpr]});
+        emit(op_iadd, {id_u32, state_index, state_row_base, group});
+        emit(op_access_chain, {id_ptr_u32, state_ptr, id_state, constants[0], state_index});
+        emit(op_load, {id_u32, word, state_ptr});
+        emit(op_shift_right_logical, {id_u32, shifted, word, shift});
+        emit(op_bitwise_and, {id_u32, code, shifted, constants[63]});
+        emit(op_udiv, {id_u32, bucket, code, constants[lv]});
+        emit(op_convert_u_to_f, {id_f32, bucket_f, bucket});
+        emit(op_fsub, {id_f32, t_f, bucket_f, id_one_f});
+
+        emit(op_imul, {id_u32, grad_row_base, r, constants[static_cast<std::uint32_t>(out_features)]});
+        emit(op_iadd, {id_u32, grad_index, grad_row_base, constants[o]});
+        emit(op_access_chain, {id_ptr_f32, grad_ptr, id_grad_out, constants[0], grad_index});
+        emit(op_load, {id_f32, grad_val, grad_ptr});
+        emit(op_access_chain, {id_ptr_f32, scale_ptr, id_scale, constants[0], constants[o]});
+        emit(op_load, {id_f32, scale_val, scale_ptr});
+        emit(op_fmul, {id_f32, grad_scale, grad_val, scale_val});
+        emit(op_fmul, {id_f32, term, grad_scale, t_f});
+        if (acc == 0) {
+            acc = term;
+        } else {
+            const auto sum = new_id();
+            emit(op_fadd, {id_f32, sum, acc, term});
+            acc = sum;
+        }
+    }
+
+    const auto out_ptr = new_id();
+    emit(op_access_chain, {id_ptr_f32, out_ptr, id_grad_x, constants[0], elem});
+    emit(op_store, {out_ptr, acc});
+
+    std::vector<std::uint32_t> words;
+    words.reserve(260 + body.size());
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(next_id);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_u32_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_decorate, {id_f32_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_u32_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_member_decorate, {id_f32_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_u32_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_f32_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_grad_out, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_grad_out, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_state, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_state, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_scale, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_scale, decoration_binding, 2});
+    append_spirv_inst(words, op_decorate, {id_grad_x, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_grad_x, decoration_binding, 3});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_float, {id_f32, 32});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    for (std::uint32_t value = 0; value <= max_constant; ++value) {
+        append_spirv_inst(words, op_constant, {id_u32, constants[value], value});
+    }
+    append_spirv_inst(words, op_constant, {id_f32, id_one_f, f32_bits(1.0f)});
+    append_spirv_inst(words, op_type_runtime_array, {id_u32_runtime_array, id_u32});
+    append_spirv_inst(words, op_type_runtime_array, {id_f32_runtime_array, id_f32});
+    append_spirv_inst(words, op_type_struct, {id_u32_buffer_struct, id_u32_runtime_array});
+    append_spirv_inst(words, op_type_struct, {id_f32_buffer_struct, id_f32_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_u32_buffer, storage_class_uniform, id_u32_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32_buffer, storage_class_uniform, id_f32_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_u32, storage_class_uniform, id_u32});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32, storage_class_uniform, id_f32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_f32_buffer, id_grad_out, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_u32_buffer, id_state, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_f32_buffer, id_scale, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_f32_buffer, id_grad_x, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    words.insert(words.end(), body.begin(), body.end());
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
+std::vector<std::uint32_t> counter_decode_weight_u8_spirv(std::size_t in_features,
+                                                          std::size_t out_features,
+                                                          std::size_t C) {
+    constexpr std::uint16_t op_extension = 10;
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_float = 22;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_convert_u_to_f = 112;
+    constexpr std::uint16_t op_u_convert = 113;
+    constexpr std::uint16_t op_iadd = 128;
+    constexpr std::uint16_t op_fsub = 131;
+    constexpr std::uint16_t op_imul = 132;
+    constexpr std::uint16_t op_fmul = 133;
+    constexpr std::uint16_t op_udiv = 134;
+    constexpr std::uint16_t op_umod = 137;
+    constexpr std::uint16_t op_shift_right_logical = 194;
+    constexpr std::uint16_t op_shift_left_logical = 196;
+    constexpr std::uint16_t op_bitwise_or = 197;
+    constexpr std::uint16_t op_bitwise_and = 199;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t capability_int8 = 39;
+    constexpr std::uint32_t capability_uniform_and_storage_buffer_8bit_access = 4449;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+
+    const auto gpr = static_cast<std::uint32_t>(in_features / 4);
+    const auto lv = static_cast<std::uint32_t>(2 * C - 1);
+    std::uint32_t max_constant = static_cast<std::uint32_t>(in_features);
+    max_constant = std::max(max_constant, static_cast<std::uint32_t>(out_features));
+    max_constant = std::max(max_constant, gpr);
+    max_constant = std::max(max_constant, lv);
+    max_constant = std::max(max_constant, 63u);
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_f32 = 5;
+    const std::uint32_t id_u32 = 6;
+    const std::uint32_t id_u8 = 7;
+    const std::uint32_t id_v3u32 = 8;
+    const std::uint32_t id_ptr_input_v3u32 = 9;
+    const std::uint32_t id_global_invocation_id = 10;
+    std::uint32_t next_id = 11;
+    std::vector<std::uint32_t> constants(max_constant + 1);
+    for (std::uint32_t value = 0; value <= max_constant; ++value) constants[value] = next_id++;
+    const std::uint32_t id_one_f = next_id++;
+    const std::uint32_t id_u8_runtime_array = next_id++;
+    const std::uint32_t id_f32_runtime_array = next_id++;
+    const std::uint32_t id_u8_buffer_struct = next_id++;
+    const std::uint32_t id_f32_buffer_struct = next_id++;
+    const std::uint32_t id_ptr_u8_buffer = next_id++;
+    const std::uint32_t id_ptr_f32_buffer = next_id++;
+    const std::uint32_t id_ptr_u8 = next_id++;
+    const std::uint32_t id_ptr_f32 = next_id++;
+    const std::uint32_t id_state = next_id++;
+    const std::uint32_t id_scale = next_id++;
+    const std::uint32_t id_weight = next_id++;
+    auto new_id = [&]() { return next_id++; };
+
+    std::vector<std::uint32_t> body;
+    auto emit = [&](std::uint16_t opcode, const std::vector<std::uint32_t>& operands) {
+        append_spirv_inst(body, opcode, operands);
+    };
+
+    const auto gid = new_id();
+    const auto elem = new_id();
+    const auto row = new_id();
+    const auto i = new_id();
+    const auto group = new_id();
+    const auto lane = new_id();
+    const auto shift = new_id();
+    const auto row_base = new_id();
+    const auto group_index = new_id();
+    const auto byte_index = new_id();
+    const auto byte_index_1 = new_id();
+    const auto byte_index_2 = new_id();
+    const auto b0_ptr = new_id();
+    const auto b1_ptr = new_id();
+    const auto b2_ptr = new_id();
+    const auto b0 = new_id();
+    const auto b1 = new_id();
+    const auto b2 = new_id();
+    const auto b0u = new_id();
+    const auto b1u = new_id();
+    const auto b2u = new_id();
+    const auto b1s = new_id();
+    const auto b2s = new_id();
+    const auto w01 = new_id();
+    const auto word = new_id();
+    const auto shifted = new_id();
+    const auto code = new_id();
+    const auto bucket = new_id();
+    const auto bucket_f = new_id();
+    const auto t_f = new_id();
+    const auto scale_ptr = new_id();
+    const auto scale_val = new_id();
+    const auto out_val = new_id();
+    const auto out_ptr = new_id();
+
+    emit(op_load, {id_v3u32, gid, id_global_invocation_id});
+    emit(op_composite_extract, {id_u32, elem, gid, 0});
+    emit(op_udiv, {id_u32, row, elem, constants[static_cast<std::uint32_t>(in_features)]});
+    emit(op_umod, {id_u32, i, elem, constants[static_cast<std::uint32_t>(in_features)]});
+    emit(op_udiv, {id_u32, group, i, constants[4]});
+    emit(op_umod, {id_u32, lane, i, constants[4]});
+    emit(op_imul, {id_u32, shift, lane, constants[6]});
+    emit(op_imul, {id_u32, row_base, row, constants[gpr]});
+    emit(op_iadd, {id_u32, group_index, row_base, group});
+    emit(op_imul, {id_u32, byte_index, group_index, constants[3]});
+    emit(op_iadd, {id_u32, byte_index_1, byte_index, constants[1]});
+    emit(op_iadd, {id_u32, byte_index_2, byte_index, constants[2]});
+    emit(op_access_chain, {id_ptr_u8, b0_ptr, id_state, constants[0], byte_index});
+    emit(op_access_chain, {id_ptr_u8, b1_ptr, id_state, constants[0], byte_index_1});
+    emit(op_access_chain, {id_ptr_u8, b2_ptr, id_state, constants[0], byte_index_2});
+    emit(op_load, {id_u8, b0, b0_ptr});
+    emit(op_load, {id_u8, b1, b1_ptr});
+    emit(op_load, {id_u8, b2, b2_ptr});
+    emit(op_u_convert, {id_u32, b0u, b0});
+    emit(op_u_convert, {id_u32, b1u, b1});
+    emit(op_u_convert, {id_u32, b2u, b2});
+    emit(op_shift_left_logical, {id_u32, b1s, b1u, constants[8]});
+    emit(op_shift_left_logical, {id_u32, b2s, b2u, constants[16]});
+    emit(op_bitwise_or, {id_u32, w01, b0u, b1s});
+    emit(op_bitwise_or, {id_u32, word, w01, b2s});
+    emit(op_shift_right_logical, {id_u32, shifted, word, shift});
+    emit(op_bitwise_and, {id_u32, code, shifted, constants[63]});
+    emit(op_udiv, {id_u32, bucket, code, constants[lv]});
+    emit(op_convert_u_to_f, {id_f32, bucket_f, bucket});
+    emit(op_fsub, {id_f32, t_f, bucket_f, id_one_f});
+    emit(op_access_chain, {id_ptr_f32, scale_ptr, id_scale, constants[0], row});
+    emit(op_load, {id_f32, scale_val, scale_ptr});
+    emit(op_fmul, {id_f32, out_val, scale_val, t_f});
+    emit(op_access_chain, {id_ptr_f32, out_ptr, id_weight, constants[0], elem});
+    emit(op_store, {out_ptr, out_val});
+
+    std::vector<std::uint32_t> words;
+    words.reserve(260 + body.size());
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(next_id);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    append_spirv_inst(words, op_capability, {capability_int8});
+    append_spirv_inst(words, op_capability, {capability_uniform_and_storage_buffer_8bit_access});
+    append_spirv_string_inst(words, op_extension, "SPV_KHR_8bit_storage");
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_u8_runtime_array, decoration_array_stride, 1});
+    append_spirv_inst(words, op_decorate, {id_f32_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_u8_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_member_decorate, {id_f32_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_u8_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_f32_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_state, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_state, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_scale, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_scale, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_weight, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_weight, decoration_binding, 2});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_float, {id_f32, 32});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_int, {id_u8, 8, 0});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    for (std::uint32_t value = 0; value <= max_constant; ++value) {
+        append_spirv_inst(words, op_constant, {id_u32, constants[value], value});
+    }
+    append_spirv_inst(words, op_constant, {id_f32, id_one_f, f32_bits(1.0f)});
+    append_spirv_inst(words, op_type_runtime_array, {id_u8_runtime_array, id_u8});
+    append_spirv_inst(words, op_type_runtime_array, {id_f32_runtime_array, id_f32});
+    append_spirv_inst(words, op_type_struct, {id_u8_buffer_struct, id_u8_runtime_array});
+    append_spirv_inst(words, op_type_struct, {id_f32_buffer_struct, id_f32_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_u8_buffer, storage_class_uniform, id_u8_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32_buffer, storage_class_uniform, id_f32_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_u8, storage_class_uniform, id_u8});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32, storage_class_uniform, id_f32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_u8_buffer, id_state, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_f32_buffer, id_scale, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_f32_buffer, id_weight, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    words.insert(words.end(), body.begin(), body.end());
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
+std::vector<std::uint32_t> counter_backward_input_u8_spirv(std::size_t in_features,
+                                                           std::size_t out_features,
+                                                           std::size_t C) {
+    constexpr std::uint16_t op_extension = 10;
+    constexpr std::uint16_t op_capability = 17;
+    constexpr std::uint16_t op_memory_model = 14;
+    constexpr std::uint16_t op_entry_point = 15;
+    constexpr std::uint16_t op_execution_mode = 16;
+    constexpr std::uint16_t op_decorate = 71;
+    constexpr std::uint16_t op_member_decorate = 72;
+    constexpr std::uint16_t op_type_void = 19;
+    constexpr std::uint16_t op_type_function = 33;
+    constexpr std::uint16_t op_type_float = 22;
+    constexpr std::uint16_t op_type_int = 21;
+    constexpr std::uint16_t op_type_vector = 23;
+    constexpr std::uint16_t op_constant = 43;
+    constexpr std::uint16_t op_type_runtime_array = 29;
+    constexpr std::uint16_t op_type_struct = 30;
+    constexpr std::uint16_t op_type_pointer = 32;
+    constexpr std::uint16_t op_variable = 59;
+    constexpr std::uint16_t op_function = 54;
+    constexpr std::uint16_t op_label = 248;
+    constexpr std::uint16_t op_load = 61;
+    constexpr std::uint16_t op_store = 62;
+    constexpr std::uint16_t op_access_chain = 65;
+    constexpr std::uint16_t op_composite_extract = 81;
+    constexpr std::uint16_t op_convert_u_to_f = 112;
+    constexpr std::uint16_t op_u_convert = 113;
+    constexpr std::uint16_t op_iadd = 128;
+    constexpr std::uint16_t op_fadd = 129;
+    constexpr std::uint16_t op_fsub = 131;
+    constexpr std::uint16_t op_imul = 132;
+    constexpr std::uint16_t op_fmul = 133;
+    constexpr std::uint16_t op_udiv = 134;
+    constexpr std::uint16_t op_umod = 137;
+    constexpr std::uint16_t op_shift_right_logical = 194;
+    constexpr std::uint16_t op_shift_left_logical = 196;
+    constexpr std::uint16_t op_bitwise_or = 197;
+    constexpr std::uint16_t op_bitwise_and = 199;
+    constexpr std::uint16_t op_return = 253;
+    constexpr std::uint16_t op_function_end = 56;
+
+    constexpr std::uint32_t capability_shader = 1;
+    constexpr std::uint32_t capability_int8 = 39;
+    constexpr std::uint32_t capability_uniform_and_storage_buffer_8bit_access = 4449;
+    constexpr std::uint32_t addressing_model_logical = 0;
+    constexpr std::uint32_t memory_model_glsl450 = 1;
+    constexpr std::uint32_t execution_model_gl_compute = 5;
+    constexpr std::uint32_t execution_mode_local_size = 17;
+    constexpr std::uint32_t decoration_array_stride = 6;
+    constexpr std::uint32_t decoration_offset = 35;
+    constexpr std::uint32_t decoration_buffer_block = 3;
+    constexpr std::uint32_t decoration_descriptor_set = 34;
+    constexpr std::uint32_t decoration_binding = 33;
+    constexpr std::uint32_t decoration_built_in = 11;
+    constexpr std::uint32_t built_in_global_invocation_id = 28;
+    constexpr std::uint32_t storage_class_input = 1;
+    constexpr std::uint32_t storage_class_uniform = 2;
+
+    const auto gpr = static_cast<std::uint32_t>(in_features / 4);
+    const auto lv = static_cast<std::uint32_t>(2 * C - 1);
+    std::uint32_t max_constant = static_cast<std::uint32_t>(in_features);
+    max_constant = std::max(max_constant, static_cast<std::uint32_t>(out_features));
+    max_constant = std::max(max_constant, gpr);
+    max_constant = std::max(max_constant, lv);
+    max_constant = std::max(max_constant, 63u);
+
+    const std::uint32_t id_void = 1;
+    const std::uint32_t id_fn = 2;
+    const std::uint32_t id_main = 3;
+    const std::uint32_t id_label = 4;
+    const std::uint32_t id_f32 = 5;
+    const std::uint32_t id_u32 = 6;
+    const std::uint32_t id_u8 = 7;
+    const std::uint32_t id_v3u32 = 8;
+    const std::uint32_t id_ptr_input_v3u32 = 9;
+    const std::uint32_t id_global_invocation_id = 10;
+    std::uint32_t next_id = 11;
+    std::vector<std::uint32_t> constants(max_constant + 1);
+    for (std::uint32_t value = 0; value <= max_constant; ++value) constants[value] = next_id++;
+    const std::uint32_t id_one_f = next_id++;
+    const std::uint32_t id_u8_runtime_array = next_id++;
+    const std::uint32_t id_f32_runtime_array = next_id++;
+    const std::uint32_t id_u8_buffer_struct = next_id++;
+    const std::uint32_t id_f32_buffer_struct = next_id++;
+    const std::uint32_t id_ptr_u8_buffer = next_id++;
+    const std::uint32_t id_ptr_f32_buffer = next_id++;
+    const std::uint32_t id_ptr_u8 = next_id++;
+    const std::uint32_t id_ptr_f32 = next_id++;
+    const std::uint32_t id_grad_out = next_id++;
+    const std::uint32_t id_state = next_id++;
+    const std::uint32_t id_scale = next_id++;
+    const std::uint32_t id_grad_x = next_id++;
+    auto new_id = [&]() { return next_id++; };
+
+    std::vector<std::uint32_t> body;
+    auto emit = [&](std::uint16_t opcode, const std::vector<std::uint32_t>& operands) {
+        append_spirv_inst(body, opcode, operands);
+    };
+
+    const auto gid = new_id();
+    const auto elem = new_id();
+    const auto r = new_id();
+    const auto i = new_id();
+    const auto group = new_id();
+    const auto lane = new_id();
+    const auto shift = new_id();
+    emit(op_load, {id_v3u32, gid, id_global_invocation_id});
+    emit(op_composite_extract, {id_u32, elem, gid, 0});
+    emit(op_udiv, {id_u32, r, elem, constants[static_cast<std::uint32_t>(in_features)]});
+    emit(op_umod, {id_u32, i, elem, constants[static_cast<std::uint32_t>(in_features)]});
+    emit(op_udiv, {id_u32, group, i, constants[4]});
+    emit(op_umod, {id_u32, lane, i, constants[4]});
+    emit(op_imul, {id_u32, shift, lane, constants[6]});
+
+    std::uint32_t acc = 0;
+    for (std::uint32_t o = 0; o < static_cast<std::uint32_t>(out_features); ++o) {
+        const auto state_row_base = new_id();
+        const auto state_group_index = new_id();
+        const auto byte_index = new_id();
+        const auto byte_index_1 = new_id();
+        const auto byte_index_2 = new_id();
+        const auto b0_ptr = new_id();
+        const auto b1_ptr = new_id();
+        const auto b2_ptr = new_id();
+        const auto b0 = new_id();
+        const auto b1 = new_id();
+        const auto b2 = new_id();
+        const auto b0u = new_id();
+        const auto b1u = new_id();
+        const auto b2u = new_id();
+        const auto b1s = new_id();
+        const auto b2s = new_id();
+        const auto w01 = new_id();
+        const auto word = new_id();
+        const auto shifted = new_id();
+        const auto code = new_id();
+        const auto bucket = new_id();
+        const auto bucket_f = new_id();
+        const auto t_f = new_id();
+        const auto grad_row_base = new_id();
+        const auto grad_index = new_id();
+        const auto grad_ptr = new_id();
+        const auto grad_val = new_id();
+        const auto scale_ptr = new_id();
+        const auto scale_val = new_id();
+        const auto grad_scale = new_id();
+        const auto term = new_id();
+
+        emit(op_imul, {id_u32, state_row_base, constants[o], constants[gpr]});
+        emit(op_iadd, {id_u32, state_group_index, state_row_base, group});
+        emit(op_imul, {id_u32, byte_index, state_group_index, constants[3]});
+        emit(op_iadd, {id_u32, byte_index_1, byte_index, constants[1]});
+        emit(op_iadd, {id_u32, byte_index_2, byte_index, constants[2]});
+        emit(op_access_chain, {id_ptr_u8, b0_ptr, id_state, constants[0], byte_index});
+        emit(op_access_chain, {id_ptr_u8, b1_ptr, id_state, constants[0], byte_index_1});
+        emit(op_access_chain, {id_ptr_u8, b2_ptr, id_state, constants[0], byte_index_2});
+        emit(op_load, {id_u8, b0, b0_ptr});
+        emit(op_load, {id_u8, b1, b1_ptr});
+        emit(op_load, {id_u8, b2, b2_ptr});
+        emit(op_u_convert, {id_u32, b0u, b0});
+        emit(op_u_convert, {id_u32, b1u, b1});
+        emit(op_u_convert, {id_u32, b2u, b2});
+        emit(op_shift_left_logical, {id_u32, b1s, b1u, constants[8]});
+        emit(op_shift_left_logical, {id_u32, b2s, b2u, constants[16]});
+        emit(op_bitwise_or, {id_u32, w01, b0u, b1s});
+        emit(op_bitwise_or, {id_u32, word, w01, b2s});
+        emit(op_shift_right_logical, {id_u32, shifted, word, shift});
+        emit(op_bitwise_and, {id_u32, code, shifted, constants[63]});
+        emit(op_udiv, {id_u32, bucket, code, constants[lv]});
+        emit(op_convert_u_to_f, {id_f32, bucket_f, bucket});
+        emit(op_fsub, {id_f32, t_f, bucket_f, id_one_f});
+
+        emit(op_imul, {id_u32, grad_row_base, r, constants[static_cast<std::uint32_t>(out_features)]});
+        emit(op_iadd, {id_u32, grad_index, grad_row_base, constants[o]});
+        emit(op_access_chain, {id_ptr_f32, grad_ptr, id_grad_out, constants[0], grad_index});
+        emit(op_load, {id_f32, grad_val, grad_ptr});
+        emit(op_access_chain, {id_ptr_f32, scale_ptr, id_scale, constants[0], constants[o]});
+        emit(op_load, {id_f32, scale_val, scale_ptr});
+        emit(op_fmul, {id_f32, grad_scale, grad_val, scale_val});
+        emit(op_fmul, {id_f32, term, grad_scale, t_f});
+        if (acc == 0) {
+            acc = term;
+        } else {
+            const auto sum = new_id();
+            emit(op_fadd, {id_f32, sum, acc, term});
+            acc = sum;
+        }
+    }
+
+    const auto out_ptr = new_id();
+    emit(op_access_chain, {id_ptr_f32, out_ptr, id_grad_x, constants[0], elem});
+    emit(op_store, {out_ptr, acc});
+
+    std::vector<std::uint32_t> words;
+    words.reserve(300 + body.size());
+    words.push_back(0x07230203);
+    words.push_back(0x00010000);
+    words.push_back(0);
+    words.push_back(next_id);
+    words.push_back(0);
+    append_spirv_inst(words, op_capability, {capability_shader});
+    append_spirv_inst(words, op_capability, {capability_int8});
+    append_spirv_inst(words, op_capability, {capability_uniform_and_storage_buffer_8bit_access});
+    append_spirv_string_inst(words, op_extension, "SPV_KHR_8bit_storage");
+    append_spirv_inst(words, op_memory_model, {addressing_model_logical, memory_model_glsl450});
+    words.push_back((6u << 16u) | op_entry_point);
+    words.push_back(execution_model_gl_compute);
+    words.push_back(id_main);
+    append_spirv_string(words, "main");
+    words.push_back(id_global_invocation_id);
+    append_spirv_inst(words, op_execution_mode, {id_main, execution_mode_local_size, 1, 1, 1});
+    append_spirv_inst(words, op_decorate,
+                      {id_global_invocation_id, decoration_built_in, built_in_global_invocation_id});
+    append_spirv_inst(words, op_decorate, {id_u8_runtime_array, decoration_array_stride, 1});
+    append_spirv_inst(words, op_decorate, {id_f32_runtime_array, decoration_array_stride, 4});
+    append_spirv_inst(words, op_member_decorate, {id_u8_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_member_decorate, {id_f32_buffer_struct, 0, decoration_offset, 0});
+    append_spirv_inst(words, op_decorate, {id_u8_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_f32_buffer_struct, decoration_buffer_block});
+    append_spirv_inst(words, op_decorate, {id_grad_out, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_grad_out, decoration_binding, 0});
+    append_spirv_inst(words, op_decorate, {id_state, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_state, decoration_binding, 1});
+    append_spirv_inst(words, op_decorate, {id_scale, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_scale, decoration_binding, 2});
+    append_spirv_inst(words, op_decorate, {id_grad_x, decoration_descriptor_set, 0});
+    append_spirv_inst(words, op_decorate, {id_grad_x, decoration_binding, 3});
+    append_spirv_inst(words, op_type_void, {id_void});
+    append_spirv_inst(words, op_type_function, {id_fn, id_void});
+    append_spirv_inst(words, op_type_float, {id_f32, 32});
+    append_spirv_inst(words, op_type_int, {id_u32, 32, 0});
+    append_spirv_inst(words, op_type_int, {id_u8, 8, 0});
+    append_spirv_inst(words, op_type_vector, {id_v3u32, id_u32, 3});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_input_v3u32, storage_class_input, id_v3u32});
+    for (std::uint32_t value = 0; value <= max_constant; ++value) {
+        append_spirv_inst(words, op_constant, {id_u32, constants[value], value});
+    }
+    append_spirv_inst(words, op_constant, {id_f32, id_one_f, f32_bits(1.0f)});
+    append_spirv_inst(words, op_type_runtime_array, {id_u8_runtime_array, id_u8});
+    append_spirv_inst(words, op_type_runtime_array, {id_f32_runtime_array, id_f32});
+    append_spirv_inst(words, op_type_struct, {id_u8_buffer_struct, id_u8_runtime_array});
+    append_spirv_inst(words, op_type_struct, {id_f32_buffer_struct, id_f32_runtime_array});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_u8_buffer, storage_class_uniform, id_u8_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32_buffer, storage_class_uniform, id_f32_buffer_struct});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_u8, storage_class_uniform, id_u8});
+    append_spirv_inst(words, op_type_pointer, {id_ptr_f32, storage_class_uniform, id_f32});
+    append_spirv_inst(words, op_variable, {id_ptr_input_v3u32, id_global_invocation_id, storage_class_input});
+    append_spirv_inst(words, op_variable, {id_ptr_f32_buffer, id_grad_out, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_u8_buffer, id_state, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_f32_buffer, id_scale, storage_class_uniform});
+    append_spirv_inst(words, op_variable, {id_ptr_f32_buffer, id_grad_x, storage_class_uniform});
+    append_spirv_inst(words, op_function, {id_void, id_main, 0, id_fn});
+    append_spirv_inst(words, op_label, {id_label});
+    words.insert(words.end(), body.begin(), body.end());
+    append_spirv_inst(words, op_return, {});
+    append_spirv_inst(words, op_function_end, {});
+    return words;
+}
+
 std::uint32_t find_host_visible_coherent_memory_type(const VkPhysicalDeviceMemoryProperties& memory_properties,
                                                      std::uint32_t memory_type_bits) {
     constexpr std::uint32_t kInvalid = 0xffffffffu;
@@ -1798,17 +3974,7 @@ VulkanProbeResult probe_vulkan_runtime() {
 
 namespace {
 
-struct VulkanStorageBufferSpec {
-    const void* initial_data = nullptr;
-    std::size_t nbytes = 0;
-};
-
-struct VulkanStorageBufferComputeResult {
-    bool success = false;
-    std::string device_name;
-    std::string error;
-    std::vector<std::vector<std::uint8_t>> outputs;
-};
+using VulkanStorageBufferComputeResult = VulkanStorageBufferDispatchResult;
 
 VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
     const std::uint32_t* spirv,
@@ -1818,207 +3984,1200 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
     std::uint32_t group_count_x = 1,
     std::uint32_t group_count_y = 1,
     std::uint32_t group_count_z = 1) {
-    VulkanStorageBufferComputeResult result;
+    auto runtime = VulkanRuntime::create();
+    return runtime.dispatch_storage_buffers(spirv, spirv_word_count, buffer_specs, output_buffer_indices,
+                                            group_count_x, group_count_y, group_count_z);
+}
 
-    auto fail = [&](const std::string& message) {
-        result.error = message;
-        return result;
-    };
-    if (!spirv || spirv_word_count == 0) return fail("Vulkan compute shader is empty");
-    if (buffer_specs.empty()) return fail("Vulkan compute requires at least one storage buffer");
-    if (buffer_specs.size() > 16) return fail("Vulkan compute smoke supports at most 16 storage buffers");
-    if (group_count_x == 0 || group_count_y == 0 || group_count_z == 0) {
-        return fail("Vulkan compute dispatch dimensions must be non-zero");
-    }
-    for (std::size_t i = 0; i < buffer_specs.size(); ++i) {
-        if (buffer_specs[i].nbytes == 0) return fail("Vulkan compute storage buffer must be non-empty");
-    }
-    for (const auto output_index : output_buffer_indices) {
-        if (output_index >= buffer_specs.size()) return fail("Vulkan compute output index is out of range");
-    }
+} // namespace
 
+struct VulkanRuntime::Impl {
     DynamicLibrary library;
-    if (!open_vulkan_loader(library)) return fail("Vulkan loader not found");
+    PFN_vkGetInstanceProcAddr get_proc = nullptr;
+    PFN_vkDestroyInstance destroy_instance = nullptr;
+    PFN_vkGetDeviceProcAddr get_device_proc = nullptr;
 
-    auto get_proc = load_symbol<PFN_vkGetInstanceProcAddr>(library, "vkGetInstanceProcAddr");
-    if (!get_proc) return fail("vkGetInstanceProcAddr not found");
-
-    auto create_instance = load_instance_function<PFN_vkCreateInstance>(get_proc, nullptr, "vkCreateInstance");
-    if (!create_instance) create_instance = load_symbol<PFN_vkCreateInstance>(library, "vkCreateInstance");
-    if (!create_instance) return fail("Vulkan loader is missing vkCreateInstance");
-
-    const VkApplicationInfo app_info{
-        VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        nullptr,
-        "MotifCL Vulkan buffer compute smoke",
-        1,
-        "MotifCL",
-        1,
-        vk_make_api_version(0, 1, 0, 0),
-    };
-    const VkInstanceCreateInfo create_info{
-        VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        nullptr,
-        0,
-        &app_info,
-        0,
-        nullptr,
-        0,
-        nullptr,
-    };
     VkInstance instance = nullptr;
-    if (create_instance(&create_info, nullptr, &instance) != VK_SUCCESS || !instance) {
-        return fail("vkCreateInstance failed");
-    }
+    VkPhysicalDevice physical_device = nullptr;
+    VkPhysicalDeviceMemoryProperties memory_properties{};
+    VkDevice device = nullptr;
+    VkQueue queue = nullptr;
+    std::uint32_t queue_family = 0;
 
-    auto destroy_instance = load_instance_function<PFN_vkDestroyInstance>(get_proc, instance, "vkDestroyInstance");
-    if (!destroy_instance) destroy_instance = load_symbol<PFN_vkDestroyInstance>(library, "vkDestroyInstance");
-    if (!destroy_instance) return fail("Vulkan loader is missing vkDestroyInstance");
+    PFN_vkDestroyDevice destroy_device = nullptr;
+    PFN_vkGetDeviceQueue get_device_queue = nullptr;
+    PFN_vkCreateBuffer create_buffer = nullptr;
+    PFN_vkDestroyBuffer destroy_buffer = nullptr;
+    PFN_vkGetBufferMemoryRequirements get_buffer_memory_requirements = nullptr;
+    PFN_vkAllocateMemory allocate_memory = nullptr;
+    PFN_vkFreeMemory free_memory = nullptr;
+    PFN_vkBindBufferMemory bind_buffer_memory = nullptr;
+    PFN_vkMapMemory map_memory = nullptr;
+    PFN_vkUnmapMemory unmap_memory = nullptr;
+    PFN_vkCreateDescriptorSetLayout create_descriptor_set_layout = nullptr;
+    PFN_vkDestroyDescriptorSetLayout destroy_descriptor_set_layout = nullptr;
+    PFN_vkCreateDescriptorPool create_descriptor_pool = nullptr;
+    PFN_vkDestroyDescriptorPool destroy_descriptor_pool = nullptr;
+    PFN_vkAllocateDescriptorSets allocate_descriptor_sets = nullptr;
+    PFN_vkUpdateDescriptorSets update_descriptor_sets = nullptr;
+    PFN_vkCreatePipelineLayout create_pipeline_layout = nullptr;
+    PFN_vkDestroyPipelineLayout destroy_pipeline_layout = nullptr;
+    PFN_vkCreateShaderModule create_shader_module = nullptr;
+    PFN_vkDestroyShaderModule destroy_shader_module = nullptr;
+    PFN_vkCreateComputePipelines create_compute_pipelines = nullptr;
+    PFN_vkDestroyPipeline destroy_pipeline = nullptr;
+    PFN_vkCreateCommandPool create_command_pool = nullptr;
+    PFN_vkDestroyCommandPool destroy_command_pool = nullptr;
+    PFN_vkAllocateCommandBuffers allocate_command_buffers = nullptr;
+    PFN_vkBeginCommandBuffer begin_command_buffer = nullptr;
+    PFN_vkEndCommandBuffer end_command_buffer = nullptr;
+    PFN_vkCmdBindPipeline cmd_bind_pipeline = nullptr;
+    PFN_vkCmdBindDescriptorSets cmd_bind_descriptor_sets = nullptr;
+    PFN_vkCmdDispatch cmd_dispatch = nullptr;
+    PFN_vkQueueSubmit queue_submit = nullptr;
+    PFN_vkQueueWaitIdle queue_wait_idle = nullptr;
 
-    auto enumerate_physical_devices =
-        load_instance_function<PFN_vkEnumeratePhysicalDevices>(get_proc, instance, "vkEnumeratePhysicalDevices");
-    auto get_physical_device_properties =
-        load_instance_function<PFN_vkGetPhysicalDeviceProperties>(get_proc, instance, "vkGetPhysicalDeviceProperties");
-    auto get_queue_family_properties = load_instance_function<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
-        get_proc, instance, "vkGetPhysicalDeviceQueueFamilyProperties");
-    auto get_memory_properties = load_instance_function<PFN_vkGetPhysicalDeviceMemoryProperties>(
-        get_proc, instance, "vkGetPhysicalDeviceMemoryProperties");
-    auto create_device = load_instance_function<PFN_vkCreateDevice>(get_proc, instance, "vkCreateDevice");
-    auto get_device_proc = load_instance_function<PFN_vkGetDeviceProcAddr>(get_proc, instance, "vkGetDeviceProcAddr");
+    // fast-dispatch path functions (all core 1.0)
+    PFN_vkCreateFence create_fence = nullptr;
+    PFN_vkDestroyFence destroy_fence = nullptr;
+    PFN_vkResetFences reset_fences = nullptr;
+    PFN_vkWaitForFences wait_for_fences = nullptr;
+    PFN_vkResetCommandPool reset_command_pool = nullptr;
+    PFN_vkCmdPushConstants cmd_push_constants = nullptr;
+    PFN_vkCmdPipelineBarrier cmd_pipeline_barrier = nullptr;
+    PFN_vkCmdCopyBuffer cmd_copy_buffer = nullptr;
+    PFN_vkCreateQueryPool create_query_pool = nullptr;
+    PFN_vkDestroyQueryPool destroy_query_pool = nullptr;
+    PFN_vkCmdResetQueryPool cmd_reset_query_pool = nullptr;
+    PFN_vkCmdWriteTimestamp cmd_write_timestamp = nullptr;
+    PFN_vkGetQueryPoolResults get_query_pool_results = nullptr;
 
-    auto fail_with_instance = [&](const std::string& message) {
-        result.error = message;
-        destroy_instance(instance, nullptr);
-        return result;
+    bool ready = false;
+    bool storage_buffer_i8 = false;
+    std::string device_name;
+    std::string error;
+
+    // --- cached fast-dispatch state (lazily initialized) ---
+    VulkanDeviceCaps caps{};
+    std::uint32_t timestamp_valid_bits = 0;
+
+    struct LayoutEntry {
+        VkDescriptorSetLayout set_layout = nullptr;
+        VkPipelineLayout pipeline_layout = nullptr;
     };
-    if (!enumerate_physical_devices || !get_queue_family_properties || !get_memory_properties ||
-        !create_device || !get_device_proc) {
-        return fail_with_instance("Vulkan instance is missing required compute setup functions");
-    }
+    // (binding_count, push_constant_bytes) -> layouts
+    std::map<std::pair<std::uint32_t, std::uint32_t>, LayoutEntry> layout_cache;
+    // (spirv pointer, word count, binding_count, push_constant_bytes) -> pipeline.
+    // Fast-path SPIR-V lives in static storage (embedded arrays), so pointer
+    // identity is a stable cache key.
+    std::map<std::tuple<const std::uint32_t*, std::size_t, std::uint32_t, std::uint32_t>, VkPipeline> pipeline_cache;
 
-    std::uint32_t physical_device_count = 0;
-    if (enumerate_physical_devices(instance, &physical_device_count, nullptr) != VK_SUCCESS ||
-        physical_device_count == 0) {
-        return fail_with_instance("No Vulkan physical devices found");
-    }
-    std::vector<VkPhysicalDevice> physical_devices(physical_device_count);
-    if (enumerate_physical_devices(instance, &physical_device_count, physical_devices.data()) != VK_SUCCESS) {
-        return fail_with_instance("Failed to enumerate Vulkan physical devices");
-    }
+    std::vector<VkDescriptorPool> descriptor_pools;
+    std::map<std::uint32_t, std::vector<VkDescriptorSet>> free_descriptor_sets;
+    std::vector<std::pair<std::uint32_t, VkDescriptorSet>> inflight_descriptor_sets;
 
-    VkPhysicalDevice selected_physical_device = nullptr;
-    std::uint32_t selected_queue_family = 0;
-    for (auto physical_device : physical_devices) {
-        std::uint32_t queue_family_count = 0;
-        get_queue_family_properties(physical_device, &queue_family_count, nullptr);
-        std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
-        if (queue_family_count > 0) {
-            get_queue_family_properties(physical_device, &queue_family_count, queue_families.data());
+    VkCommandPool fast_command_pool = nullptr;
+    VkCommandBuffer fast_command_buffer = nullptr;
+    VkFence fast_fence = nullptr;
+    VkCommandPool transfer_command_pool = nullptr;
+    VkCommandBuffer transfer_command_buffer = nullptr;
+    VkFence transfer_fence = nullptr;
+
+    VkBuffer staging_buffer = nullptr;
+    VkDeviceMemory staging_memory = nullptr;
+    void* staging_mapped = nullptr;
+    std::size_t staging_capacity = 0;
+
+    VkQueryPool query_pool = nullptr;
+    bool timing_enabled = false;
+    bool batch_timed = false;
+    double last_gpu_us = -1.0;
+
+    bool batch_open = false;
+    std::uint32_t batch_dispatch_count = 0;
+    std::string batch_error;
+    // While a batch is open, every referenced buffer allocation is kept alive
+    // here until the submission's fence signals: op-internal temporaries
+    // (e.g. loss partials, backward scratch) legally go out of scope before
+    // batch_end, and destroying their VkBuffer mid-recording would leave the
+    // command buffer referencing freed memory.
+    std::vector<std::shared_ptr<VulkanBuffer::Impl>> batch_keepalive;
+
+    bool fast_ready = false;
+    std::string fast_error;
+
+    // Buffer pool: Tensor-churny paths (autograd temporaries) allocate and
+    // free device buffers every step, and vkAllocateMemory is far too slow
+    // for that. Freed allocations are pooled by power-of-two capacity and
+    // host-visibility class and reused by create_buffer.
+    struct PooledBuffer {
+        VkBuffer buffer = nullptr;
+        VkDeviceMemory memory = nullptr;
+    };
+    std::map<std::pair<std::size_t, bool>, std::vector<PooledBuffer>> buffer_pool;
+    std::size_t buffer_pool_bytes = 0;
+
+    static constexpr std::size_t kBufferPoolCapBytes = 1024u * 1024u * 1024u;
+
+    void pool_release(VkBuffer buffer, VkDeviceMemory memory, std::size_t capacity, bool host_visible) {
+        if (!device || !ready || capacity == 0 ||
+            buffer_pool_bytes + capacity > kBufferPoolCapBytes) {
+            if (buffer && destroy_buffer) destroy_buffer(device, buffer, nullptr);
+            if (memory && free_memory) free_memory(device, memory, nullptr);
+            return;
         }
-        for (std::uint32_t i = 0; i < queue_family_count; ++i) {
-            if (queue_families[i].queueCount > 0 &&
-                (queue_families[i].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0) {
-                selected_physical_device = physical_device;
-                selected_queue_family = i;
+        buffer_pool[{capacity, host_visible}].push_back(PooledBuffer{buffer, memory});
+        buffer_pool_bytes += capacity;
+    }
+
+    bool pool_acquire(std::size_t capacity, bool host_visible, VkBuffer& buffer, VkDeviceMemory& memory) {
+        auto it = buffer_pool.find({capacity, host_visible});
+        if (it == buffer_pool.end() || it->second.empty()) return false;
+        buffer = it->second.back().buffer;
+        memory = it->second.back().memory;
+        it->second.pop_back();
+        buffer_pool_bytes -= capacity;
+        return true;
+    }
+
+    void destroy_buffer_pool() {
+        for (auto& bucket : buffer_pool) {
+            for (auto& entry : bucket.second) {
+                if (entry.buffer && destroy_buffer) destroy_buffer(device, entry.buffer, nullptr);
+                if (entry.memory && free_memory) free_memory(device, entry.memory, nullptr);
+            }
+        }
+        buffer_pool.clear();
+        buffer_pool_bytes = 0;
+    }
+
+    // Dispatch capture state (see VulkanDispatchRecording).
+    struct CapturedDispatch {
+        const std::uint32_t* spirv = nullptr;
+        std::size_t spirv_words = 0;
+        std::vector<std::shared_ptr<VulkanBuffer::Impl>> keepalive;
+        std::vector<VkBuffer> raw_buffers;
+        std::vector<VkDeviceSize> raw_sizes;
+        std::vector<std::uint8_t> push;
+        std::uint32_t gx = 1, gy = 1, gz = 1;
+    };
+    bool capturing = false;
+    std::vector<CapturedDispatch> capture_list;
+
+    void destroy_fast_path() {
+        if (!device) return;
+        destroy_buffer_pool();
+        for (auto& entry : pipeline_cache) {
+            if (entry.second && destroy_pipeline) destroy_pipeline(device, entry.second, nullptr);
+        }
+        pipeline_cache.clear();
+        for (auto& entry : layout_cache) {
+            if (entry.second.pipeline_layout && destroy_pipeline_layout) {
+                destroy_pipeline_layout(device, entry.second.pipeline_layout, nullptr);
+            }
+            if (entry.second.set_layout && destroy_descriptor_set_layout) {
+                destroy_descriptor_set_layout(device, entry.second.set_layout, nullptr);
+            }
+        }
+        layout_cache.clear();
+        for (auto pool : descriptor_pools) {
+            if (pool && destroy_descriptor_pool) destroy_descriptor_pool(device, pool, nullptr);
+        }
+        descriptor_pools.clear();
+        free_descriptor_sets.clear();
+        inflight_descriptor_sets.clear();
+        if (query_pool && destroy_query_pool) destroy_query_pool(device, query_pool, nullptr);
+        query_pool = nullptr;
+        if (fast_fence && destroy_fence) destroy_fence(device, fast_fence, nullptr);
+        fast_fence = nullptr;
+        if (transfer_fence && destroy_fence) destroy_fence(device, transfer_fence, nullptr);
+        transfer_fence = nullptr;
+        if (fast_command_pool && destroy_command_pool) destroy_command_pool(device, fast_command_pool, nullptr);
+        fast_command_pool = nullptr;
+        fast_command_buffer = nullptr;
+        if (transfer_command_pool && destroy_command_pool) {
+            destroy_command_pool(device, transfer_command_pool, nullptr);
+        }
+        transfer_command_pool = nullptr;
+        transfer_command_buffer = nullptr;
+        if (staging_mapped && unmap_memory && staging_memory) unmap_memory(device, staging_memory);
+        staging_mapped = nullptr;
+        if (staging_buffer && destroy_buffer) destroy_buffer(device, staging_buffer, nullptr);
+        staging_buffer = nullptr;
+        if (staging_memory && free_memory) free_memory(device, staging_memory, nullptr);
+        staging_memory = nullptr;
+        staging_capacity = 0;
+        fast_ready = false;
+    }
+
+    ~Impl() {
+        destroy_fast_path();
+        if (device && destroy_device) {
+            destroy_device(device, nullptr);
+            device = nullptr;
+        }
+        if (instance && destroy_instance) {
+            destroy_instance(instance, nullptr);
+            instance = nullptr;
+        }
+    }
+
+    // ---- cached fast-dispatch machinery -----------------------------------
+
+    bool fast_functions_present() const {
+        return create_fence && destroy_fence && reset_fences && wait_for_fences && reset_command_pool &&
+               cmd_push_constants && cmd_pipeline_barrier && cmd_copy_buffer && create_command_pool &&
+               allocate_command_buffers && begin_command_buffer && end_command_buffer && queue_submit;
+    }
+
+    bool ensure_fast_path() {
+        if (fast_ready) return true;
+        if (!ready || !device) {
+            fast_error = "Vulkan runtime is not available";
+            return false;
+        }
+        if (!fast_functions_present()) {
+            fast_error = "Vulkan device is missing core functions for the cached dispatch path";
+            return false;
+        }
+        const VkCommandPoolCreateInfo pool_info{
+            VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            nullptr,
+            0,
+            queue_family,
+        };
+        if (create_command_pool(device, &pool_info, nullptr, &fast_command_pool) != VK_SUCCESS ||
+            !fast_command_pool) {
+            fast_error = "vkCreateCommandPool failed for cached dispatch";
+            return false;
+        }
+        if (create_command_pool(device, &pool_info, nullptr, &transfer_command_pool) != VK_SUCCESS ||
+            !transfer_command_pool) {
+            fast_error = "vkCreateCommandPool failed for staging transfers";
+            return false;
+        }
+        const VkCommandBufferAllocateInfo fast_alloc{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            nullptr,
+            fast_command_pool,
+            VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            1,
+        };
+        if (allocate_command_buffers(device, &fast_alloc, &fast_command_buffer) != VK_SUCCESS ||
+            !fast_command_buffer) {
+            fast_error = "vkAllocateCommandBuffers failed for cached dispatch";
+            return false;
+        }
+        const VkCommandBufferAllocateInfo transfer_alloc{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            nullptr,
+            transfer_command_pool,
+            VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            1,
+        };
+        if (allocate_command_buffers(device, &transfer_alloc, &transfer_command_buffer) != VK_SUCCESS ||
+            !transfer_command_buffer) {
+            fast_error = "vkAllocateCommandBuffers failed for staging transfers";
+            return false;
+        }
+        const VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0};
+        if (create_fence(device, &fence_info, nullptr, &fast_fence) != VK_SUCCESS || !fast_fence) {
+            fast_error = "vkCreateFence failed for cached dispatch";
+            return false;
+        }
+        if (create_fence(device, &fence_info, nullptr, &transfer_fence) != VK_SUCCESS || !transfer_fence) {
+            fast_error = "vkCreateFence failed for staging transfers";
+            return false;
+        }
+        if (caps.timestamps && create_query_pool && cmd_reset_query_pool && cmd_write_timestamp &&
+            get_query_pool_results) {
+            const VkQueryPoolCreateInfo query_info{
+                VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                nullptr,
+                0,
+                VK_QUERY_TYPE_TIMESTAMP,
+                2,
+                0,
+            };
+            if (create_query_pool(device, &query_info, nullptr, &query_pool) != VK_SUCCESS) {
+                query_pool = nullptr;  // timing degrades, dispatch still works
+            }
+        }
+        fast_ready = true;
+        return true;
+    }
+
+    LayoutEntry* get_layout(std::uint32_t binding_count, std::uint32_t push_bytes) {
+        const auto key = std::make_pair(binding_count, push_bytes);
+        auto it = layout_cache.find(key);
+        if (it != layout_cache.end()) return &it->second;
+
+        std::vector<VkDescriptorSetLayoutBinding> bindings;
+        bindings.reserve(binding_count);
+        for (std::uint32_t i = 0; i < binding_count; ++i) {
+            bindings.push_back(VkDescriptorSetLayoutBinding{
+                i,
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                1,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                nullptr,
+            });
+        }
+        const VkDescriptorSetLayoutCreateInfo set_layout_info{
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            nullptr,
+            0,
+            binding_count,
+            bindings.data(),
+        };
+        LayoutEntry entry;
+        if (create_descriptor_set_layout(device, &set_layout_info, nullptr, &entry.set_layout) != VK_SUCCESS ||
+            !entry.set_layout) {
+            fast_error = "vkCreateDescriptorSetLayout failed for cached dispatch";
+            return nullptr;
+        }
+        const VkPushConstantRange push_range{VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes};
+        const VkPipelineLayoutCreateInfo layout_info{
+            VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            nullptr,
+            0,
+            1,
+            &entry.set_layout,
+            push_bytes > 0 ? 1u : 0u,
+            push_bytes > 0 ? &push_range : nullptr,
+        };
+        if (create_pipeline_layout(device, &layout_info, nullptr, &entry.pipeline_layout) != VK_SUCCESS ||
+            !entry.pipeline_layout) {
+            destroy_descriptor_set_layout(device, entry.set_layout, nullptr);
+            fast_error = "vkCreatePipelineLayout failed for cached dispatch";
+            return nullptr;
+        }
+        auto emplaced = layout_cache.emplace(key, entry);
+        return &emplaced.first->second;
+    }
+
+    VkPipeline get_pipeline(const std::uint32_t* spirv,
+                            std::size_t spirv_word_count,
+                            std::uint32_t binding_count,
+                            std::uint32_t push_bytes) {
+        const auto key = std::make_tuple(spirv, spirv_word_count, binding_count, push_bytes);
+        auto it = pipeline_cache.find(key);
+        if (it != pipeline_cache.end()) return it->second;
+
+        LayoutEntry* layouts = get_layout(binding_count, push_bytes);
+        if (!layouts) return nullptr;
+
+        const VkShaderModuleCreateInfo module_info{
+            VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            nullptr,
+            0,
+            spirv_word_count * sizeof(std::uint32_t),
+            spirv,
+        };
+        VkShaderModule module = nullptr;
+        if (create_shader_module(device, &module_info, nullptr, &module) != VK_SUCCESS || !module) {
+            fast_error = "vkCreateShaderModule failed for cached dispatch";
+            return nullptr;
+        }
+        const VkPipelineShaderStageCreateInfo stage_info{
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            nullptr,
+            0,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            module,
+            "main",
+            nullptr,
+        };
+        const VkComputePipelineCreateInfo pipeline_info{
+            VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            nullptr,
+            0,
+            stage_info,
+            layouts->pipeline_layout,
+            nullptr,
+            -1,
+        };
+        VkPipeline pipeline = nullptr;
+        const auto created = create_compute_pipelines(device, nullptr, 1, &pipeline_info, nullptr, &pipeline);
+        destroy_shader_module(device, module, nullptr);
+        if (created != VK_SUCCESS || !pipeline) {
+            fast_error = "vkCreateComputePipelines failed for cached dispatch";
+            return nullptr;
+        }
+        pipeline_cache.emplace(key, pipeline);
+        return pipeline;
+    }
+
+    bool grow_descriptor_pool() {
+        const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2048};
+        const VkDescriptorPoolCreateInfo pool_info{
+            VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            nullptr,
+            0,
+            256,
+            1,
+            &pool_size,
+        };
+        VkDescriptorPool pool = nullptr;
+        if (create_descriptor_pool(device, &pool_info, nullptr, &pool) != VK_SUCCESS || !pool) {
+            fast_error = "vkCreateDescriptorPool failed for cached dispatch";
+            return false;
+        }
+        descriptor_pools.push_back(pool);
+        return true;
+    }
+
+    VkDescriptorSet acquire_descriptor_set(std::uint32_t binding_count, VkDescriptorSetLayout layout) {
+        auto& free_list = free_descriptor_sets[binding_count];
+        if (!free_list.empty()) {
+            VkDescriptorSet set = free_list.back();
+            free_list.pop_back();
+            return set;
+        }
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            if (!descriptor_pools.empty()) {
+                const VkDescriptorSetAllocateInfo alloc_info{
+                    VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                    nullptr,
+                    descriptor_pools.back(),
+                    1,
+                    &layout,
+                };
+                VkDescriptorSet set = nullptr;
+                if (allocate_descriptor_sets(device, &alloc_info, &set) == VK_SUCCESS && set) {
+                    return set;
+                }
+            }
+            if (!grow_descriptor_pool()) return nullptr;
+        }
+        fast_error = "descriptor set allocation failed after pool growth";
+        return nullptr;
+    }
+
+    void recycle_inflight_sets() {
+        for (auto& entry : inflight_descriptor_sets) {
+            free_descriptor_sets[entry.first].push_back(entry.second);
+        }
+        inflight_descriptor_sets.clear();
+        batch_keepalive.clear();
+    }
+
+    bool begin_fast_commands(bool timed) {
+        if (reset_command_pool(device, fast_command_pool, 0) != VK_SUCCESS) {
+            fast_error = "vkResetCommandPool failed for cached dispatch";
+            return false;
+        }
+        const VkCommandBufferBeginInfo begin_info{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            nullptr,
+            VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            nullptr,
+        };
+        if (begin_command_buffer(fast_command_buffer, &begin_info) != VK_SUCCESS) {
+            fast_error = "vkBeginCommandBuffer failed for cached dispatch";
+            return false;
+        }
+        // Make writes from earlier submissions (compute or staging transfers)
+        // visible to this submission regardless of driver flush behaviour at
+        // submit boundaries: one global barrier per command buffer.
+        const VkMemoryBarrier acquire{
+            VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            nullptr,
+            VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        };
+        cmd_pipeline_barrier(fast_command_buffer,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &acquire, 0, nullptr, 0, nullptr);
+        batch_timed = timed && query_pool != nullptr;
+        if (batch_timed) {
+            cmd_reset_query_pool(fast_command_buffer, query_pool, 0, 2);
+            cmd_write_timestamp(fast_command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
+        }
+        return true;
+    }
+
+    VulkanOpResult submit_fast_commands() {
+        VulkanOpResult result;
+        result.device_name = device_name;
+        auto fail_submit = [&](const std::string& message) {
+            recycle_inflight_sets();
+            result.error = message;
+            result.success = false;
+            return result;
+        };
+        if (batch_timed) {
+            cmd_write_timestamp(fast_command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
+        }
+        if (end_command_buffer(fast_command_buffer) != VK_SUCCESS) {
+            return fail_submit("vkEndCommandBuffer failed for cached dispatch");
+        }
+        const VkSubmitInfo submit_info{
+            VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            nullptr,
+            0,
+            nullptr,
+            nullptr,
+            1,
+            &fast_command_buffer,
+            0,
+            nullptr,
+        };
+        if (queue_submit(queue, 1, &submit_info, fast_fence) != VK_SUCCESS) {
+            return fail_submit("vkQueueSubmit failed for cached dispatch");
+        }
+        if (wait_for_fences(device, 1, &fast_fence, 1, ~std::uint64_t{0}) != VK_SUCCESS) {
+            return fail_submit("vkWaitForFences failed for cached dispatch");
+        }
+        reset_fences(device, 1, &fast_fence);
+        last_gpu_us = -1.0;
+        if (batch_timed) {
+            std::uint64_t stamps[2] = {0, 0};
+            if (get_query_pool_results(device, query_pool, 0, 2, sizeof(stamps), stamps, sizeof(std::uint64_t),
+                                       VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
+                std::uint64_t mask = ~std::uint64_t{0};
+                if (timestamp_valid_bits > 0 && timestamp_valid_bits < 64) {
+                    mask = (std::uint64_t{1} << timestamp_valid_bits) - 1;
+                }
+                const std::uint64_t begin = stamps[0] & mask;
+                const std::uint64_t end = stamps[1] & mask;
+                const std::uint64_t delta = end >= begin ? end - begin : (mask - begin) + end + 1;
+                last_gpu_us = static_cast<double>(delta) * caps.timestamp_period_ns / 1000.0;
+            }
+        }
+        recycle_inflight_sets();
+        result.success = true;
+        return result;
+    }
+
+    VulkanOpResult fast_dispatch(const std::uint32_t* spirv,
+                                 std::size_t spirv_word_count,
+                                 const VkBuffer* raw_buffers,
+                                 const VkDeviceSize* raw_sizes,
+                                 std::uint32_t buffer_count,
+                                 const void* push_data,
+                                 std::uint32_t push_bytes,
+                                 std::uint32_t group_count_x,
+                                 std::uint32_t group_count_y,
+                                 std::uint32_t group_count_z) {
+        VulkanOpResult result;
+        result.device_name = device_name;
+        auto fail_dispatch = [&](const std::string& message) {
+            result.error = message;
+            result.success = false;
+            if (batch_open) batch_error = message;
+            return result;
+        };
+        if (!ensure_fast_path()) return fail_dispatch(fast_error);
+        if (batch_open && !batch_error.empty()) return fail_dispatch(batch_error);
+        if (push_bytes > caps.max_push_constant_bytes) {
+            return fail_dispatch("push constant payload exceeds device limit");
+        }
+
+        VkPipeline pipeline = get_pipeline(spirv, spirv_word_count, buffer_count, push_bytes);
+        if (!pipeline) return fail_dispatch(fast_error);
+        LayoutEntry* layouts = get_layout(buffer_count, push_bytes);
+        if (!layouts) return fail_dispatch(fast_error);
+        VkDescriptorSet set = acquire_descriptor_set(buffer_count, layouts->set_layout);
+        if (!set) return fail_dispatch(fast_error);
+        inflight_descriptor_sets.emplace_back(buffer_count, set);
+
+        std::array<VkDescriptorBufferInfo, 16> buffer_infos{};
+        std::array<VkWriteDescriptorSet, 16> writes{};
+        for (std::uint32_t i = 0; i < buffer_count; ++i) {
+            buffer_infos[i] = VkDescriptorBufferInfo{raw_buffers[i], 0, raw_sizes[i]};
+            writes[i] = VkWriteDescriptorSet{
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                set,
+                i,
+                0,
+                1,
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                nullptr,
+                &buffer_infos[i],
+                nullptr,
+            };
+        }
+        update_descriptor_sets(device, buffer_count, writes.data(), 0, nullptr);
+
+        if (!batch_open) {
+            if (!begin_fast_commands(timing_enabled)) return fail_dispatch(fast_error);
+        } else if (batch_dispatch_count > 0) {
+            const VkMemoryBarrier barrier{
+                VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                nullptr,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            };
+            cmd_pipeline_barrier(fast_command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        }
+
+        cmd_bind_pipeline(fast_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        cmd_bind_descriptor_sets(fast_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layouts->pipeline_layout, 0,
+                                 1, &set, 0, nullptr);
+        if (push_bytes > 0) {
+            cmd_push_constants(fast_command_buffer, layouts->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                               push_bytes, push_data);
+        }
+        cmd_dispatch(fast_command_buffer, group_count_x, group_count_y, group_count_z);
+
+        if (batch_open) {
+            ++batch_dispatch_count;
+            result.success = true;
+            return result;
+        }
+        return submit_fast_commands();
+    }
+
+    bool do_batch_begin() {
+        if (batch_open) {
+            fast_error = "Vulkan batch is already open";
+            return false;
+        }
+        if (!ensure_fast_path()) return false;
+        if (!begin_fast_commands(timing_enabled)) return false;
+        batch_open = true;
+        batch_dispatch_count = 0;
+        batch_error.clear();
+        return true;
+    }
+
+    VulkanOpResult do_batch_end() {
+        VulkanOpResult result;
+        result.device_name = device_name;
+        if (!batch_open) {
+            result.error = "Vulkan batch is not open";
+            return result;
+        }
+        batch_open = false;
+        if (!batch_error.empty()) {
+            reset_command_pool(device, fast_command_pool, 0);
+            recycle_inflight_sets();
+            result.error = batch_error;
+            batch_error.clear();
+            return result;
+        }
+        if (batch_dispatch_count == 0) {
+            // Nothing recorded; discard the empty command buffer.
+            end_command_buffer(fast_command_buffer);
+            reset_command_pool(device, fast_command_pool, 0);
+            recycle_inflight_sets();
+            result.success = true;
+            return result;
+        }
+        return submit_fast_commands();
+    }
+
+    // ---- staging transfers for device-local buffers -----------------------
+
+    bool ensure_staging(std::size_t bytes) {
+        constexpr std::size_t kMaxStaging = 64u * 1024u * 1024u;
+        const std::size_t wanted = std::min(kMaxStaging, std::max<std::size_t>(bytes, 1u << 20));
+        if (staging_capacity >= std::min(bytes, kMaxStaging) && staging_buffer) return true;
+        std::size_t capacity = staging_capacity ? staging_capacity : (1u << 20);
+        while (capacity < wanted) capacity *= 2;
+        capacity = std::min(capacity, kMaxStaging);
+
+        if (staging_mapped) {
+            unmap_memory(device, staging_memory);
+            staging_mapped = nullptr;
+        }
+        if (staging_buffer) {
+            destroy_buffer(device, staging_buffer, nullptr);
+            staging_buffer = nullptr;
+        }
+        if (staging_memory) {
+            free_memory(device, staging_memory, nullptr);
+            staging_memory = nullptr;
+        }
+        staging_capacity = 0;
+
+        const VkBufferCreateInfo buffer_info{
+            VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            nullptr,
+            0,
+            static_cast<VkDeviceSize>(capacity),
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_SHARING_MODE_EXCLUSIVE,
+            0,
+            nullptr,
+        };
+        if (create_buffer(device, &buffer_info, nullptr, &staging_buffer) != VK_SUCCESS || !staging_buffer) {
+            fast_error = "vkCreateBuffer failed for staging";
+            return false;
+        }
+        VkMemoryRequirements requirements{};
+        get_buffer_memory_requirements(device, staging_buffer, &requirements);
+        std::uint32_t type = 0xffffffffu;
+        for (std::uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
+            const bool allowed = (requirements.memoryTypeBits & (1u << i)) != 0;
+            const auto flags = memory_properties.memoryTypes[i].propertyFlags;
+            if (allowed && (flags & kMemHostVisibleBit) && (flags & kMemHostCoherentBit)) {
+                type = i;
                 break;
             }
         }
-        if (selected_physical_device) break;
-    }
-    if (!selected_physical_device) return fail_with_instance("No Vulkan compute queue family found");
-
-    if (get_physical_device_properties) {
-        struct alignas(8) PropertiesStorage {
-            std::array<std::uint8_t, 4096> bytes;
+        if (type == 0xffffffffu) {
+            destroy_buffer(device, staging_buffer, nullptr);
+            staging_buffer = nullptr;
+            fast_error = "no host-visible coherent memory type for staging";
+            return false;
+        }
+        const VkMemoryAllocateInfo alloc_info{
+            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            nullptr,
+            requirements.size,
+            type,
         };
-        PropertiesStorage storage{};
-        get_physical_device_properties(selected_physical_device, storage.bytes.data());
-        const auto* prefix = reinterpret_cast<const VkPhysicalDevicePropertiesPrefix*>(storage.bytes.data());
-        result.device_name = bounded_string(prefix->deviceName, sizeof(prefix->deviceName));
+        if (allocate_memory(device, &alloc_info, nullptr, &staging_memory) != VK_SUCCESS || !staging_memory) {
+            destroy_buffer(device, staging_buffer, nullptr);
+            staging_buffer = nullptr;
+            fast_error = "vkAllocateMemory failed for staging";
+            return false;
+        }
+        if (bind_buffer_memory(device, staging_buffer, staging_memory, 0) != VK_SUCCESS) {
+            destroy_buffer(device, staging_buffer, nullptr);
+            free_memory(device, staging_memory, nullptr);
+            staging_buffer = nullptr;
+            staging_memory = nullptr;
+            fast_error = "vkBindBufferMemory failed for staging";
+            return false;
+        }
+        if (map_memory(device, staging_memory, 0, static_cast<VkDeviceSize>(capacity), 0, &staging_mapped) !=
+                VK_SUCCESS ||
+            !staging_mapped) {
+            destroy_buffer(device, staging_buffer, nullptr);
+            free_memory(device, staging_memory, nullptr);
+            staging_buffer = nullptr;
+            staging_memory = nullptr;
+            staging_mapped = nullptr;
+            fast_error = "vkMapMemory failed for staging";
+            return false;
+        }
+        staging_capacity = capacity;
+        return true;
     }
 
-    VkPhysicalDeviceMemoryProperties memory_properties{};
-    get_memory_properties(selected_physical_device, &memory_properties);
-
-    const float priority = 1.0f;
-    const VkDeviceQueueCreateInfo queue_create_info{
-        VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        nullptr,
-        0,
-        selected_queue_family,
-        1,
-        &priority,
-    };
-    const VkDeviceCreateInfo device_create_info{
-        VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        nullptr,
-        0,
-        1,
-        &queue_create_info,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        nullptr,
-    };
-    VkDevice device = nullptr;
-    if (create_device(selected_physical_device, &device_create_info, nullptr, &device) != VK_SUCCESS || !device) {
-        return fail_with_instance("vkCreateDevice failed");
+    bool run_transfer(VkBuffer src, VkBuffer dst, VkDeviceSize src_offset, VkDeviceSize dst_offset,
+                      VkDeviceSize size, std::string& error_out) {
+        if (reset_command_pool(device, transfer_command_pool, 0) != VK_SUCCESS) {
+            error_out = "vkResetCommandPool failed for staging transfer";
+            return false;
+        }
+        const VkCommandBufferBeginInfo begin_info{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            nullptr,
+            VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            nullptr,
+        };
+        if (begin_command_buffer(transfer_command_buffer, &begin_info) != VK_SUCCESS) {
+            error_out = "vkBeginCommandBuffer failed for staging transfer";
+            return false;
+        }
+        const VkBufferCopy region{src_offset, dst_offset, size};
+        cmd_copy_buffer(transfer_command_buffer, src, dst, 1, &region);
+        if (end_command_buffer(transfer_command_buffer) != VK_SUCCESS) {
+            error_out = "vkEndCommandBuffer failed for staging transfer";
+            return false;
+        }
+        const VkSubmitInfo submit_info{
+            VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            nullptr,
+            0,
+            nullptr,
+            nullptr,
+            1,
+            &transfer_command_buffer,
+            0,
+            nullptr,
+        };
+        if (queue_submit(queue, 1, &submit_info, transfer_fence) != VK_SUCCESS) {
+            error_out = "vkQueueSubmit failed for staging transfer";
+            return false;
+        }
+        if (wait_for_fences(device, 1, &transfer_fence, 1, ~std::uint64_t{0}) != VK_SUCCESS) {
+            error_out = "vkWaitForFences failed for staging transfer";
+            return false;
+        }
+        reset_fences(device, 1, &transfer_fence);
+        return true;
     }
 
-    auto load_device = [&](auto tag, const char* name) {
-        using Fn = decltype(tag);
-        return load_device_function<Fn>(get_device_proc, device, name);
-    };
+    bool staging_write(VkBuffer dst, const void* data, std::size_t bytes, std::size_t offset,
+                       std::string& error_out) {
+        if (!ensure_fast_path() || !ensure_staging(bytes)) {
+            error_out = fast_error;
+            return false;
+        }
+        const auto* src = static_cast<const std::uint8_t*>(data);
+        std::size_t done = 0;
+        while (done < bytes) {
+            const std::size_t chunk = std::min(bytes - done, staging_capacity);
+            std::memcpy(staging_mapped, src + done, chunk);
+            if (!run_transfer(staging_buffer, dst, 0, static_cast<VkDeviceSize>(offset + done),
+                              static_cast<VkDeviceSize>(chunk), error_out)) {
+                return false;
+            }
+            done += chunk;
+        }
+        return true;
+    }
 
-    auto destroy_device = load_device(PFN_vkDestroyDevice{}, "vkDestroyDevice");
-    auto get_device_queue = load_device(PFN_vkGetDeviceQueue{}, "vkGetDeviceQueue");
-    auto create_buffer = load_device(PFN_vkCreateBuffer{}, "vkCreateBuffer");
-    auto destroy_buffer = load_device(PFN_vkDestroyBuffer{}, "vkDestroyBuffer");
-    auto get_buffer_memory_requirements =
-        load_device(PFN_vkGetBufferMemoryRequirements{}, "vkGetBufferMemoryRequirements");
-    auto allocate_memory = load_device(PFN_vkAllocateMemory{}, "vkAllocateMemory");
-    auto free_memory = load_device(PFN_vkFreeMemory{}, "vkFreeMemory");
-    auto bind_buffer_memory = load_device(PFN_vkBindBufferMemory{}, "vkBindBufferMemory");
-    auto map_memory = load_device(PFN_vkMapMemory{}, "vkMapMemory");
-    auto unmap_memory = load_device(PFN_vkUnmapMemory{}, "vkUnmapMemory");
-    auto create_descriptor_set_layout =
-        load_device(PFN_vkCreateDescriptorSetLayout{}, "vkCreateDescriptorSetLayout");
-    auto destroy_descriptor_set_layout =
-        load_device(PFN_vkDestroyDescriptorSetLayout{}, "vkDestroyDescriptorSetLayout");
-    auto create_descriptor_pool = load_device(PFN_vkCreateDescriptorPool{}, "vkCreateDescriptorPool");
-    auto destroy_descriptor_pool = load_device(PFN_vkDestroyDescriptorPool{}, "vkDestroyDescriptorPool");
-    auto allocate_descriptor_sets = load_device(PFN_vkAllocateDescriptorSets{}, "vkAllocateDescriptorSets");
-    auto update_descriptor_sets = load_device(PFN_vkUpdateDescriptorSets{}, "vkUpdateDescriptorSets");
-    auto create_pipeline_layout = load_device(PFN_vkCreatePipelineLayout{}, "vkCreatePipelineLayout");
-    auto destroy_pipeline_layout = load_device(PFN_vkDestroyPipelineLayout{}, "vkDestroyPipelineLayout");
-    auto create_shader_module = load_device(PFN_vkCreateShaderModule{}, "vkCreateShaderModule");
-    auto destroy_shader_module = load_device(PFN_vkDestroyShaderModule{}, "vkDestroyShaderModule");
-    auto create_compute_pipelines = load_device(PFN_vkCreateComputePipelines{}, "vkCreateComputePipelines");
-    auto destroy_pipeline = load_device(PFN_vkDestroyPipeline{}, "vkDestroyPipeline");
-    auto create_command_pool = load_device(PFN_vkCreateCommandPool{}, "vkCreateCommandPool");
-    auto destroy_command_pool = load_device(PFN_vkDestroyCommandPool{}, "vkDestroyCommandPool");
-    auto allocate_command_buffers = load_device(PFN_vkAllocateCommandBuffers{}, "vkAllocateCommandBuffers");
-    auto begin_command_buffer = load_device(PFN_vkBeginCommandBuffer{}, "vkBeginCommandBuffer");
-    auto end_command_buffer = load_device(PFN_vkEndCommandBuffer{}, "vkEndCommandBuffer");
-    auto cmd_bind_pipeline = load_device(PFN_vkCmdBindPipeline{}, "vkCmdBindPipeline");
-    auto cmd_bind_descriptor_sets = load_device(PFN_vkCmdBindDescriptorSets{}, "vkCmdBindDescriptorSets");
-    auto cmd_dispatch = load_device(PFN_vkCmdDispatch{}, "vkCmdDispatch");
-    auto queue_submit = load_device(PFN_vkQueueSubmit{}, "vkQueueSubmit");
-    auto queue_wait_idle = load_device(PFN_vkQueueWaitIdle{}, "vkQueueWaitIdle");
+    bool staging_read(VkBuffer src, void* data, std::size_t bytes, std::size_t offset, std::string& error_out) {
+        if (!ensure_fast_path() || !ensure_staging(bytes)) {
+            error_out = fast_error;
+            return false;
+        }
+        auto* dst = static_cast<std::uint8_t*>(data);
+        std::size_t done = 0;
+        while (done < bytes) {
+            const std::size_t chunk = std::min(bytes - done, staging_capacity);
+            if (!run_transfer(src, staging_buffer, static_cast<VkDeviceSize>(offset + done), 0,
+                              static_cast<VkDeviceSize>(chunk), error_out)) {
+                return false;
+            }
+            std::memcpy(dst + done, staging_mapped, chunk);
+            done += chunk;
+        }
+        return true;
+    }
 
-    const std::size_t buffer_count = buffer_specs.size();
-    std::vector<VkBuffer> buffers(buffer_count, nullptr);
-    std::vector<VkDeviceMemory> memories(buffer_count, nullptr);
-    VkDescriptorSetLayout descriptor_set_layout = nullptr;
-    VkDescriptorPool descriptor_pool = nullptr;
-    VkPipelineLayout pipeline_layout = nullptr;
-    VkShaderModule shader_module = nullptr;
-    VkPipeline pipeline = nullptr;
-    VkCommandPool command_pool = nullptr;
+    void fail(const std::string& message) {
+        error = message;
+        ready = false;
+    }
 
-    auto cleanup = [&]() {
-        if (device) {
+    bool initialize() {
+        if (!open_vulkan_loader(library)) {
+            fail("Vulkan loader not found");
+            return false;
+        }
+
+        get_proc = load_symbol<PFN_vkGetInstanceProcAddr>(library, "vkGetInstanceProcAddr");
+        if (!get_proc) {
+            fail("vkGetInstanceProcAddr not found");
+            return false;
+        }
+
+        auto create_instance = load_instance_function<PFN_vkCreateInstance>(get_proc, nullptr, "vkCreateInstance");
+        if (!create_instance) create_instance = load_symbol<PFN_vkCreateInstance>(library, "vkCreateInstance");
+        if (!create_instance) {
+            fail("Vulkan loader is missing vkCreateInstance");
+            return false;
+        }
+
+        const VkApplicationInfo app_info{
+            VK_STRUCTURE_TYPE_APPLICATION_INFO,
+            nullptr,
+            "MotifCL persistent Vulkan runtime",
+            1,
+            "MotifCL",
+            1,
+            vk_make_api_version(0, 1, 0, 0),
+        };
+        const VkInstanceCreateInfo create_info{
+            VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            nullptr,
+            0,
+            &app_info,
+            0,
+            nullptr,
+            0,
+            nullptr,
+        };
+        if (create_instance(&create_info, nullptr, &instance) != VK_SUCCESS || !instance) {
+            fail("vkCreateInstance failed");
+            return false;
+        }
+
+        destroy_instance = load_instance_function<PFN_vkDestroyInstance>(get_proc, instance, "vkDestroyInstance");
+        if (!destroy_instance) destroy_instance = load_symbol<PFN_vkDestroyInstance>(library, "vkDestroyInstance");
+        if (!destroy_instance) {
+            fail("Vulkan loader is missing vkDestroyInstance");
+            return false;
+        }
+
+        auto enumerate_physical_devices =
+            load_instance_function<PFN_vkEnumeratePhysicalDevices>(get_proc, instance, "vkEnumeratePhysicalDevices");
+        auto get_physical_device_properties =
+            load_instance_function<PFN_vkGetPhysicalDeviceProperties>(get_proc, instance, "vkGetPhysicalDeviceProperties");
+        auto get_queue_family_properties = load_instance_function<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+            get_proc, instance, "vkGetPhysicalDeviceQueueFamilyProperties");
+        auto get_memory_properties = load_instance_function<PFN_vkGetPhysicalDeviceMemoryProperties>(
+            get_proc, instance, "vkGetPhysicalDeviceMemoryProperties");
+        auto enumerate_device_extension_properties =
+            load_instance_function<PFN_vkEnumerateDeviceExtensionProperties>(
+                get_proc, instance, "vkEnumerateDeviceExtensionProperties");
+        auto get_physical_device_features2 =
+            load_instance_function<PFN_vkGetPhysicalDeviceFeatures2>(
+                get_proc, instance, "vkGetPhysicalDeviceFeatures2");
+        auto create_device = load_instance_function<PFN_vkCreateDevice>(get_proc, instance, "vkCreateDevice");
+        get_device_proc = load_instance_function<PFN_vkGetDeviceProcAddr>(get_proc, instance, "vkGetDeviceProcAddr");
+        if (!enumerate_physical_devices || !get_queue_family_properties || !get_memory_properties ||
+            !create_device || !get_device_proc) {
+            fail("Vulkan instance is missing required compute setup functions");
+            return false;
+        }
+
+        std::uint32_t physical_device_count = 0;
+        if (enumerate_physical_devices(instance, &physical_device_count, nullptr) != VK_SUCCESS ||
+            physical_device_count == 0) {
+            fail("No Vulkan physical devices found");
+            return false;
+        }
+        std::vector<VkPhysicalDevice> physical_devices(physical_device_count);
+        if (enumerate_physical_devices(instance, &physical_device_count, physical_devices.data()) != VK_SUCCESS) {
+            fail("Failed to enumerate Vulkan physical devices");
+            return false;
+        }
+
+        for (auto candidate : physical_devices) {
+            std::uint32_t queue_family_count = 0;
+            get_queue_family_properties(candidate, &queue_family_count, nullptr);
+            std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
+            if (queue_family_count > 0) {
+                get_queue_family_properties(candidate, &queue_family_count, queue_families.data());
+            }
+            for (std::uint32_t i = 0; i < queue_family_count; ++i) {
+                if (queue_families[i].queueCount > 0 &&
+                    (queue_families[i].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0) {
+                    physical_device = candidate;
+                    queue_family = i;
+                    timestamp_valid_bits = queue_families[i].timestampValidBits;
+                    break;
+                }
+            }
+            if (physical_device) break;
+        }
+        if (!physical_device) {
+            fail("No Vulkan compute queue family found");
+            return false;
+        }
+
+        if (get_physical_device_properties) {
+            struct alignas(8) PropertiesStorage {
+                std::array<std::uint8_t, 4096> bytes;
+            };
+            PropertiesStorage storage{};
+            get_physical_device_properties(physical_device, storage.bytes.data());
+            const auto* prefix = reinterpret_cast<const VkPhysicalDevicePropertiesPrefix*>(storage.bytes.data());
+            device_name = bounded_string(prefix->deviceName, sizeof(prefix->deviceName));
+
+            const auto* full = reinterpret_cast<const VkPhysicalDevicePropertiesFull*>(storage.bytes.data());
+            const float period = full->limits.timestampPeriod;
+            if (period > 0.0f && period < 1.0e6f) {
+                caps.timestamp_period_ns = static_cast<double>(period);
+            }
+            const auto shared_bytes = full->limits.maxComputeSharedMemorySize;
+            if (shared_bytes >= 1024u && shared_bytes <= (1u << 20)) {
+                caps.max_shared_memory_bytes = shared_bytes;
+            }
+            const auto invocations = full->limits.maxComputeWorkGroupInvocations;
+            if (invocations >= 64u && invocations <= 4096u) {
+                caps.max_workgroup_invocations = invocations;
+            }
+            const auto push_bytes = full->limits.maxPushConstantsSize;
+            if (push_bytes >= 128u && push_bytes <= 4096u) {
+                caps.max_push_constant_bytes = push_bytes;
+            }
+        }
+        caps.timestamps = timestamp_valid_bits > 0 && caps.timestamp_period_ns > 0.0;
+        get_memory_properties(physical_device, &memory_properties);
+
+        bool has_i8_storage_extension = false;
+        if (enumerate_device_extension_properties) {
+            std::uint32_t extension_count = 0;
+            if (enumerate_device_extension_properties(physical_device, nullptr, &extension_count, nullptr) ==
+                    VK_SUCCESS &&
+                extension_count > 0) {
+                std::vector<VkExtensionProperties> extensions(extension_count);
+                if (enumerate_device_extension_properties(physical_device, nullptr, &extension_count,
+                                                          extensions.data()) == VK_SUCCESS) {
+                    for (const auto& extension : extensions) {
+                        if (std::strcmp(extension.extensionName, "VK_KHR_8bit_storage") == 0) {
+                            has_i8_storage_extension = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        VkPhysicalDevice8BitStorageFeatures queried_i8_features{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES,
+            nullptr,
+            0,
+            0,
+            0,
+        };
+        if (has_i8_storage_extension && get_physical_device_features2) {
+            VkPhysicalDeviceFeatures2 features2{
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                &queried_i8_features,
+                {},
+            };
+            get_physical_device_features2(physical_device, &features2);
+        }
+        VkPhysicalDevice8BitStorageFeatures enabled_i8_features{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES,
+            nullptr,
+            0,
+            queried_i8_features.uniformAndStorageBuffer8BitAccess ? 1u : 0u,
+            0,
+        };
+        const bool enable_i8_storage =
+            has_i8_storage_extension && enabled_i8_features.uniformAndStorageBuffer8BitAccess != 0;
+        const char* i8_storage_extension = "VK_KHR_8bit_storage";
+
+        const float priority = 1.0f;
+        const VkDeviceQueueCreateInfo queue_create_info{
+            VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            nullptr,
+            0,
+            queue_family,
+            1,
+            &priority,
+        };
+        const VkDeviceCreateInfo device_create_info{
+            VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            enable_i8_storage ? &enabled_i8_features : nullptr,
+            0,
+            1,
+            &queue_create_info,
+            0,
+            nullptr,
+            enable_i8_storage ? 1u : 0u,
+            enable_i8_storage ? &i8_storage_extension : nullptr,
+            nullptr,
+        };
+        if (create_device(physical_device, &device_create_info, nullptr, &device) != VK_SUCCESS || !device) {
+            fail("vkCreateDevice failed");
+            return false;
+        }
+        storage_buffer_i8 = enable_i8_storage;
+
+        auto load_device = [&](auto tag, const char* name) {
+            using Fn = decltype(tag);
+            return load_device_function<Fn>(get_device_proc, device, name);
+        };
+        destroy_device = load_device(PFN_vkDestroyDevice{}, "vkDestroyDevice");
+        get_device_queue = load_device(PFN_vkGetDeviceQueue{}, "vkGetDeviceQueue");
+        create_buffer = load_device(PFN_vkCreateBuffer{}, "vkCreateBuffer");
+        destroy_buffer = load_device(PFN_vkDestroyBuffer{}, "vkDestroyBuffer");
+        get_buffer_memory_requirements =
+            load_device(PFN_vkGetBufferMemoryRequirements{}, "vkGetBufferMemoryRequirements");
+        allocate_memory = load_device(PFN_vkAllocateMemory{}, "vkAllocateMemory");
+        free_memory = load_device(PFN_vkFreeMemory{}, "vkFreeMemory");
+        bind_buffer_memory = load_device(PFN_vkBindBufferMemory{}, "vkBindBufferMemory");
+        map_memory = load_device(PFN_vkMapMemory{}, "vkMapMemory");
+        unmap_memory = load_device(PFN_vkUnmapMemory{}, "vkUnmapMemory");
+        create_descriptor_set_layout =
+            load_device(PFN_vkCreateDescriptorSetLayout{}, "vkCreateDescriptorSetLayout");
+        destroy_descriptor_set_layout =
+            load_device(PFN_vkDestroyDescriptorSetLayout{}, "vkDestroyDescriptorSetLayout");
+        create_descriptor_pool = load_device(PFN_vkCreateDescriptorPool{}, "vkCreateDescriptorPool");
+        destroy_descriptor_pool = load_device(PFN_vkDestroyDescriptorPool{}, "vkDestroyDescriptorPool");
+        allocate_descriptor_sets = load_device(PFN_vkAllocateDescriptorSets{}, "vkAllocateDescriptorSets");
+        update_descriptor_sets = load_device(PFN_vkUpdateDescriptorSets{}, "vkUpdateDescriptorSets");
+        create_pipeline_layout = load_device(PFN_vkCreatePipelineLayout{}, "vkCreatePipelineLayout");
+        destroy_pipeline_layout = load_device(PFN_vkDestroyPipelineLayout{}, "vkDestroyPipelineLayout");
+        create_shader_module = load_device(PFN_vkCreateShaderModule{}, "vkCreateShaderModule");
+        destroy_shader_module = load_device(PFN_vkDestroyShaderModule{}, "vkDestroyShaderModule");
+        create_compute_pipelines = load_device(PFN_vkCreateComputePipelines{}, "vkCreateComputePipelines");
+        destroy_pipeline = load_device(PFN_vkDestroyPipeline{}, "vkDestroyPipeline");
+        create_command_pool = load_device(PFN_vkCreateCommandPool{}, "vkCreateCommandPool");
+        destroy_command_pool = load_device(PFN_vkDestroyCommandPool{}, "vkDestroyCommandPool");
+        allocate_command_buffers = load_device(PFN_vkAllocateCommandBuffers{}, "vkAllocateCommandBuffers");
+        begin_command_buffer = load_device(PFN_vkBeginCommandBuffer{}, "vkBeginCommandBuffer");
+        end_command_buffer = load_device(PFN_vkEndCommandBuffer{}, "vkEndCommandBuffer");
+        cmd_bind_pipeline = load_device(PFN_vkCmdBindPipeline{}, "vkCmdBindPipeline");
+        cmd_bind_descriptor_sets = load_device(PFN_vkCmdBindDescriptorSets{}, "vkCmdBindDescriptorSets");
+        cmd_dispatch = load_device(PFN_vkCmdDispatch{}, "vkCmdDispatch");
+        queue_submit = load_device(PFN_vkQueueSubmit{}, "vkQueueSubmit");
+        queue_wait_idle = load_device(PFN_vkQueueWaitIdle{}, "vkQueueWaitIdle");
+        create_fence = load_device(PFN_vkCreateFence{}, "vkCreateFence");
+        destroy_fence = load_device(PFN_vkDestroyFence{}, "vkDestroyFence");
+        reset_fences = load_device(PFN_vkResetFences{}, "vkResetFences");
+        wait_for_fences = load_device(PFN_vkWaitForFences{}, "vkWaitForFences");
+        reset_command_pool = load_device(PFN_vkResetCommandPool{}, "vkResetCommandPool");
+        cmd_push_constants = load_device(PFN_vkCmdPushConstants{}, "vkCmdPushConstants");
+        cmd_pipeline_barrier = load_device(PFN_vkCmdPipelineBarrier{}, "vkCmdPipelineBarrier");
+        cmd_copy_buffer = load_device(PFN_vkCmdCopyBuffer{}, "vkCmdCopyBuffer");
+        create_query_pool = load_device(PFN_vkCreateQueryPool{}, "vkCreateQueryPool");
+        destroy_query_pool = load_device(PFN_vkDestroyQueryPool{}, "vkDestroyQueryPool");
+        cmd_reset_query_pool = load_device(PFN_vkCmdResetQueryPool{}, "vkCmdResetQueryPool");
+        cmd_write_timestamp = load_device(PFN_vkCmdWriteTimestamp{}, "vkCmdWriteTimestamp");
+        get_query_pool_results = load_device(PFN_vkGetQueryPoolResults{}, "vkGetQueryPoolResults");
+
+        if (!destroy_device || !get_device_queue || !create_buffer || !destroy_buffer ||
+            !get_buffer_memory_requirements || !allocate_memory || !free_memory ||
+            !bind_buffer_memory || !map_memory || !unmap_memory ||
+            !create_descriptor_set_layout || !destroy_descriptor_set_layout ||
+            !create_descriptor_pool || !destroy_descriptor_pool || !allocate_descriptor_sets ||
+            !update_descriptor_sets || !create_pipeline_layout || !destroy_pipeline_layout ||
+            !create_shader_module || !destroy_shader_module || !create_compute_pipelines ||
+            !destroy_pipeline || !create_command_pool || !destroy_command_pool ||
+            !allocate_command_buffers || !begin_command_buffer || !end_command_buffer ||
+            !cmd_bind_pipeline || !cmd_bind_descriptor_sets || !cmd_dispatch ||
+            !queue_submit || !queue_wait_idle) {
+            fail("Vulkan device is missing required compute functions");
+            return false;
+        }
+
+        get_device_queue(device, queue_family, 0, &queue);
+        if (!queue) {
+            fail("vkGetDeviceQueue returned null");
+            return false;
+        }
+
+        error.clear();
+        ready = true;
+        return true;
+    }
+
+    VulkanStorageBufferDispatchResult dispatch_storage_buffers(
+        const std::uint32_t* spirv,
+        std::size_t spirv_word_count,
+        const std::vector<VulkanStorageBufferSpec>& buffer_specs,
+        const std::vector<std::size_t>& output_buffer_indices,
+        std::uint32_t group_count_x,
+        std::uint32_t group_count_y,
+        std::uint32_t group_count_z) {
+        VulkanStorageBufferDispatchResult result;
+        result.device_name = device_name;
+
+        auto fail_result = [&](const std::string& message) {
+            result.error = message;
+            result.success = false;
+            return result;
+        };
+        if (!ready) return fail_result(error.empty() ? "Vulkan runtime is not available" : error);
+        if (!spirv || spirv_word_count == 0) return fail_result("Vulkan compute shader is empty");
+        if (buffer_specs.empty()) return fail_result("Vulkan compute requires at least one storage buffer");
+        if (buffer_specs.size() > 16) return fail_result("Vulkan compute smoke supports at most 16 storage buffers");
+        if (group_count_x == 0 || group_count_y == 0 || group_count_z == 0) {
+            return fail_result("Vulkan compute dispatch dimensions must be non-zero");
+        }
+        for (std::size_t i = 0; i < buffer_specs.size(); ++i) {
+            if (buffer_specs[i].nbytes == 0) return fail_result("Vulkan compute storage buffer must be non-empty");
+        }
+        for (const auto output_index : output_buffer_indices) {
+            if (output_index >= buffer_specs.size()) return fail_result("Vulkan compute output index is out of range");
+        }
+
+        const std::size_t buffer_count = buffer_specs.size();
+        std::vector<VkBuffer> buffers(buffer_count, nullptr);
+        std::vector<VkDeviceMemory> memories(buffer_count, nullptr);
+        VkDescriptorSetLayout descriptor_set_layout = nullptr;
+        VkDescriptorPool descriptor_pool = nullptr;
+        VkPipelineLayout pipeline_layout = nullptr;
+        VkShaderModule shader_module = nullptr;
+        VkPipeline pipeline = nullptr;
+        VkCommandPool command_pool = nullptr;
+
+        auto cleanup = [&]() {
             if (destroy_command_pool && command_pool) destroy_command_pool(device, command_pool, nullptr);
             if (destroy_pipeline && pipeline) destroy_pipeline(device, pipeline, nullptr);
             if (destroy_shader_module && shader_module) destroy_shader_module(device, shader_module, nullptr);
@@ -2037,87 +5196,784 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
                     if (memory) free_memory(device, memory, nullptr);
                 }
             }
-            if (destroy_device) destroy_device(device, nullptr);
+        };
+
+        auto fail_with_cleanup = [&](const std::string& message) {
+            cleanup();
+            return fail_result(message);
+        };
+
+        for (std::size_t i = 0; i < buffer_count; ++i) {
+            const VkBufferCreateInfo buffer_create_info{
+                VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                nullptr,
+                0,
+                static_cast<VkDeviceSize>(buffer_specs[i].nbytes),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_SHARING_MODE_EXCLUSIVE,
+                0,
+                nullptr,
+            };
+            if (create_buffer(device, &buffer_create_info, nullptr, &buffers[i]) != VK_SUCCESS || !buffers[i]) {
+                return fail_with_cleanup("vkCreateBuffer failed");
+            }
+
+            VkMemoryRequirements memory_requirements{};
+            get_buffer_memory_requirements(device, buffers[i], &memory_requirements);
+            const std::uint32_t memory_type =
+                find_host_visible_coherent_memory_type(memory_properties, memory_requirements.memoryTypeBits);
+            if (memory_type == 0xffffffffu) {
+                return fail_with_cleanup("No host-visible coherent Vulkan memory type for storage buffer");
+            }
+            const VkMemoryAllocateInfo allocate_info{
+                VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                nullptr,
+                memory_requirements.size,
+                memory_type,
+            };
+            if (allocate_memory(device, &allocate_info, nullptr, &memories[i]) != VK_SUCCESS || !memories[i]) {
+                return fail_with_cleanup("vkAllocateMemory failed");
+            }
+            if (bind_buffer_memory(device, buffers[i], memories[i], 0) != VK_SUCCESS) {
+                return fail_with_cleanup("vkBindBufferMemory failed");
+            }
+
+            void* mapped = nullptr;
+            if (map_memory(device, memories[i], 0, static_cast<VkDeviceSize>(buffer_specs[i].nbytes), 0, &mapped) !=
+                    VK_SUCCESS ||
+                !mapped) {
+                return fail_with_cleanup("vkMapMemory failed while initializing storage buffer");
+            }
+            if (buffer_specs[i].initial_data) {
+                std::memcpy(mapped, buffer_specs[i].initial_data, buffer_specs[i].nbytes);
+            } else {
+                std::memset(mapped, 0, buffer_specs[i].nbytes);
+            }
+            unmap_memory(device, memories[i]);
         }
-        destroy_instance(instance, nullptr);
+
+        std::vector<VkDescriptorSetLayoutBinding> bindings;
+        bindings.reserve(buffer_count);
+        for (std::size_t i = 0; i < buffer_count; ++i) {
+            bindings.push_back(VkDescriptorSetLayoutBinding{
+                static_cast<std::uint32_t>(i),
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                1,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                nullptr,
+            });
+        }
+        const VkDescriptorSetLayoutCreateInfo descriptor_set_layout_info{
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            nullptr,
+            0,
+            static_cast<std::uint32_t>(bindings.size()),
+            bindings.data(),
+        };
+        if (create_descriptor_set_layout(device, &descriptor_set_layout_info, nullptr, &descriptor_set_layout) !=
+                VK_SUCCESS ||
+            !descriptor_set_layout) {
+            return fail_with_cleanup("vkCreateDescriptorSetLayout failed");
+        }
+
+        const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, static_cast<std::uint32_t>(buffer_count)};
+        const VkDescriptorPoolCreateInfo descriptor_pool_info{
+            VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            nullptr,
+            0,
+            1,
+            1,
+            &pool_size,
+        };
+        if (create_descriptor_pool(device, &descriptor_pool_info, nullptr, &descriptor_pool) != VK_SUCCESS ||
+            !descriptor_pool) {
+            return fail_with_cleanup("vkCreateDescriptorPool failed");
+        }
+
+        const VkDescriptorSetAllocateInfo descriptor_set_allocate_info{
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            nullptr,
+            descriptor_pool,
+            1,
+            &descriptor_set_layout,
+        };
+        VkDescriptorSet descriptor_set = nullptr;
+        if (allocate_descriptor_sets(device, &descriptor_set_allocate_info, &descriptor_set) != VK_SUCCESS ||
+            !descriptor_set) {
+            return fail_with_cleanup("vkAllocateDescriptorSets failed");
+        }
+
+        std::vector<VkDescriptorBufferInfo> descriptor_buffer_infos;
+        std::vector<VkWriteDescriptorSet> write_descriptors;
+        descriptor_buffer_infos.reserve(buffer_count);
+        write_descriptors.reserve(buffer_count);
+        for (std::size_t i = 0; i < buffer_count; ++i) {
+            descriptor_buffer_infos.push_back(VkDescriptorBufferInfo{
+                buffers[i],
+                0,
+                static_cast<VkDeviceSize>(buffer_specs[i].nbytes),
+            });
+            write_descriptors.push_back(VkWriteDescriptorSet{
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                descriptor_set,
+                static_cast<std::uint32_t>(i),
+                0,
+                1,
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                nullptr,
+                &descriptor_buffer_infos.back(),
+                nullptr,
+            });
+        }
+        update_descriptor_sets(device, static_cast<std::uint32_t>(write_descriptors.size()), write_descriptors.data(),
+                               0, nullptr);
+
+        const VkPipelineLayoutCreateInfo pipeline_layout_info{
+            VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            nullptr,
+            0,
+            1,
+            &descriptor_set_layout,
+            0,
+            nullptr,
+        };
+        if (create_pipeline_layout(device, &pipeline_layout_info, nullptr, &pipeline_layout) != VK_SUCCESS ||
+            !pipeline_layout) {
+            return fail_with_cleanup("vkCreatePipelineLayout failed");
+        }
+
+        const VkShaderModuleCreateInfo shader_module_info{
+            VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            nullptr,
+            0,
+            spirv_word_count * sizeof(std::uint32_t),
+            spirv,
+        };
+        if (create_shader_module(device, &shader_module_info, nullptr, &shader_module) != VK_SUCCESS || !shader_module) {
+            return fail_with_cleanup("vkCreateShaderModule failed");
+        }
+
+        const VkPipelineShaderStageCreateInfo stage_info{
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            nullptr,
+            0,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            shader_module,
+            "main",
+            nullptr,
+        };
+        const VkComputePipelineCreateInfo compute_pipeline_info{
+            VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            nullptr,
+            0,
+            stage_info,
+            pipeline_layout,
+            nullptr,
+            -1,
+        };
+        if (create_compute_pipelines(device, nullptr, 1, &compute_pipeline_info, nullptr, &pipeline) != VK_SUCCESS ||
+            !pipeline) {
+            return fail_with_cleanup("vkCreateComputePipelines failed");
+        }
+
+        const VkCommandPoolCreateInfo command_pool_info{
+            VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            nullptr,
+            0,
+            queue_family,
+        };
+        if (create_command_pool(device, &command_pool_info, nullptr, &command_pool) != VK_SUCCESS || !command_pool) {
+            return fail_with_cleanup("vkCreateCommandPool failed");
+        }
+
+        const VkCommandBufferAllocateInfo command_buffer_allocate_info{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            nullptr,
+            command_pool,
+            VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            1,
+        };
+        VkCommandBuffer command_buffer = nullptr;
+        if (allocate_command_buffers(device, &command_buffer_allocate_info, &command_buffer) != VK_SUCCESS ||
+            !command_buffer) {
+            return fail_with_cleanup("vkAllocateCommandBuffers failed");
+        }
+
+        const VkCommandBufferBeginInfo begin_info{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            nullptr,
+            0,
+            nullptr,
+        };
+        if (begin_command_buffer(command_buffer, &begin_info) != VK_SUCCESS) {
+            return fail_with_cleanup("vkBeginCommandBuffer failed");
+        }
+        cmd_bind_pipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        cmd_bind_descriptor_sets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 1,
+                                 &descriptor_set, 0, nullptr);
+        cmd_dispatch(command_buffer, group_count_x, group_count_y, group_count_z);
+        if (end_command_buffer(command_buffer) != VK_SUCCESS) {
+            return fail_with_cleanup("vkEndCommandBuffer failed");
+        }
+
+        const VkSubmitInfo submit_info{
+            VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            nullptr,
+            0,
+            nullptr,
+            nullptr,
+            1,
+            &command_buffer,
+            0,
+            nullptr,
+        };
+        if (queue_submit(queue, 1, &submit_info, nullptr) != VK_SUCCESS) {
+            return fail_with_cleanup("vkQueueSubmit failed");
+        }
+        if (queue_wait_idle(queue) != VK_SUCCESS) {
+            return fail_with_cleanup("vkQueueWaitIdle failed");
+        }
+
+        result.outputs.clear();
+        result.outputs.reserve(output_buffer_indices.size());
+        for (const auto output_index : output_buffer_indices) {
+            const auto nbytes = buffer_specs[output_index].nbytes;
+            std::vector<std::uint8_t> output(nbytes);
+            void* mapped = nullptr;
+            if (map_memory(device, memories[output_index], 0, static_cast<VkDeviceSize>(nbytes), 0, &mapped) !=
+                    VK_SUCCESS ||
+                !mapped) {
+                return fail_with_cleanup("vkMapMemory failed while reading storage buffer");
+            }
+            std::memcpy(output.data(), mapped, nbytes);
+            unmap_memory(device, memories[output_index]);
+            result.outputs.push_back(std::move(output));
+        }
+
+        result.success = true;
+        cleanup();
+        return result;
+    }
+};
+
+namespace {
+
+const std::string& empty_vulkan_runtime_string() {
+    static const std::string empty;
+    return empty;
+}
+
+} // namespace
+
+VulkanRuntime::VulkanRuntime() = default;
+VulkanRuntime::~VulkanRuntime() = default;
+VulkanRuntime::VulkanRuntime(VulkanRuntime&&) noexcept = default;
+VulkanRuntime& VulkanRuntime::operator=(VulkanRuntime&&) noexcept = default;
+
+VulkanRuntime::VulkanRuntime(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+VulkanRuntime VulkanRuntime::create() {
+    auto impl = std::make_shared<Impl>();
+    impl->initialize();
+    return VulkanRuntime(std::move(impl));
+}
+
+bool VulkanRuntime::available() const {
+    return impl_ && impl_->ready;
+}
+
+const std::string& VulkanRuntime::device_name() const {
+    return impl_ ? impl_->device_name : empty_vulkan_runtime_string();
+}
+
+const std::string& VulkanRuntime::error() const {
+    return impl_ ? impl_->error : empty_vulkan_runtime_string();
+}
+
+bool VulkanRuntime::supports_storage_buffer_i8() const {
+    return impl_ && impl_->ready && impl_->storage_buffer_i8;
+}
+
+const VulkanDeviceCaps& VulkanRuntime::caps() const {
+    static const VulkanDeviceCaps kEmptyCaps{};
+    return impl_ ? impl_->caps : kEmptyCaps;
+}
+
+bool VulkanRuntime::batch_begin() {
+    return impl_ && impl_->ready && impl_->do_batch_begin();
+}
+
+VulkanOpResult VulkanRuntime::batch_end() {
+    VulkanOpResult result;
+    if (!impl_) {
+        result.error = "Vulkan runtime is not initialized";
+        return result;
+    }
+    return impl_->do_batch_end();
+}
+
+bool VulkanRuntime::batch_active() const {
+    return impl_ && impl_->batch_open;
+}
+
+void VulkanRuntime::set_gpu_timing_enabled(bool enabled) {
+    if (impl_) impl_->timing_enabled = enabled;
+}
+
+double VulkanRuntime::last_gpu_time_us() const {
+    return impl_ ? impl_->last_gpu_us : -1.0;
+}
+
+struct VulkanBuffer::Impl {
+    std::shared_ptr<VulkanRuntime::Impl> runtime;
+    VkBuffer buffer = nullptr;
+    VkDeviceMemory memory = nullptr;
+    std::size_t nbytes = 0;
+    // Allocation bucket size (>= nbytes); pooled allocations are keyed by it.
+    // 0 means "not poolable" (legacy exact-size allocation).
+    std::size_t capacity = 0;
+    // Host-visible-coherent memory maps directly; device-local memory goes
+    // through the runtime staging path in upload()/download().
+    bool host_visible = true;
+
+    Impl(std::shared_ptr<VulkanRuntime::Impl> owner, VkBuffer vk_buffer, VkDeviceMemory vk_memory, std::size_t bytes,
+         bool mappable = true, std::size_t bucket = 0)
+        : runtime(std::move(owner)),
+          buffer(vk_buffer),
+          memory(vk_memory),
+          nbytes(bytes),
+          capacity(bucket),
+          host_visible(mappable) {}
+
+    ~Impl() {
+        if (runtime && runtime->device) {
+            if (capacity > 0) {
+                runtime->pool_release(buffer, memory, capacity, host_visible);
+                buffer = nullptr;
+                memory = nullptr;
+                return;
+            }
+            if (buffer && runtime->destroy_buffer) {
+                runtime->destroy_buffer(runtime->device, buffer, nullptr);
+                buffer = nullptr;
+            }
+            if (memory && runtime->free_memory) {
+                runtime->free_memory(runtime->device, memory, nullptr);
+                memory = nullptr;
+            }
+        }
+    }
+};
+
+VulkanBuffer::VulkanBuffer() = default;
+VulkanBuffer::~VulkanBuffer() = default;
+VulkanBuffer::VulkanBuffer(VulkanBuffer&&) noexcept = default;
+VulkanBuffer& VulkanBuffer::operator=(VulkanBuffer&&) noexcept = default;
+
+VulkanBuffer::VulkanBuffer(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+bool VulkanBuffer::valid() const {
+    return impl_ && impl_->buffer && impl_->memory && impl_->runtime && impl_->runtime->ready;
+}
+
+std::size_t VulkanBuffer::nbytes() const {
+    return impl_ ? impl_->nbytes : 0;
+}
+
+void VulkanBuffer::upload(const void* data, std::size_t bytes, std::size_t offset) {
+    if (!valid()) throw std::runtime_error("Vulkan buffer is not valid");
+    if (!data && bytes > 0) throw std::runtime_error("Vulkan buffer upload source is null");
+    if (offset > impl_->nbytes || bytes > impl_->nbytes - offset) {
+        throw std::runtime_error("Vulkan buffer upload exceeds allocation size");
+    }
+    if (bytes == 0) return;
+    if (!impl_->host_visible) {
+        std::string error;
+        if (!impl_->runtime->staging_write(impl_->buffer, data, bytes, offset, error)) {
+            throw std::runtime_error("Vulkan staging upload failed: " + error);
+        }
+        return;
+    }
+    void* mapped = nullptr;
+    if (impl_->runtime->map_memory(impl_->runtime->device, impl_->memory, static_cast<VkDeviceSize>(offset),
+                                   static_cast<VkDeviceSize>(bytes), 0, &mapped) != VK_SUCCESS ||
+        !mapped) {
+        throw std::runtime_error("vkMapMemory failed while uploading Vulkan buffer");
+    }
+    if (bytes > 0) std::memcpy(mapped, data, bytes);
+    impl_->runtime->unmap_memory(impl_->runtime->device, impl_->memory);
+}
+
+void VulkanBuffer::download(void* data, std::size_t bytes, std::size_t offset) const {
+    if (!valid()) throw std::runtime_error("Vulkan buffer is not valid");
+    if (!data && bytes > 0) throw std::runtime_error("Vulkan buffer download destination is null");
+    if (offset > impl_->nbytes || bytes > impl_->nbytes - offset) {
+        throw std::runtime_error("Vulkan buffer download exceeds allocation size");
+    }
+    if (bytes == 0) return;
+    if (!impl_->host_visible) {
+        std::string error;
+        if (!impl_->runtime->staging_read(impl_->buffer, data, bytes, offset, error)) {
+            throw std::runtime_error("Vulkan staging download failed: " + error);
+        }
+        return;
+    }
+    void* mapped = nullptr;
+    if (impl_->runtime->map_memory(impl_->runtime->device, impl_->memory, static_cast<VkDeviceSize>(offset),
+                                   static_cast<VkDeviceSize>(bytes), 0, &mapped) != VK_SUCCESS ||
+        !mapped) {
+        throw std::runtime_error("vkMapMemory failed while downloading Vulkan buffer");
+    }
+    if (bytes > 0) std::memcpy(data, mapped, bytes);
+    impl_->runtime->unmap_memory(impl_->runtime->device, impl_->memory);
+}
+
+VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initial_data) {
+    if (!available()) {
+        throw std::runtime_error(error().empty() ? "Vulkan runtime is not available" : error());
+    }
+    if (nbytes == 0) throw std::runtime_error("Vulkan buffer allocation requires non-zero size");
+
+    // Storage buffers prefer device-local VRAM (uploads/downloads go through
+    // the staging path); MOTIFCL_VK_HOST_VISIBLE=1 forces the legacy
+    // host-visible mapping behaviour.
+    static const bool force_host_visible = []() {
+        const char* env = std::getenv("MOTIFCL_VK_HOST_VISIBLE");
+        return env && *env && *env != '0';
+    }();
+
+    // Allocations are bucketed to the next power of two and recycled through
+    // the runtime buffer pool; vkAllocateMemory per Tensor temporary is far
+    // too slow for autograd churn.
+    std::size_t bucket = 256;
+    while (bucket < nbytes) bucket <<= 1;
+
+    {
+        VkBuffer pooled_buffer = nullptr;
+        VkDeviceMemory pooled_memory = nullptr;
+        bool served = false;
+        bool served_host_visible = false;
+        if (force_host_visible) {
+            // A forced-host-visible caller must get mappable memory.
+            served = impl_->pool_acquire(bucket, true, pooled_buffer, pooled_memory);
+            served_host_visible = true;
+        } else {
+            // Either class works (host-visible maps directly, device-local
+            // goes through staging); prefer device-local VRAM.
+            if (impl_->pool_acquire(bucket, false, pooled_buffer, pooled_memory)) {
+                served = true;
+                served_host_visible = false;
+            } else if (impl_->pool_acquire(bucket, true, pooled_buffer, pooled_memory)) {
+                served = true;
+                served_host_visible = true;
+            }
+        }
+        if (served) {
+            auto buffer_impl = std::make_shared<VulkanBuffer::Impl>(impl_, pooled_buffer, pooled_memory, nbytes,
+                                                                    served_host_visible, bucket);
+            VulkanBuffer out(std::move(buffer_impl));
+            if (initial_data) out.upload(initial_data, nbytes);
+            return out;
+        }
+    }
+
+    const VkBufferCreateInfo buffer_create_info{
+        VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        nullptr,
+        0,
+        static_cast<VkDeviceSize>(bucket),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        nullptr,
+    };
+    VkBuffer buffer = nullptr;
+    if (impl_->create_buffer(impl_->device, &buffer_create_info, nullptr, &buffer) != VK_SUCCESS || !buffer) {
+        throw std::runtime_error("vkCreateBuffer failed");
+    }
+
+    VkMemoryRequirements memory_requirements{};
+    impl_->get_buffer_memory_requirements(impl_->device, buffer, &memory_requirements);
+
+    const auto& memory_properties = impl_->memory_properties;
+    auto pick_type = [&](VkMemoryPropertyFlags required, VkMemoryPropertyFlags forbidden) -> std::uint32_t {
+        for (std::uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
+            if ((memory_requirements.memoryTypeBits & (1u << i)) == 0) continue;
+            const auto flags = memory_properties.memoryTypes[i].propertyFlags;
+            if ((flags & required) != required) continue;
+            if ((flags & forbidden) != 0) continue;
+            return i;
+        }
+        return 0xffffffffu;
+    };
+
+    std::uint32_t memory_type = 0xffffffffu;
+    bool host_visible = false;
+    if (!force_host_visible) {
+        memory_type = pick_type(kMemDeviceLocalBit, kMemHostVisibleBit);
+    }
+    if (memory_type == 0xffffffffu) {
+        memory_type = pick_type(kMemHostVisibleBit | kMemHostCoherentBit, 0);
+        host_visible = memory_type != 0xffffffffu;
+    }
+    if (memory_type == 0xffffffffu) {
+        impl_->destroy_buffer(impl_->device, buffer, nullptr);
+        throw std::runtime_error("No suitable Vulkan memory type for storage buffer");
+    }
+    const VkMemoryAllocateInfo allocate_info{
+        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        nullptr,
+        memory_requirements.size,
+        memory_type,
+    };
+    VkDeviceMemory memory = nullptr;
+    if (impl_->allocate_memory(impl_->device, &allocate_info, nullptr, &memory) != VK_SUCCESS || !memory) {
+        // Device-local heap may be exhausted; retry in host-visible memory.
+        if (!host_visible) {
+            memory_type = pick_type(kMemHostVisibleBit | kMemHostCoherentBit, 0);
+            if (memory_type != 0xffffffffu) {
+                const VkMemoryAllocateInfo retry_info{
+                    VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                    nullptr,
+                    memory_requirements.size,
+                    memory_type,
+                };
+                if (impl_->allocate_memory(impl_->device, &retry_info, nullptr, &memory) == VK_SUCCESS && memory) {
+                    host_visible = true;
+                }
+            }
+        }
+        if (!memory) {
+            impl_->destroy_buffer(impl_->device, buffer, nullptr);
+            throw std::runtime_error("vkAllocateMemory failed");
+        }
+    }
+    if (impl_->bind_buffer_memory(impl_->device, buffer, memory, 0) != VK_SUCCESS) {
+        impl_->free_memory(impl_->device, memory, nullptr);
+        impl_->destroy_buffer(impl_->device, buffer, nullptr);
+        throw std::runtime_error("vkBindBufferMemory failed");
+    }
+
+    auto buffer_impl = std::make_shared<VulkanBuffer::Impl>(impl_, buffer, memory, nbytes, host_visible, bucket);
+    VulkanBuffer out(std::move(buffer_impl));
+    if (initial_data) out.upload(initial_data, nbytes);
+    return out;
+}
+
+VulkanOpResult VulkanRuntime::dispatch_cached(const std::uint32_t* spirv,
+                                              std::size_t spirv_word_count,
+                                              const std::vector<const VulkanBuffer*>& buffers,
+                                              const void* push_constants,
+                                              std::uint32_t push_constant_bytes,
+                                              std::uint32_t group_count_x,
+                                              std::uint32_t group_count_y,
+                                              std::uint32_t group_count_z) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (!impl_ || !impl_->ready) {
+        return fail(error().empty() ? "Vulkan runtime is not available" : error());
+    }
+    result.device_name = device_name();
+    if (!spirv || spirv_word_count == 0) return fail("Vulkan compute shader is empty");
+    if (buffers.empty() || buffers.size() > 16) {
+        return fail("Vulkan cached dispatch supports 1..16 storage buffers");
+    }
+    if (group_count_x == 0 || group_count_y == 0 || group_count_z == 0) {
+        return fail("Vulkan compute dispatch dimensions must be non-zero");
+    }
+    if (push_constant_bytes > 0 && !push_constants) {
+        return fail("Vulkan cached dispatch push constant payload is null");
+    }
+    std::array<VkBuffer, 16> raw_buffers{};
+    std::array<VkDeviceSize, 16> raw_sizes{};
+    for (std::size_t i = 0; i < buffers.size(); ++i) {
+        if (!buffers[i] || !buffers[i]->valid()) return fail("Vulkan cached dispatch buffer must be valid");
+        if (!buffers[i]->impl_ || buffers[i]->impl_->runtime.get() != impl_.get()) {
+            return fail("Vulkan cached dispatch buffers must belong to the same VulkanRuntime");
+        }
+        raw_buffers[i] = buffers[i]->impl_->buffer;
+        raw_sizes[i] = static_cast<VkDeviceSize>(buffers[i]->impl_->nbytes);
+    }
+    if (impl_->batch_open) {
+        for (const auto* buffer : buffers) impl_->batch_keepalive.push_back(buffer->impl_);
+    }
+    if (impl_->capturing) {
+        Impl::CapturedDispatch entry;
+        entry.spirv = spirv;
+        entry.spirv_words = spirv_word_count;
+        entry.keepalive.reserve(buffers.size());
+        entry.raw_buffers.assign(raw_buffers.begin(), raw_buffers.begin() + buffers.size());
+        entry.raw_sizes.assign(raw_sizes.begin(), raw_sizes.begin() + buffers.size());
+        for (const auto* buffer : buffers) entry.keepalive.push_back(buffer->impl_);
+        if (push_constant_bytes > 0) {
+            const auto* bytes = static_cast<const std::uint8_t*>(push_constants);
+            entry.push.assign(bytes, bytes + push_constant_bytes);
+        }
+        entry.gx = group_count_x;
+        entry.gy = group_count_y;
+        entry.gz = group_count_z;
+        impl_->capture_list.push_back(std::move(entry));
+    }
+    return impl_->fast_dispatch(spirv, spirv_word_count, raw_buffers.data(), raw_sizes.data(),
+                                static_cast<std::uint32_t>(buffers.size()), push_constants, push_constant_bytes,
+                                group_count_x, group_count_y, group_count_z);
+}
+
+struct VulkanDispatchRecording::Impl {
+    std::vector<VulkanRuntime::Impl::CapturedDispatch> dispatches;
+};
+
+VulkanDispatchRecording::VulkanDispatchRecording() = default;
+VulkanDispatchRecording::~VulkanDispatchRecording() = default;
+VulkanDispatchRecording::VulkanDispatchRecording(VulkanDispatchRecording&&) noexcept = default;
+VulkanDispatchRecording& VulkanDispatchRecording::operator=(VulkanDispatchRecording&&) noexcept = default;
+
+bool VulkanDispatchRecording::empty() const {
+    return !impl_ || impl_->dispatches.empty();
+}
+
+std::size_t VulkanDispatchRecording::size() const {
+    return impl_ ? impl_->dispatches.size() : 0;
+}
+
+bool VulkanRuntime::capture_begin() {
+    if (!impl_ || !impl_->ready || impl_->capturing || impl_->batch_open) return false;
+    impl_->capturing = true;
+    impl_->capture_list.clear();
+    return true;
+}
+
+VulkanDispatchRecording VulkanRuntime::capture_end() {
+    VulkanDispatchRecording recording;
+    if (!impl_ || !impl_->capturing) return recording;
+    impl_->capturing = false;
+    recording.impl_ = std::make_shared<VulkanDispatchRecording::Impl>();
+    recording.impl_->dispatches = std::move(impl_->capture_list);
+    impl_->capture_list.clear();
+    return recording;
+}
+
+bool VulkanRuntime::capture_active() const {
+    return impl_ && impl_->capturing;
+}
+
+VulkanOpResult VulkanRuntime::replay(const VulkanDispatchRecording& recording) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (!impl_ || !impl_->ready) {
+        return fail(error().empty() ? "Vulkan runtime is not available" : error());
+    }
+    result.device_name = device_name();
+    if (impl_->capturing) return fail("Vulkan replay is not allowed while capturing");
+    if (impl_->batch_open) return fail("Vulkan replay is not allowed inside an open batch");
+    if (recording.empty()) {
+        result.success = true;
+        return result;
+    }
+    if (!impl_->do_batch_begin()) return fail(impl_->fast_error);
+    for (const auto& entry : recording.impl_->dispatches) {
+        auto dispatched = impl_->fast_dispatch(entry.spirv, entry.spirv_words, entry.raw_buffers.data(),
+                                               entry.raw_sizes.data(),
+                                               static_cast<std::uint32_t>(entry.raw_buffers.size()),
+                                               entry.push.empty() ? nullptr : entry.push.data(),
+                                               static_cast<std::uint32_t>(entry.push.size()), entry.gx, entry.gy,
+                                               entry.gz);
+        if (!dispatched.success) {
+            impl_->do_batch_end();
+            return dispatched;
+        }
+    }
+    return impl_->do_batch_end();
+}
+
+VulkanStorageBufferDispatchResult VulkanRuntime::dispatch_storage_buffers(
+    const std::uint32_t* spirv,
+    std::size_t spirv_word_count,
+    const std::vector<VulkanStorageBufferSpec>& buffer_specs,
+    const std::vector<std::size_t>& output_buffer_indices,
+    std::uint32_t group_count_x,
+    std::uint32_t group_count_y,
+    std::uint32_t group_count_z) {
+    if (!impl_) {
+        VulkanStorageBufferDispatchResult result;
+        result.error = "Vulkan runtime is not initialized";
+        return result;
+    }
+    return impl_->dispatch_storage_buffers(spirv, spirv_word_count, buffer_specs, output_buffer_indices,
+                                           group_count_x, group_count_y, group_count_z);
+}
+
+VulkanStorageBufferDispatchResult VulkanRuntime::dispatch_storage_buffers(
+    const std::uint32_t* spirv,
+    std::size_t spirv_word_count,
+    const std::vector<const VulkanBuffer*>& buffers,
+    const std::vector<std::size_t>& output_buffer_indices,
+    std::uint32_t group_count_x,
+    std::uint32_t group_count_y,
+    std::uint32_t group_count_z) {
+    VulkanStorageBufferDispatchResult result;
+    result.device_name = device_name();
+
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        result.success = false;
+        return result;
+    };
+    if (!impl_ || !impl_->ready) return fail(error().empty() ? "Vulkan runtime is not available" : error());
+    if (!spirv || spirv_word_count == 0) return fail("Vulkan compute shader is empty");
+    if (buffers.empty()) return fail("Vulkan compute requires at least one storage buffer");
+    if (buffers.size() > 16) return fail("Vulkan compute smoke supports at most 16 storage buffers");
+    if (group_count_x == 0 || group_count_y == 0 || group_count_z == 0) {
+        return fail("Vulkan compute dispatch dimensions must be non-zero");
+    }
+    for (std::size_t i = 0; i < buffers.size(); ++i) {
+        if (!buffers[i] || !buffers[i]->valid()) return fail("Vulkan compute storage buffer must be valid");
+        if (buffers[i]->nbytes() == 0) return fail("Vulkan compute storage buffer must be non-empty");
+        if (!buffers[i]->impl_ || buffers[i]->impl_->runtime.get() != impl_.get()) {
+            return fail("Vulkan compute storage buffers must belong to the same VulkanRuntime");
+        }
+    }
+    for (const auto output_index : output_buffer_indices) {
+        if (output_index >= buffers.size()) return fail("Vulkan compute output index is out of range");
+    }
+
+    VkDescriptorSetLayout descriptor_set_layout = nullptr;
+    VkDescriptorPool descriptor_pool = nullptr;
+    VkPipelineLayout pipeline_layout = nullptr;
+    VkShaderModule shader_module = nullptr;
+    VkPipeline pipeline = nullptr;
+    VkCommandPool command_pool = nullptr;
+
+    auto cleanup = [&]() {
+        if (impl_->destroy_command_pool && command_pool) impl_->destroy_command_pool(impl_->device, command_pool, nullptr);
+        if (impl_->destroy_pipeline && pipeline) impl_->destroy_pipeline(impl_->device, pipeline, nullptr);
+        if (impl_->destroy_shader_module && shader_module) impl_->destroy_shader_module(impl_->device, shader_module, nullptr);
+        if (impl_->destroy_pipeline_layout && pipeline_layout) {
+            impl_->destroy_pipeline_layout(impl_->device, pipeline_layout, nullptr);
+        }
+        if (impl_->destroy_descriptor_pool && descriptor_pool) {
+            impl_->destroy_descriptor_pool(impl_->device, descriptor_pool, nullptr);
+        }
+        if (impl_->destroy_descriptor_set_layout && descriptor_set_layout) {
+            impl_->destroy_descriptor_set_layout(impl_->device, descriptor_set_layout, nullptr);
+        }
     };
 
     auto fail_with_cleanup = [&](const std::string& message) {
-        result.error = message;
         cleanup();
-        return result;
+        return fail(message);
     };
 
-    if (!destroy_device || !get_device_queue || !create_buffer || !destroy_buffer ||
-        !get_buffer_memory_requirements || !allocate_memory || !free_memory ||
-        !bind_buffer_memory || !map_memory || !unmap_memory ||
-        !create_descriptor_set_layout || !destroy_descriptor_set_layout ||
-        !create_descriptor_pool || !destroy_descriptor_pool || !allocate_descriptor_sets ||
-        !update_descriptor_sets || !create_pipeline_layout || !destroy_pipeline_layout ||
-        !create_shader_module || !destroy_shader_module || !create_compute_pipelines ||
-        !destroy_pipeline || !create_command_pool || !destroy_command_pool ||
-        !allocate_command_buffers || !begin_command_buffer || !end_command_buffer ||
-        !cmd_bind_pipeline || !cmd_bind_descriptor_sets || !cmd_dispatch ||
-        !queue_submit || !queue_wait_idle) {
-        return fail_with_cleanup("Vulkan device is missing required compute functions");
-    }
-
-    VkQueue queue = nullptr;
-    get_device_queue(device, selected_queue_family, 0, &queue);
-    if (!queue) return fail_with_cleanup("vkGetDeviceQueue returned null");
-
-    for (std::size_t i = 0; i < buffer_count; ++i) {
-        const VkBufferCreateInfo buffer_create_info{
-            VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            nullptr,
-            0,
-            static_cast<VkDeviceSize>(buffer_specs[i].nbytes),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VK_SHARING_MODE_EXCLUSIVE,
-            0,
-            nullptr,
-        };
-        if (create_buffer(device, &buffer_create_info, nullptr, &buffers[i]) != VK_SUCCESS || !buffers[i]) {
-            return fail_with_cleanup("vkCreateBuffer failed");
-        }
-
-        VkMemoryRequirements memory_requirements{};
-        get_buffer_memory_requirements(device, buffers[i], &memory_requirements);
-        const std::uint32_t memory_type =
-            find_host_visible_coherent_memory_type(memory_properties, memory_requirements.memoryTypeBits);
-        if (memory_type == 0xffffffffu) {
-            return fail_with_cleanup("No host-visible coherent Vulkan memory type for storage buffer");
-        }
-        const VkMemoryAllocateInfo allocate_info{
-            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            nullptr,
-            memory_requirements.size,
-            memory_type,
-        };
-        if (allocate_memory(device, &allocate_info, nullptr, &memories[i]) != VK_SUCCESS || !memories[i]) {
-            return fail_with_cleanup("vkAllocateMemory failed");
-        }
-        if (bind_buffer_memory(device, buffers[i], memories[i], 0) != VK_SUCCESS) {
-            return fail_with_cleanup("vkBindBufferMemory failed");
-        }
-
-        void* mapped = nullptr;
-        if (map_memory(device, memories[i], 0, static_cast<VkDeviceSize>(buffer_specs[i].nbytes), 0, &mapped) !=
-                VK_SUCCESS ||
-            !mapped) {
-            return fail_with_cleanup("vkMapMemory failed while initializing storage buffer");
-        }
-        if (buffer_specs[i].initial_data) {
-            std::memcpy(mapped, buffer_specs[i].initial_data, buffer_specs[i].nbytes);
-        } else {
-            std::memset(mapped, 0, buffer_specs[i].nbytes);
-        }
-        unmap_memory(device, memories[i]);
-    }
-
     std::vector<VkDescriptorSetLayoutBinding> bindings;
-    bindings.reserve(buffer_count);
-    for (std::size_t i = 0; i < buffer_count; ++i) {
+    bindings.reserve(buffers.size());
+    for (std::size_t i = 0; i < buffers.size(); ++i) {
         bindings.push_back(VkDescriptorSetLayoutBinding{
             static_cast<std::uint32_t>(i),
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -2133,13 +5989,13 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
         static_cast<std::uint32_t>(bindings.size()),
         bindings.data(),
     };
-    if (create_descriptor_set_layout(device, &descriptor_set_layout_info, nullptr, &descriptor_set_layout) !=
-            VK_SUCCESS ||
+    if (impl_->create_descriptor_set_layout(impl_->device, &descriptor_set_layout_info, nullptr,
+                                            &descriptor_set_layout) != VK_SUCCESS ||
         !descriptor_set_layout) {
         return fail_with_cleanup("vkCreateDescriptorSetLayout failed");
     }
 
-    const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, static_cast<std::uint32_t>(buffer_count)};
+    const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, static_cast<std::uint32_t>(buffers.size())};
     const VkDescriptorPoolCreateInfo descriptor_pool_info{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         nullptr,
@@ -2148,7 +6004,7 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
         1,
         &pool_size,
     };
-    if (create_descriptor_pool(device, &descriptor_pool_info, nullptr, &descriptor_pool) != VK_SUCCESS ||
+    if (impl_->create_descriptor_pool(impl_->device, &descriptor_pool_info, nullptr, &descriptor_pool) != VK_SUCCESS ||
         !descriptor_pool) {
         return fail_with_cleanup("vkCreateDescriptorPool failed");
     }
@@ -2161,20 +6017,20 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
         &descriptor_set_layout,
     };
     VkDescriptorSet descriptor_set = nullptr;
-    if (allocate_descriptor_sets(device, &descriptor_set_allocate_info, &descriptor_set) != VK_SUCCESS ||
+    if (impl_->allocate_descriptor_sets(impl_->device, &descriptor_set_allocate_info, &descriptor_set) != VK_SUCCESS ||
         !descriptor_set) {
         return fail_with_cleanup("vkAllocateDescriptorSets failed");
     }
 
     std::vector<VkDescriptorBufferInfo> descriptor_buffer_infos;
     std::vector<VkWriteDescriptorSet> write_descriptors;
-    descriptor_buffer_infos.reserve(buffer_count);
-    write_descriptors.reserve(buffer_count);
-    for (std::size_t i = 0; i < buffer_count; ++i) {
+    descriptor_buffer_infos.reserve(buffers.size());
+    write_descriptors.reserve(buffers.size());
+    for (std::size_t i = 0; i < buffers.size(); ++i) {
         descriptor_buffer_infos.push_back(VkDescriptorBufferInfo{
-            buffers[i],
+            buffers[i]->impl_->buffer,
             0,
-            static_cast<VkDeviceSize>(buffer_specs[i].nbytes),
+            static_cast<VkDeviceSize>(buffers[i]->impl_->nbytes),
         });
         write_descriptors.push_back(VkWriteDescriptorSet{
             VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -2189,8 +6045,8 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
             nullptr,
         });
     }
-    update_descriptor_sets(device, static_cast<std::uint32_t>(write_descriptors.size()), write_descriptors.data(),
-                           0, nullptr);
+    impl_->update_descriptor_sets(impl_->device, static_cast<std::uint32_t>(write_descriptors.size()),
+                                  write_descriptors.data(), 0, nullptr);
 
     const VkPipelineLayoutCreateInfo pipeline_layout_info{
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -2201,7 +6057,7 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
         0,
         nullptr,
     };
-    if (create_pipeline_layout(device, &pipeline_layout_info, nullptr, &pipeline_layout) != VK_SUCCESS ||
+    if (impl_->create_pipeline_layout(impl_->device, &pipeline_layout_info, nullptr, &pipeline_layout) != VK_SUCCESS ||
         !pipeline_layout) {
         return fail_with_cleanup("vkCreatePipelineLayout failed");
     }
@@ -2213,7 +6069,8 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
         spirv_word_count * sizeof(std::uint32_t),
         spirv,
     };
-    if (create_shader_module(device, &shader_module_info, nullptr, &shader_module) != VK_SUCCESS || !shader_module) {
+    if (impl_->create_shader_module(impl_->device, &shader_module_info, nullptr, &shader_module) != VK_SUCCESS ||
+        !shader_module) {
         return fail_with_cleanup("vkCreateShaderModule failed");
     }
 
@@ -2235,7 +6092,8 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
         nullptr,
         -1,
     };
-    if (create_compute_pipelines(device, nullptr, 1, &compute_pipeline_info, nullptr, &pipeline) != VK_SUCCESS ||
+    if (impl_->create_compute_pipelines(impl_->device, nullptr, 1, &compute_pipeline_info, nullptr, &pipeline) !=
+            VK_SUCCESS ||
         !pipeline) {
         return fail_with_cleanup("vkCreateComputePipelines failed");
     }
@@ -2244,9 +6102,10 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
         VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         nullptr,
         0,
-        selected_queue_family,
+        impl_->queue_family,
     };
-    if (create_command_pool(device, &command_pool_info, nullptr, &command_pool) != VK_SUCCESS || !command_pool) {
+    if (impl_->create_command_pool(impl_->device, &command_pool_info, nullptr, &command_pool) != VK_SUCCESS ||
+        !command_pool) {
         return fail_with_cleanup("vkCreateCommandPool failed");
     }
 
@@ -2258,7 +6117,7 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
         1,
     };
     VkCommandBuffer command_buffer = nullptr;
-    if (allocate_command_buffers(device, &command_buffer_allocate_info, &command_buffer) != VK_SUCCESS ||
+    if (impl_->allocate_command_buffers(impl_->device, &command_buffer_allocate_info, &command_buffer) != VK_SUCCESS ||
         !command_buffer) {
         return fail_with_cleanup("vkAllocateCommandBuffers failed");
     }
@@ -2269,14 +6128,14 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
         0,
         nullptr,
     };
-    if (begin_command_buffer(command_buffer, &begin_info) != VK_SUCCESS) {
+    if (impl_->begin_command_buffer(command_buffer, &begin_info) != VK_SUCCESS) {
         return fail_with_cleanup("vkBeginCommandBuffer failed");
     }
-    cmd_bind_pipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-    cmd_bind_descriptor_sets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 1,
-                             &descriptor_set, 0, nullptr);
-    cmd_dispatch(command_buffer, group_count_x, group_count_y, group_count_z);
-    if (end_command_buffer(command_buffer) != VK_SUCCESS) {
+    impl_->cmd_bind_pipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    impl_->cmd_bind_descriptor_sets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 1,
+                                    &descriptor_set, 0, nullptr);
+    impl_->cmd_dispatch(command_buffer, group_count_x, group_count_y, group_count_z);
+    if (impl_->end_command_buffer(command_buffer) != VK_SUCCESS) {
         return fail_with_cleanup("vkEndCommandBuffer failed");
     }
 
@@ -2291,42 +6150,37 @@ VulkanStorageBufferComputeResult run_vulkan_storage_buffer_compute(
         0,
         nullptr,
     };
-    if (queue_submit(queue, 1, &submit_info, nullptr) != VK_SUCCESS) {
+    if (impl_->queue_submit(impl_->queue, 1, &submit_info, nullptr) != VK_SUCCESS) {
         return fail_with_cleanup("vkQueueSubmit failed");
     }
-    if (queue_wait_idle(queue) != VK_SUCCESS) {
+    if (impl_->queue_wait_idle(impl_->queue) != VK_SUCCESS) {
         return fail_with_cleanup("vkQueueWaitIdle failed");
     }
 
     result.outputs.clear();
     result.outputs.reserve(output_buffer_indices.size());
     for (const auto output_index : output_buffer_indices) {
-        const auto nbytes = buffer_specs[output_index].nbytes;
+        const auto nbytes = buffers[output_index]->nbytes();
         std::vector<std::uint8_t> output(nbytes);
-        void* mapped = nullptr;
-        if (map_memory(device, memories[output_index], 0, static_cast<VkDeviceSize>(nbytes), 0, &mapped) !=
-                VK_SUCCESS ||
-            !mapped) {
-            return fail_with_cleanup("vkMapMemory failed while reading storage buffer");
-        }
-        std::memcpy(output.data(), mapped, nbytes);
-        unmap_memory(device, memories[output_index]);
+        buffers[output_index]->download(output.data(), nbytes);
         result.outputs.push_back(std::move(output));
     }
-
     result.success = true;
     cleanup();
     return result;
 }
 
-} // namespace
-
 VulkanSmokeComputeResult run_vulkan_smoke_compute() {
+    auto runtime = VulkanRuntime::create();
+    return run_vulkan_smoke_compute(runtime);
+}
+
+VulkanSmokeComputeResult run_vulkan_smoke_compute(VulkanRuntime& runtime) {
     VulkanSmokeComputeResult result;
     float output = 0.0f;
     const auto& shader = smoke_compute_spirv();
     const std::vector<VulkanStorageBufferSpec> buffers = {{nullptr, sizeof(output)}};
-    const auto run = run_vulkan_storage_buffer_compute(shader.data(), shader.size(), buffers, {0});
+    const auto run = runtime.dispatch_storage_buffers(shader.data(), shader.size(), buffers, {0});
     result.success = run.success;
     result.device_name = run.device_name;
     result.error = run.error;
@@ -2341,6 +6195,808 @@ VulkanSmokeComputeResult run_vulkan_smoke_compute() {
         result.error = "Vulkan smoke compute returned malformed output";
     }
     return result;
+}
+
+VulkanOpResult run_vulkan_f32_matmul(VulkanRuntime& runtime,
+                                     const VulkanBuffer& a,
+                                     const VulkanBuffer& b,
+                                     VulkanBuffer& c,
+                                     std::size_t m,
+                                     std::size_t k,
+                                     std::size_t n) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (m == 0 || k == 0 || n == 0) return fail("Vulkan f32 matmul requires non-zero M, K, and N");
+    constexpr std::size_t kMaxDim = 1u << 24;
+    if (m > kMaxDim || n > kMaxDim || k > kMaxDim) {
+        return fail("Vulkan f32 matmul dimensions exceed supported range");
+    }
+    if (a.nbytes() < m * k * sizeof(float)) return fail("Vulkan f32 matmul A buffer is too small");
+    if (b.nbytes() < k * n * sizeof(float)) return fail("Vulkan f32 matmul B buffer is too small");
+    if (c.nbytes() < m * n * sizeof(float)) return fail("Vulkan f32 matmul C buffer is too small");
+
+    const std::vector<const VulkanBuffer*> buffers = {&a, &b, &c};
+    if (m == 1) {
+        const struct {
+            std::uint32_t k;
+            std::uint32_t n;
+        } push{static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
+        return runtime.dispatch_cached(vkspirv::k_mm_f32_m1n, vkspirv::k_mm_f32_m1n_words, buffers, &push,
+                                       sizeof(push), static_cast<std::uint32_t>((n + 63) / 64), 1, 1);
+    }
+    const struct {
+        std::uint32_t m;
+        std::uint32_t k;
+        std::uint32_t n;
+    } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
+    const std::uint32_t groups_x = static_cast<std::uint32_t>((n + 15) / 16);
+    const std::uint32_t groups_y = static_cast<std::uint32_t>((m + 15) / 16);
+    return runtime.dispatch_cached(vkspirv::k_mm_f32_nn, vkspirv::k_mm_f32_nn_words, buffers, &push,
+                                   sizeof(push), groups_x, groups_y, 1);
+}
+
+VulkanOpResult run_vulkan_f32_matmul_transpose_b(VulkanRuntime& runtime,
+                                                 const VulkanBuffer& a,
+                                                 const VulkanBuffer& b,
+                                                 VulkanBuffer& c,
+                                                 std::size_t m,
+                                                 std::size_t k,
+                                                 std::size_t n) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (m == 0 || k == 0 || n == 0) return fail("Vulkan f32 transpose-B matmul requires non-zero M, K, and N");
+    constexpr std::size_t kMaxDim = 1u << 24;
+    if (m > kMaxDim || n > kMaxDim || k > kMaxDim) {
+        return fail("Vulkan f32 transpose-B matmul dimensions exceed supported range");
+    }
+    if (a.nbytes() < m * k * sizeof(float)) return fail("Vulkan f32 transpose-B matmul A buffer is too small");
+    if (b.nbytes() < n * k * sizeof(float)) return fail("Vulkan f32 transpose-B matmul B buffer is too small");
+    if (c.nbytes() < m * n * sizeof(float)) return fail("Vulkan f32 transpose-B matmul C buffer is too small");
+
+    const std::vector<const VulkanBuffer*> buffers = {&a, &b, &c};
+    if (m == 1) {
+        // Decode form: one wave64 workgroup per output element with a
+        // shared-memory reduction over the contiguous B row.
+        const struct {
+            std::uint32_t k;
+            std::uint32_t n;
+        } push{static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
+        return runtime.dispatch_cached(vkspirv::k_mm_f32_m1nt, vkspirv::k_mm_f32_m1nt_words, buffers, &push,
+                                       sizeof(push), static_cast<std::uint32_t>(n), 1, 1);
+    }
+    const struct {
+        std::uint32_t m;
+        std::uint32_t k;
+        std::uint32_t n;
+    } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
+    return runtime.dispatch_cached(vkspirv::k_mm_f32_nt, vkspirv::k_mm_f32_nt_words, buffers, &push,
+                                   sizeof(push), static_cast<std::uint32_t>((n + 15) / 16),
+                                   static_cast<std::uint32_t>((m + 15) / 16), 1);
+}
+
+VulkanOpResult run_vulkan_f32_matmul_transpose_a(VulkanRuntime& runtime,
+                                                 const VulkanBuffer& a,
+                                                 const VulkanBuffer& b,
+                                                 VulkanBuffer& c,
+                                                 std::size_t m,
+                                                 std::size_t k,
+                                                 std::size_t n) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (m == 0 || k == 0 || n == 0) return fail("Vulkan f32 transpose-A matmul requires non-zero M, K, and N");
+    constexpr std::size_t kMaxDim = 1u << 24;
+    if (m > kMaxDim || n > kMaxDim || k > kMaxDim) {
+        return fail("Vulkan f32 transpose-A matmul dimensions exceed supported range");
+    }
+    if (a.nbytes() < k * m * sizeof(float)) return fail("Vulkan f32 transpose-A matmul A buffer is too small");
+    if (b.nbytes() < k * n * sizeof(float)) return fail("Vulkan f32 transpose-A matmul B buffer is too small");
+    if (c.nbytes() < m * n * sizeof(float)) return fail("Vulkan f32 transpose-A matmul C buffer is too small");
+
+    const struct {
+        std::uint32_t m;
+        std::uint32_t k;
+        std::uint32_t n;
+    } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
+    const std::vector<const VulkanBuffer*> buffers = {&a, &b, &c};
+    return runtime.dispatch_cached(vkspirv::k_mm_f32_tn, vkspirv::k_mm_f32_tn_words, buffers, &push,
+                                   sizeof(push), static_cast<std::uint32_t>((n + 15) / 16),
+                                   static_cast<std::uint32_t>((m + 15) / 16), 1);
+}
+
+VulkanOpResult run_vulkan_i8_scaled_matmul(VulkanRuntime& runtime,
+                                           const VulkanBuffer& a,
+                                           const VulkanBuffer& b,
+                                           VulkanBuffer& c,
+                                           std::size_t m,
+                                           std::size_t k,
+                                           std::size_t n,
+                                           float scale_a,
+                                           float scale_b) {
+    VulkanOpResult result;
+    constexpr std::size_t kMaxSpecializedK = 256;
+    constexpr std::size_t kMaxDispatchDim = 4096;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (m == 0 || k == 0 || n == 0) return fail("Vulkan i8 scaled matmul requires non-zero M, K, and N");
+    if (k > kMaxSpecializedK) return fail("Vulkan i8 scaled matmul currently supports K up to 256");
+    if (m > kMaxDispatchDim || n > kMaxDispatchDim) {
+        return fail("Vulkan i8 scaled matmul currently supports M,N up to 4096");
+    }
+    if (!std::isfinite(scale_a) || !std::isfinite(scale_b)) {
+        return fail("Vulkan i8 scaled matmul requires finite scales");
+    }
+    if (!runtime.supports_storage_buffer_i8()) {
+        return fail("Vulkan i8 scaled matmul requires VK_KHR_8bit_storage on persistent Tensor buffers");
+    }
+    if (m > std::numeric_limits<std::size_t>::max() / k) return fail("Vulkan i8 scaled matmul M*K overflows size_t");
+    if (k > std::numeric_limits<std::size_t>::max() / n) return fail("Vulkan i8 scaled matmul K*N overflows size_t");
+    if (a.nbytes() < m * k * sizeof(std::int8_t)) return fail("Vulkan i8 scaled matmul A buffer is too small");
+    if (b.nbytes() < k * n * sizeof(std::int8_t)) return fail("Vulkan i8 scaled matmul B buffer is too small");
+    if (c.nbytes() < m * n * sizeof(float)) return fail("Vulkan i8 scaled matmul C buffer is too small");
+
+    const auto shader = i8_scaled_matmul_spirv(k, n, scale_a, scale_b);
+    const std::vector<const VulkanBuffer*> buffers = {&a, &b, &c};
+    const auto run = runtime.dispatch_storage_buffers(
+        shader.data(), shader.size(), buffers, {},
+        static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(m), 1);
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    return result;
+}
+
+VulkanOpResult run_vulkan_softmax_rows(VulkanRuntime& runtime,
+                                       const VulkanBuffer& x,
+                                       VulkanBuffer& out,
+                                       std::size_t rows,
+                                       std::size_t cols) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (rows == 0 || cols == 0) return fail("Vulkan softmax rows requires non-zero rows and cols");
+    constexpr std::size_t kMaxDim = 1u << 24;
+    if (rows > kMaxDim || cols > kMaxDim) {
+        return fail("Vulkan softmax rows dimensions exceed supported range");
+    }
+    const auto nbytes = rows * cols * sizeof(float);
+    if (x.nbytes() < nbytes) return fail("Vulkan softmax input buffer is too small");
+    if (out.nbytes() < nbytes) return fail("Vulkan softmax output buffer is too small");
+
+    const struct {
+        std::uint32_t rows;
+        std::uint32_t cols;
+    } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &out};
+    return runtime.dispatch_cached(vkspirv::k_softmax_rows_f32, vkspirv::k_softmax_rows_f32_words, buffers,
+                                   &push, sizeof(push), static_cast<std::uint32_t>(rows), 1, 1);
+}
+
+VulkanOpResult run_vulkan_softmax_rows_backward(VulkanRuntime& runtime,
+                                                const VulkanBuffer& y,
+                                                const VulkanBuffer& dy,
+                                                VulkanBuffer& dx,
+                                                std::size_t rows,
+                                                std::size_t cols) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (rows == 0 || cols == 0) return fail("Vulkan softmax backward requires non-zero rows and cols");
+    const auto nbytes = rows * cols * sizeof(float);
+    if (y.nbytes() < nbytes || dy.nbytes() < nbytes || dx.nbytes() < nbytes) {
+        return fail("Vulkan softmax backward buffer is too small");
+    }
+    const struct {
+        std::uint32_t rows;
+        std::uint32_t cols;
+    } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
+    const std::vector<const VulkanBuffer*> buffers = {&y, &dy, &dx};
+    return runtime.dispatch_cached(vkspirv::k_softmax_rows_bwd_f32, vkspirv::k_softmax_rows_bwd_f32_words,
+                                   buffers, &push, sizeof(push), static_cast<std::uint32_t>(rows), 1, 1);
+}
+
+VulkanOpResult run_vulkan_rmsnorm(VulkanRuntime& runtime,
+                                  const VulkanBuffer& x,
+                                  const VulkanBuffer& weight,
+                                  VulkanBuffer& out,
+                                  std::size_t rows,
+                                  std::size_t cols,
+                                  float eps) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (rows == 0 || cols == 0) return fail("Vulkan RMSNorm requires non-zero rows and cols");
+    constexpr std::size_t kMaxDim = 1u << 24;
+    if (rows > kMaxDim || cols > kMaxDim) {
+        return fail("Vulkan RMSNorm dimensions exceed supported range");
+    }
+    if (!std::isfinite(eps) || eps < 0.0f) return fail("Vulkan RMSNorm eps must be finite and non-negative");
+    const auto x_bytes = rows * cols * sizeof(float);
+    if (x.nbytes() < x_bytes) return fail("Vulkan RMSNorm input buffer is too small");
+    if (out.nbytes() < x_bytes) return fail("Vulkan RMSNorm output buffer is too small");
+    if (weight.nbytes() < cols * sizeof(float)) return fail("Vulkan RMSNorm weight buffer is too small");
+
+    const struct {
+        std::uint32_t rows;
+        std::uint32_t cols;
+        float eps;
+    } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols), eps};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &weight, &out};
+    return runtime.dispatch_cached(vkspirv::k_rmsnorm_f32, vkspirv::k_rmsnorm_f32_words, buffers, &push,
+                                   sizeof(push), static_cast<std::uint32_t>(rows), 1, 1);
+}
+
+VulkanOpResult run_vulkan_rmsnorm_backward_x(VulkanRuntime& runtime,
+                                             const VulkanBuffer& x,
+                                             const VulkanBuffer& weight,
+                                             const VulkanBuffer& grad_out,
+                                             VulkanBuffer& grad_x,
+                                             std::size_t rows,
+                                             std::size_t cols,
+                                             float eps) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (rows == 0 || cols == 0) return fail("Vulkan RMSNorm backward requires non-zero rows and cols");
+    if (!std::isfinite(eps) || eps < 0.0f) return fail("Vulkan RMSNorm backward eps must be finite and non-negative");
+    const auto nbytes = rows * cols * sizeof(float);
+    if (x.nbytes() < nbytes || grad_out.nbytes() < nbytes || grad_x.nbytes() < nbytes) {
+        return fail("Vulkan RMSNorm backward buffer is too small");
+    }
+    if (weight.nbytes() < cols * sizeof(float)) return fail("Vulkan RMSNorm backward weight buffer is too small");
+
+    const struct {
+        std::uint32_t rows;
+        std::uint32_t cols;
+        float eps;
+    } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols), eps};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &weight, &grad_out, &grad_x};
+    return runtime.dispatch_cached(vkspirv::k_rmsnorm_bwd_x_f32, vkspirv::k_rmsnorm_bwd_x_f32_words, buffers,
+                                   &push, sizeof(push), static_cast<std::uint32_t>(rows), 1, 1);
+}
+
+VulkanOpResult run_vulkan_rmsnorm_backward_weight(VulkanRuntime& runtime,
+                                                  const VulkanBuffer& x,
+                                                  const VulkanBuffer& grad_out,
+                                                  VulkanBuffer& row_inv_scratch,
+                                                  VulkanBuffer& grad_weight,
+                                                  std::size_t rows,
+                                                  std::size_t cols,
+                                                  float eps) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (rows == 0 || cols == 0) return fail("Vulkan RMSNorm weight backward requires non-zero rows and cols");
+    if (!std::isfinite(eps) || eps < 0.0f) {
+        return fail("Vulkan RMSNorm weight backward eps must be finite and non-negative");
+    }
+    const auto nbytes = rows * cols * sizeof(float);
+    if (x.nbytes() < nbytes || grad_out.nbytes() < nbytes) {
+        return fail("Vulkan RMSNorm weight backward input buffer is too small");
+    }
+    if (row_inv_scratch.nbytes() < rows * sizeof(float)) {
+        return fail("Vulkan RMSNorm weight backward scratch buffer is too small");
+    }
+    if (grad_weight.nbytes() < cols * sizeof(float)) {
+        return fail("Vulkan RMSNorm weight backward output buffer is too small");
+    }
+
+    // Stage 1: per-row inverse RMS. Stage 2: per-column reduction over rows.
+    // In immediate mode each dispatch submits + waits; in batch mode the
+    // cached path inserts compute->compute barriers between dispatches.
+    const struct {
+        std::uint32_t rows;
+        std::uint32_t cols;
+        float eps;
+    } inv_push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols), eps};
+    const std::vector<const VulkanBuffer*> inv_buffers = {&x, &row_inv_scratch};
+    auto inv_run = runtime.dispatch_cached(vkspirv::k_rmsnorm_row_inv_f32, vkspirv::k_rmsnorm_row_inv_f32_words,
+                                           inv_buffers, &inv_push, sizeof(inv_push),
+                                           static_cast<std::uint32_t>(rows), 1, 1);
+    if (!inv_run.success) return inv_run;
+
+    const struct {
+        std::uint32_t rows;
+        std::uint32_t cols;
+    } w_push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
+    const std::vector<const VulkanBuffer*> w_buffers = {&x, &grad_out, &row_inv_scratch, &grad_weight};
+    return runtime.dispatch_cached(vkspirv::k_rmsnorm_bwd_w_f32, vkspirv::k_rmsnorm_bwd_w_f32_words, w_buffers,
+                                   &w_push, sizeof(w_push), static_cast<std::uint32_t>((cols + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_swiglu(VulkanRuntime& runtime,
+                                 const VulkanBuffer& packed,
+                                 VulkanBuffer& out,
+                                 std::size_t rows,
+                                 std::size_t hidden) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (rows == 0 || hidden == 0) return fail("Vulkan SwiGLU requires non-zero rows and hidden");
+    constexpr std::size_t kMaxDim = 1u << 24;
+    if (rows > kMaxDim || hidden > kMaxDim) {
+        return fail("Vulkan SwiGLU dimensions exceed supported range");
+    }
+    if (packed.nbytes() < rows * hidden * 2 * sizeof(float)) return fail("Vulkan SwiGLU packed buffer is too small");
+    if (out.nbytes() < rows * hidden * sizeof(float)) return fail("Vulkan SwiGLU output buffer is too small");
+
+    const struct {
+        std::uint32_t rows;
+        std::uint32_t hidden;
+    } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(hidden)};
+    const std::vector<const VulkanBuffer*> buffers = {&packed, &out};
+    const auto total = static_cast<std::uint32_t>((rows * hidden + 63) / 64);
+    return runtime.dispatch_cached(vkspirv::k_swiglu_f32, vkspirv::k_swiglu_f32_words, buffers, &push,
+                                   sizeof(push), total, 1, 1);
+}
+
+VulkanOpResult run_vulkan_swiglu_backward(VulkanRuntime& runtime,
+                                          const VulkanBuffer& packed,
+                                          const VulkanBuffer& grad_out,
+                                          VulkanBuffer& grad_packed,
+                                          std::size_t rows,
+                                          std::size_t hidden) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (rows == 0 || hidden == 0) return fail("Vulkan SwiGLU backward requires non-zero rows and hidden");
+    if (packed.nbytes() < rows * hidden * 2 * sizeof(float) ||
+        grad_packed.nbytes() < rows * hidden * 2 * sizeof(float)) {
+        return fail("Vulkan SwiGLU backward packed buffer is too small");
+    }
+    if (grad_out.nbytes() < rows * hidden * sizeof(float)) {
+        return fail("Vulkan SwiGLU backward grad_out buffer is too small");
+    }
+    const struct {
+        std::uint32_t rows;
+        std::uint32_t hidden;
+    } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(hidden)};
+    const std::vector<const VulkanBuffer*> buffers = {&packed, &grad_out, &grad_packed};
+    const auto total = static_cast<std::uint32_t>((rows * hidden * 2 + 63) / 64);
+    return runtime.dispatch_cached(vkspirv::k_swiglu_bwd_f32, vkspirv::k_swiglu_bwd_f32_words, buffers, &push,
+                                   sizeof(push), total, 1, 1);
+}
+
+VulkanOpResult run_vulkan_add(VulkanRuntime& runtime,
+                              const VulkanBuffer& a,
+                              const VulkanBuffer& b,
+                              VulkanBuffer& out,
+                              std::size_t elements) {
+    VulkanOpResult result;
+    constexpr std::size_t kMaxElements = 16 * 1024 * 1024;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (elements == 0) return fail("Vulkan add requires non-zero element count");
+    if (elements > kMaxElements * 16) return fail("Vulkan add element count exceeds supported range");
+    const auto nbytes = elements * sizeof(float);
+    if (a.nbytes() < nbytes) return fail("Vulkan add A buffer is too small");
+    if (b.nbytes() < nbytes) return fail("Vulkan add B buffer is too small");
+    if (out.nbytes() < nbytes) return fail("Vulkan add output buffer is too small");
+
+    const struct {
+        std::uint32_t n;
+    } push{static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&a, &b, &out};
+    return runtime.dispatch_cached(vkspirv::k_add_f32, vkspirv::k_add_f32_words, buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_sgd_update(VulkanRuntime& runtime,
+                                      const VulkanBuffer& param,
+                                      const VulkanBuffer& grad,
+                                      VulkanBuffer& out,
+                                      std::size_t elements,
+                                      float lr) {
+    VulkanOpResult result;
+    constexpr std::size_t kMaxElements = 16 * 1024 * 1024;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (elements == 0) return fail("Vulkan SGD update requires non-zero element count");
+    if (elements > kMaxElements * 16) return fail("Vulkan SGD update element count exceeds supported range");
+    if (!std::isfinite(lr)) return fail("Vulkan SGD update requires finite lr");
+    const auto nbytes = elements * sizeof(float);
+    if (param.nbytes() < nbytes) return fail("Vulkan SGD update param buffer is too small");
+    if (grad.nbytes() < nbytes) return fail("Vulkan SGD update grad buffer is too small");
+    if (out.nbytes() < nbytes) return fail("Vulkan SGD update output buffer is too small");
+
+    const struct {
+        std::uint32_t n;
+        float lr;
+    } push{static_cast<std::uint32_t>(elements), lr};
+    const std::vector<const VulkanBuffer*> buffers = {&param, &grad, &out};
+    return runtime.dispatch_cached(vkspirv::k_sgd_update_f32, vkspirv::k_sgd_update_f32_words, buffers, &push,
+                                   sizeof(push), static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_gelu(VulkanRuntime& runtime,
+                               const VulkanBuffer& x,
+                               VulkanBuffer& out,
+                               std::size_t elements) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (elements == 0) return fail("Vulkan GELU requires non-zero element count");
+    const auto nbytes = elements * sizeof(float);
+    if (x.nbytes() < nbytes || out.nbytes() < nbytes) return fail("Vulkan GELU buffer is too small");
+    const struct {
+        std::uint32_t n;
+    } push{static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &out};
+    return runtime.dispatch_cached(vkspirv::k_gelu_f32, vkspirv::k_gelu_f32_words, buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_softmax_cross_entropy(VulkanRuntime& runtime,
+                                                const VulkanBuffer& logits,
+                                                const VulkanBuffer& targets,
+                                                VulkanBuffer& partial,
+                                                VulkanBuffer& out,
+                                                std::size_t rows,
+                                                std::size_t cols) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (rows == 0 || cols == 0) return fail("Vulkan cross-entropy requires non-zero rows and cols");
+    if (logits.nbytes() < rows * cols * sizeof(float)) return fail("Vulkan cross-entropy logits buffer is too small");
+    if (targets.nbytes() < rows * sizeof(std::int32_t)) return fail("Vulkan cross-entropy targets buffer is too small");
+    if (partial.nbytes() < rows * sizeof(float)) return fail("Vulkan cross-entropy partial buffer is too small");
+    if (out.nbytes() < sizeof(float)) return fail("Vulkan cross-entropy output buffer is too small");
+
+    const struct {
+        std::uint32_t rows;
+        std::uint32_t cols;
+    } row_push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
+    const std::vector<const VulkanBuffer*> row_buffers = {&logits, &targets, &partial};
+    auto stage = runtime.dispatch_cached(vkspirv::k_ce_fwd_rows_f32, vkspirv::k_ce_fwd_rows_f32_words,
+                                         row_buffers, &row_push, sizeof(row_push),
+                                         static_cast<std::uint32_t>(rows), 1, 1);
+    if (!stage.success) return stage;
+
+    const struct {
+        std::uint32_t count;
+        std::uint32_t denominator;
+    } mean_push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(rows)};
+    const std::vector<const VulkanBuffer*> mean_buffers = {&partial, &out};
+    return runtime.dispatch_cached(vkspirv::k_mean_reduce_f32, vkspirv::k_mean_reduce_f32_words, mean_buffers,
+                                   &mean_push, sizeof(mean_push), 1, 1, 1);
+}
+
+VulkanOpResult run_vulkan_softmax_cross_entropy_backward(VulkanRuntime& runtime,
+                                                         const VulkanBuffer& logits,
+                                                         const VulkanBuffer& targets,
+                                                         const VulkanBuffer& grad_out,
+                                                         VulkanBuffer& grad_logits,
+                                                         std::size_t rows,
+                                                         std::size_t cols) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (rows == 0 || cols == 0) return fail("Vulkan cross-entropy backward requires non-zero rows and cols");
+    if (logits.nbytes() < rows * cols * sizeof(float) || grad_logits.nbytes() < rows * cols * sizeof(float)) {
+        return fail("Vulkan cross-entropy backward buffer is too small");
+    }
+    if (targets.nbytes() < rows * sizeof(std::int32_t)) {
+        return fail("Vulkan cross-entropy backward targets buffer is too small");
+    }
+    if (grad_out.nbytes() < sizeof(float)) return fail("Vulkan cross-entropy backward grad buffer is too small");
+
+    const struct {
+        std::uint32_t rows;
+        std::uint32_t cols;
+    } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
+    const std::vector<const VulkanBuffer*> buffers = {&logits, &targets, &grad_out, &grad_logits};
+    return runtime.dispatch_cached(vkspirv::k_ce_bwd_f32, vkspirv::k_ce_bwd_f32_words, buffers, &push,
+                                   sizeof(push), static_cast<std::uint32_t>(rows), 1, 1);
+}
+
+VulkanOpResult run_vulkan_compact_counter_apply_update_fused(VulkanRuntime& runtime,
+                                                             VulkanBuffer& state,
+                                                             VulkanBuffer& scale,
+                                                             VulkanBuffer& v,
+                                                             const VulkanBuffer& grad_out,
+                                                             const VulkanBuffer& x,
+                                                             VulkanBuffer& scale_new_scratch,
+                                                             VulkanBuffer& denom_scratch,
+                                                             std::size_t C,
+                                                             std::size_t in_features,
+                                                             std::size_t out_features,
+                                                             std::size_t batch,
+                                                             float lr,
+                                                             float lr_scale,
+                                                             float rms_beta,
+                                                             float rms_eps,
+                                                             std::uint32_t seed) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (C == 0 || in_features == 0 || out_features == 0 || batch == 0) {
+        return fail("Vulkan counter update requires non-zero dimensions");
+    }
+    if (in_features % 4 != 0) return fail("Vulkan counter update requires in_features % 4 == 0");
+    if (!runtime.supports_storage_buffer_i8()) {
+        return fail("Vulkan counter update requires VK_KHR_8bit_storage (uniformAndStorageBuffer8BitAccess)");
+    }
+    const std::size_t n_groups = out_features * (in_features / 4);
+    if (state.nbytes() < n_groups * 3) return fail("Vulkan counter update state buffer is too small");
+    if (scale.nbytes() < out_features * sizeof(float) || v.nbytes() < out_features * sizeof(float) ||
+        scale_new_scratch.nbytes() < out_features * sizeof(float) ||
+        denom_scratch.nbytes() < out_features * sizeof(float)) {
+        return fail("Vulkan counter update per-row buffer is too small");
+    }
+    if (grad_out.nbytes() < batch * out_features * sizeof(float) ||
+        x.nbytes() < batch * in_features * sizeof(float)) {
+        return fail("Vulkan counter update activation buffer is too small");
+    }
+
+    const struct {
+        std::int32_t C;
+        std::int32_t in_features;
+        std::int32_t out_features;
+        std::int32_t N;
+        float lr_scale;
+        float rms_beta;
+        float rms_eps;
+    } stats_push{static_cast<std::int32_t>(C),        static_cast<std::int32_t>(in_features),
+                 static_cast<std::int32_t>(out_features), static_cast<std::int32_t>(batch),
+                 lr_scale,                             rms_beta,
+                 rms_eps};
+    const std::vector<const VulkanBuffer*> stats_buffers = {&state, &scale, &v, &grad_out, &x,
+                                                            &scale_new_scratch, &denom_scratch};
+    auto stage = runtime.dispatch_cached(vkspirv::k_counter_row_stats_fused_f32,
+                                         vkspirv::k_counter_row_stats_fused_f32_words, stats_buffers,
+                                         &stats_push, sizeof(stats_push),
+                                         static_cast<std::uint32_t>(out_features), 1, 1);
+    if (!stage.success) return stage;
+
+    const struct {
+        std::int32_t C;
+        std::int32_t in_features;
+        std::int32_t out_features;
+        std::int32_t N;
+        std::int32_t n_groups;
+        float lr;
+        std::uint32_t seed;
+    } apply_push{static_cast<std::int32_t>(C),        static_cast<std::int32_t>(in_features),
+                 static_cast<std::int32_t>(out_features), static_cast<std::int32_t>(batch),
+                 static_cast<std::int32_t>(n_groups),  lr,
+                 seed};
+    const std::vector<const VulkanBuffer*> apply_buffers = {&state, &scale, &scale_new_scratch,
+                                                            &denom_scratch, &grad_out, &x};
+    stage = runtime.dispatch_cached(vkspirv::k_counter_apply_update_fused_f32,
+                                    vkspirv::k_counter_apply_update_fused_f32_words, apply_buffers,
+                                    &apply_push, sizeof(apply_push),
+                                    static_cast<std::uint32_t>((n_groups + 63) / 64), 1, 1);
+    if (!stage.success) return stage;
+
+    const struct {
+        std::uint32_t n;
+    } copy_push{static_cast<std::uint32_t>(out_features)};
+    const std::vector<const VulkanBuffer*> copy_buffers = {&scale_new_scratch, &scale};
+    return runtime.dispatch_cached(vkspirv::k_copy_f32, vkspirv::k_copy_f32_words, copy_buffers, &copy_push,
+                                   sizeof(copy_push), static_cast<std::uint32_t>((out_features + 63) / 64), 1,
+                                   1);
+}
+
+VulkanOpResult run_vulkan_gelu_backward(VulkanRuntime& runtime,
+                                        const VulkanBuffer& x,
+                                        const VulkanBuffer& grad_out,
+                                        VulkanBuffer& grad_x,
+                                        std::size_t elements) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (elements == 0) return fail("Vulkan GELU backward requires non-zero element count");
+    const auto nbytes = elements * sizeof(float);
+    if (x.nbytes() < nbytes || grad_out.nbytes() < nbytes || grad_x.nbytes() < nbytes) {
+        return fail("Vulkan GELU backward buffer is too small");
+    }
+    const struct {
+        std::uint32_t n;
+    } push{static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &grad_out, &grad_x};
+    return runtime.dispatch_cached(vkspirv::k_gelu_bwd_f32, vkspirv::k_gelu_bwd_f32_words, buffers, &push,
+                                   sizeof(push), static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_compact_counter_decode_weight(VulkanRuntime& runtime,
+                                                        const VulkanBuffer& state,
+                                                        const VulkanBuffer& scale,
+                                                        VulkanBuffer& weight,
+                                                        std::size_t in_features,
+                                                        std::size_t out_features,
+                                                        std::size_t C) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (in_features == 0 || out_features == 0) {
+        return fail("Vulkan compact-counter decode requires non-zero dimensions");
+    }
+    if (in_features % 4 != 0) {
+        return fail("Vulkan compact-counter decode requires in_features divisible by 4");
+    }
+    if (C == 0 || 3 * (2 * C - 1) > 64) {
+        return fail("Vulkan compact-counter decode C is out of 6-bit range");
+    }
+    if (!runtime.supports_storage_buffer_i8()) {
+        return fail("Vulkan compact-counter decode requires VK_KHR_8bit_storage on persistent Tensor buffers");
+    }
+    if (in_features > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        out_features > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        C > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return fail("Vulkan compact-counter decode dimensions exceed specialized SPIR-V limits");
+    }
+    if (out_features > std::numeric_limits<std::size_t>::max() / (in_features / 4)) {
+        return fail("Vulkan compact-counter decode state size overflows size_t");
+    }
+    const std::size_t groups = out_features * (in_features / 4);
+    if (groups > std::numeric_limits<std::size_t>::max() / 3) {
+        return fail("Vulkan compact-counter decode state byte size overflows size_t");
+    }
+    if (out_features > std::numeric_limits<std::size_t>::max() / in_features) {
+        return fail("Vulkan compact-counter decode output size overflows size_t");
+    }
+    const std::size_t elements = out_features * in_features;
+    if (elements > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return fail("Vulkan compact-counter decode dispatch exceeds uint32 workgroup count");
+    }
+    if (state.nbytes() < groups * 3) return fail("Vulkan compact-counter state buffer is too small");
+    if (scale.nbytes() < out_features * sizeof(float)) return fail("Vulkan compact-counter scale buffer is too small");
+    if (weight.nbytes() < elements * sizeof(float)) return fail("Vulkan compact-counter weight buffer is too small");
+
+    const struct {
+        std::int32_t C;
+        std::int32_t in_features;
+        std::int32_t n_groups;
+    } push{static_cast<std::int32_t>(C), static_cast<std::int32_t>(in_features),
+           static_cast<std::int32_t>(groups)};
+    const std::vector<const VulkanBuffer*> buffers = {&state, &scale, &weight};
+    return runtime.dispatch_cached(vkspirv::k_counter_decode_weight_f32,
+                                   vkspirv::k_counter_decode_weight_f32_words, buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((groups + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_compact_counter_backward_input_u8(VulkanRuntime& runtime,
+                                                            const VulkanBuffer& state,
+                                                            const VulkanBuffer& scale,
+                                                            const VulkanBuffer& grad_out,
+                                                            VulkanBuffer& grad_x,
+                                                            std::size_t batch,
+                                                            std::size_t in_features,
+                                                            std::size_t out_features,
+                                                            std::size_t C) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || in_features == 0 || out_features == 0) {
+        return fail("Vulkan compact-counter backward-input requires non-zero dimensions");
+    }
+    if (in_features % 4 != 0) {
+        return fail("Vulkan compact-counter backward-input requires in_features divisible by 4");
+    }
+    if (C == 0 || 3 * (2 * C - 1) > 64) {
+        return fail("Vulkan compact-counter backward-input C is out of 6-bit range");
+    }
+    if (!runtime.supports_storage_buffer_i8()) {
+        return fail("Vulkan compact-counter backward-input requires VK_KHR_8bit_storage on persistent Tensor buffers");
+    }
+    if (batch > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        in_features > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        out_features > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        C > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return fail("Vulkan compact-counter backward-input dimensions exceed specialized SPIR-V limits");
+    }
+    if (out_features > std::numeric_limits<std::size_t>::max() / (in_features / 4)) {
+        return fail("Vulkan compact-counter backward-input state size overflows size_t");
+    }
+    const std::size_t groups = out_features * (in_features / 4);
+    if (groups > std::numeric_limits<std::size_t>::max() / 3) {
+        return fail("Vulkan compact-counter backward-input state byte size overflows size_t");
+    }
+    if (batch > std::numeric_limits<std::size_t>::max() / out_features) {
+        return fail("Vulkan compact-counter backward-input grad_out size overflows size_t");
+    }
+    if (batch > std::numeric_limits<std::size_t>::max() / in_features) {
+        return fail("Vulkan compact-counter backward-input grad_x size overflows size_t");
+    }
+    const std::size_t grad_out_elements = batch * out_features;
+    const std::size_t grad_x_elements = batch * in_features;
+    if (grad_x_elements > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return fail("Vulkan compact-counter backward-input dispatch exceeds uint32 workgroup count");
+    }
+    if (state.nbytes() < groups * 3) return fail("Vulkan compact-counter state buffer is too small");
+    if (scale.nbytes() < out_features * sizeof(float)) return fail("Vulkan compact-counter scale buffer is too small");
+    if (grad_out.nbytes() < grad_out_elements * sizeof(float)) {
+        return fail("Vulkan compact-counter grad_out buffer is too small");
+    }
+    if (grad_x.nbytes() < grad_x_elements * sizeof(float)) {
+        return fail("Vulkan compact-counter grad_x buffer is too small");
+    }
+
+    const struct {
+        std::int32_t C;
+        std::int32_t in_features;
+        std::int32_t out_features;
+        std::int32_t N;
+    } push{static_cast<std::int32_t>(C), static_cast<std::int32_t>(in_features),
+           static_cast<std::int32_t>(out_features), static_cast<std::int32_t>(batch)};
+    const std::vector<const VulkanBuffer*> buffers = {&grad_out, &state, &scale, &grad_x};
+    const auto run = runtime.dispatch_cached(vkspirv::k_counter_backward_input_f32,
+                                             vkspirv::k_counter_backward_input_f32_words, buffers, &push,
+                                             sizeof(push),
+                                             static_cast<std::uint32_t>((grad_x_elements + 63) / 64), 1, 1);
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    return result;
+}
+
+VulkanOpResult run_vulkan_f32_m1_matmul(VulkanRuntime& runtime,
+                                        const VulkanBuffer& a,
+                                        const VulkanBuffer& b,
+                                        VulkanBuffer& c,
+                                        std::size_t k,
+                                        std::size_t n) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (k == 0 || n == 0) return fail("Vulkan f32 M=1 matmul requires non-zero K and N");
+    constexpr std::size_t kMaxDim = 1u << 24;
+    if (k > kMaxDim || n > kMaxDim) return fail("Vulkan f32 M=1 matmul dimensions exceed supported range");
+    if (a.nbytes() < k * sizeof(float)) return fail("Vulkan f32 M=1 matmul A buffer is too small");
+    if (b.nbytes() < k * n * sizeof(float)) return fail("Vulkan f32 M=1 matmul B buffer is too small");
+    if (c.nbytes() < n * sizeof(float)) return fail("Vulkan f32 M=1 matmul C buffer is too small");
+
+    const struct {
+        std::uint32_t k;
+        std::uint32_t n;
+    } push{static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
+    const std::vector<const VulkanBuffer*> buffers = {&a, &b, &c};
+    return runtime.dispatch_cached(vkspirv::k_mm_f32_m1n, vkspirv::k_mm_f32_m1n_words, buffers, &push,
+                                   sizeof(push), static_cast<std::uint32_t>((n + 63) / 64), 1, 1);
 }
 
 VulkanF32MatmulSmokeResult run_vulkan_f32_matmul(const std::vector<float>& a,
@@ -2568,6 +7224,369 @@ VulkanF32TensorResult run_vulkan_add(const std::vector<float>& a,
         return result;
     }
 
+    result.output.resize(out.size());
+    std::memcpy(result.output.data(), run.outputs[0].data(), run.outputs[0].size());
+    return result;
+}
+
+VulkanF32TensorResult run_vulkan_i8_scaled_matmul(const std::vector<std::int8_t>& a,
+                                                  const std::vector<std::int8_t>& b,
+                                                  std::size_t m,
+                                                  std::size_t k,
+                                                  std::size_t n,
+                                                  float scale_a,
+                                                  float scale_b) {
+    VulkanF32TensorResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (m == 0 || k == 0 || n == 0) return fail("Vulkan i8 scaled matmul requires non-zero M, K, and N");
+    if (!std::isfinite(scale_a) || !std::isfinite(scale_b)) {
+        return fail("Vulkan i8 scaled matmul requires finite scales");
+    }
+    if (m > std::numeric_limits<std::size_t>::max() / k) return fail("Vulkan i8 scaled matmul M*K overflows size_t");
+    if (k > std::numeric_limits<std::size_t>::max() / n) return fail("Vulkan i8 scaled matmul K*N overflows size_t");
+    if (a.size() != m * k) return fail("Vulkan i8 scaled matmul A size must equal M*K");
+    if (b.size() != k * n) return fail("Vulkan i8 scaled matmul B size must equal K*N");
+
+    auto runtime = VulkanRuntime::create();
+    if (runtime.available() && runtime.supports_storage_buffer_i8()) {
+        auto a_buffer = runtime.create_buffer(a.size() * sizeof(std::int8_t), a.data());
+        auto b_buffer = runtime.create_buffer(b.size() * sizeof(std::int8_t), b.data());
+        auto out_buffer = runtime.create_buffer(m * n * sizeof(float));
+        const auto shader = i8_scaled_matmul_spirv(k, n, scale_a, scale_b);
+        const std::vector<const VulkanBuffer*> buffers = {&a_buffer, &b_buffer, &out_buffer};
+        const auto run = runtime.dispatch_storage_buffers(
+            shader.data(), shader.size(), buffers, {},
+            static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(m), 1);
+        result.success = run.success;
+        result.device_name = run.device_name;
+        result.error = run.error;
+        if (!run.success) return result;
+        result.output.resize(m * n);
+        out_buffer.download(result.output.data(), result.output.size() * sizeof(float));
+        return result;
+    }
+
+    // Portability fallback for Vulkan devices without VK_KHR_8bit_storage: still executes the
+    // signed dot and scaling in the Vulkan shader, but widens the uploaded payload to int32.
+    std::vector<std::int32_t> ai(a.size());
+    std::vector<std::int32_t> bi(b.size());
+    for (std::size_t i = 0; i < a.size(); ++i) ai[i] = static_cast<std::int32_t>(a[i]);
+    for (std::size_t i = 0; i < b.size(); ++i) bi[i] = static_cast<std::int32_t>(b[i]);
+
+    std::vector<float> out(m * n, 0.0f);
+    const auto shader = i32_scaled_matmul_spirv(k, n, scale_a, scale_b);
+    const std::vector<VulkanStorageBufferSpec> buffers = {
+        {ai.data(), ai.size() * sizeof(std::int32_t)},
+        {bi.data(), bi.size() * sizeof(std::int32_t)},
+        {out.data(), out.size() * sizeof(float)},
+    };
+    const auto run = run_vulkan_storage_buffer_compute(
+        shader.data(), shader.size(), buffers, {2},
+        static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(m), 1);
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    if (!run.success) return result;
+    if (run.outputs.size() != 1 || run.outputs[0].size() != out.size() * sizeof(float)) {
+        result.success = false;
+        result.error = "Vulkan i8 scaled matmul returned malformed output";
+        return result;
+    }
+    result.output.resize(out.size());
+    std::memcpy(result.output.data(), run.outputs[0].data(), run.outputs[0].size());
+    return result;
+}
+
+VulkanOpResult run_vulkan_grouped_query_attention(VulkanRuntime& runtime,
+                                                  const VulkanBuffer& q,
+                                                  const VulkanBuffer& k,
+                                                  const VulkanBuffer& v,
+                                                  VulkanBuffer& out,
+                                                  std::size_t query_tokens,
+                                                  std::size_t key_tokens,
+                                                  std::size_t n_head,
+                                                  std::size_t n_kv_head,
+                                                  std::size_t head_dim,
+                                                  float scale) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (query_tokens == 0 || key_tokens == 0 || n_head == 0 || n_kv_head == 0 || head_dim == 0) {
+        return fail("Vulkan GQA requires non-zero query/key/head dimensions");
+    }
+    if (n_head % n_kv_head != 0) return fail("Vulkan GQA requires n_head % n_kv_head == 0");
+    if (key_tokens > 1024) return fail("Vulkan GQA currently supports key_tokens <= 1024 (shared-memory softmax)");
+    if (!std::isfinite(scale)) return fail("Vulkan GQA requires a finite scale");
+    const std::size_t q_size = query_tokens * n_head * head_dim;
+    const std::size_t kv_size = key_tokens * n_kv_head * head_dim;
+    if (q.nbytes() < q_size * sizeof(float)) return fail("Vulkan GQA q buffer is too small");
+    if (k.nbytes() < kv_size * sizeof(float)) return fail("Vulkan GQA k buffer is too small");
+    if (v.nbytes() < kv_size * sizeof(float)) return fail("Vulkan GQA v buffer is too small");
+    if (out.nbytes() < q_size * sizeof(float)) return fail("Vulkan GQA output buffer is too small");
+
+    const struct {
+        std::uint32_t query_tokens;
+        std::uint32_t key_tokens;
+        std::uint32_t n_head;
+        std::uint32_t n_kv_head;
+        std::uint32_t head_dim;
+        float scale;
+    } push{static_cast<std::uint32_t>(query_tokens), static_cast<std::uint32_t>(key_tokens),
+           static_cast<std::uint32_t>(n_head),       static_cast<std::uint32_t>(n_kv_head),
+           static_cast<std::uint32_t>(head_dim),     scale};
+    const std::vector<const VulkanBuffer*> buffers = {&q, &k, &v, &out};
+    return runtime.dispatch_cached(vkspirv::k_gqa_fwd_f32, vkspirv::k_gqa_fwd_f32_words, buffers, &push,
+                                   sizeof(push), static_cast<std::uint32_t>(query_tokens),
+                                   static_cast<std::uint32_t>(n_head), 1);
+}
+
+VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtime,
+                                                           const VulkanBuffer& q,
+                                                           const VulkanBuffer& k,
+                                                           const VulkanBuffer& v,
+                                                           const VulkanBuffer& grad_out,
+                                                           VulkanBuffer& probs_scratch,
+                                                           VulkanBuffer& ds_scratch,
+                                                           VulkanBuffer& grad_q,
+                                                           VulkanBuffer& grad_k,
+                                                           VulkanBuffer& grad_v,
+                                                           std::size_t query_tokens,
+                                                           std::size_t key_tokens,
+                                                           std::size_t n_head,
+                                                           std::size_t n_kv_head,
+                                                           std::size_t head_dim,
+                                                           float scale) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (query_tokens == 0 || key_tokens == 0 || n_head == 0 || n_kv_head == 0 || head_dim == 0) {
+        return fail("Vulkan GQA backward requires non-zero query/key/head dimensions");
+    }
+    if (n_head % n_kv_head != 0) return fail("Vulkan GQA backward requires n_head % n_kv_head == 0");
+    if (key_tokens > 1024) {
+        return fail("Vulkan GQA backward currently supports key_tokens <= 1024 (shared-memory softmax)");
+    }
+    if (!std::isfinite(scale)) return fail("Vulkan GQA backward requires a finite scale");
+    const std::size_t q_size = query_tokens * n_head * head_dim;
+    const std::size_t kv_size = key_tokens * n_kv_head * head_dim;
+    const std::size_t probs_size = n_head * query_tokens * key_tokens;
+    if (q.nbytes() < q_size * sizeof(float) || grad_out.nbytes() < q_size * sizeof(float) ||
+        grad_q.nbytes() < q_size * sizeof(float)) {
+        return fail("Vulkan GQA backward q/grad buffer is too small");
+    }
+    if (k.nbytes() < kv_size * sizeof(float) || v.nbytes() < kv_size * sizeof(float) ||
+        grad_k.nbytes() < kv_size * sizeof(float) || grad_v.nbytes() < kv_size * sizeof(float)) {
+        return fail("Vulkan GQA backward k/v buffer is too small");
+    }
+    if (probs_scratch.nbytes() < probs_size * sizeof(float) || ds_scratch.nbytes() < probs_size * sizeof(float)) {
+        return fail("Vulkan GQA backward scratch buffer is too small");
+    }
+
+    const struct {
+        std::uint32_t query_tokens;
+        std::uint32_t key_tokens;
+        std::uint32_t n_head;
+        std::uint32_t n_kv_head;
+        std::uint32_t head_dim;
+        float scale;
+    } push{static_cast<std::uint32_t>(query_tokens), static_cast<std::uint32_t>(key_tokens),
+           static_cast<std::uint32_t>(n_head),       static_cast<std::uint32_t>(n_kv_head),
+           static_cast<std::uint32_t>(head_dim),     scale};
+
+    // Stage 1: softmax probabilities + ds. Stage 2: dQ. Stage 3: dK/dV. In
+    // immediate mode each cached dispatch submits and waits on its fence; in
+    // batch mode the cached path emits compute->compute barriers.
+    const std::vector<const VulkanBuffer*> probs_buffers = {&q, &k, &v, &grad_out, &probs_scratch, &ds_scratch};
+    auto stage = runtime.dispatch_cached(vkspirv::k_gqa_bwd_probs_f32, vkspirv::k_gqa_bwd_probs_f32_words,
+                                         probs_buffers, &push, sizeof(push),
+                                         static_cast<std::uint32_t>(query_tokens),
+                                         static_cast<std::uint32_t>(n_head), 1);
+    if (!stage.success) return stage;
+
+    const std::vector<const VulkanBuffer*> dq_buffers = {&k, &ds_scratch, &grad_q};
+    stage = runtime.dispatch_cached(vkspirv::k_gqa_bwd_dq_f32, vkspirv::k_gqa_bwd_dq_f32_words, dq_buffers,
+                                    &push, sizeof(push), static_cast<std::uint32_t>(query_tokens),
+                                    static_cast<std::uint32_t>(n_head), 1);
+    if (!stage.success) return stage;
+
+    const std::vector<const VulkanBuffer*> dkv_buffers = {&q, &grad_out, &probs_scratch, &ds_scratch, &grad_k,
+                                                          &grad_v};
+    return runtime.dispatch_cached(vkspirv::k_gqa_bwd_dkv_f32, vkspirv::k_gqa_bwd_dkv_f32_words, dkv_buffers,
+                                   &push, sizeof(push), static_cast<std::uint32_t>(key_tokens),
+                                   static_cast<std::uint32_t>(n_kv_head), 1);
+}
+
+VulkanF32TensorResult run_vulkan_grouped_query_attention(const std::vector<float>& q,
+                                                         const std::vector<float>& k,
+                                                         const std::vector<float>& v,
+                                                         std::size_t query_tokens,
+                                                         std::size_t key_tokens,
+                                                         std::size_t n_head,
+                                                         std::size_t n_kv_head,
+                                                         std::size_t head_dim,
+                                                         float scale) {
+    VulkanF32TensorResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (query_tokens == 0 || key_tokens == 0 || n_head == 0 || n_kv_head == 0 || head_dim == 0) {
+        return fail("Vulkan GQA requires non-zero query/key/head dimensions");
+    }
+    if (n_head % n_kv_head != 0) return fail("Vulkan GQA requires n_head % n_kv_head == 0");
+    if (head_dim > 64 || key_tokens > 64) return fail("Vulkan GQA staged path currently supports head_dim,key_tokens <= 64");
+    if (!std::isfinite(scale)) return fail("Vulkan GQA requires a finite scale");
+    const std::size_t q_size = query_tokens * n_head * head_dim;
+    const std::size_t kv_size = key_tokens * n_kv_head * head_dim;
+    if (q.size() != q_size) return fail("Vulkan GQA q size mismatch");
+    if (k.size() != kv_size) return fail("Vulkan GQA k size mismatch");
+    if (v.size() != kv_size) return fail("Vulkan GQA v size mismatch");
+
+    std::vector<float> out(q_size, 0.0f);
+    const auto shader = gqa_forward_spirv(query_tokens, key_tokens, n_head, n_kv_head, head_dim, scale);
+    const std::vector<VulkanStorageBufferSpec> buffers = {
+        {q.data(), q.size() * sizeof(float)},
+        {k.data(), k.size() * sizeof(float)},
+        {v.data(), v.size() * sizeof(float)},
+        {out.data(), out.size() * sizeof(float)},
+    };
+    const auto run = run_vulkan_storage_buffer_compute(
+        shader.data(), shader.size(), buffers, {3},
+        static_cast<std::uint32_t>(head_dim),
+        static_cast<std::uint32_t>(n_head),
+        static_cast<std::uint32_t>(query_tokens));
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    if (!run.success) return result;
+    if (run.outputs.size() != 1 || run.outputs[0].size() != out.size() * sizeof(float)) {
+        result.success = false;
+        result.error = "Vulkan GQA returned malformed output";
+        return result;
+    }
+    result.output.resize(out.size());
+    std::memcpy(result.output.data(), run.outputs[0].data(), run.outputs[0].size());
+    return result;
+}
+
+VulkanF32TensorResult run_vulkan_compact_counter_backward_input(
+    const std::vector<std::uint32_t>& packed_state_words,
+    const std::vector<float>& scale,
+    const std::vector<float>& grad_out,
+    std::size_t batch,
+    std::size_t in_features,
+    std::size_t out_features,
+    std::size_t C) {
+    VulkanF32TensorResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || in_features == 0 || out_features == 0) {
+        return fail("Vulkan compact-counter backward requires non-zero dimensions");
+    }
+    if (in_features % 4 != 0) return fail("Vulkan compact-counter backward requires in_features divisible by 4");
+    if (C == 0 || 3 * (2 * C - 1) > 64) return fail("Vulkan compact-counter backward C is out of 6-bit range");
+    const std::size_t gpr = in_features / 4;
+    if (packed_state_words.size() != out_features * gpr) return fail("Vulkan compact-counter state word size mismatch");
+    if (scale.size() != out_features) return fail("Vulkan compact-counter scale size mismatch");
+    if (grad_out.size() != batch * out_features) return fail("Vulkan compact-counter grad_out size mismatch");
+
+    auto runtime = VulkanRuntime::create();
+    if (!runtime.available()) {
+        return fail(runtime.error().empty() ? "Vulkan runtime is not available" : runtime.error());
+    }
+    auto state_buffer = runtime.create_buffer(packed_state_words.size() * sizeof(std::uint32_t),
+                                              packed_state_words.data());
+    auto scale_buffer = runtime.create_buffer(scale.size() * sizeof(float), scale.data());
+    auto grad_out_buffer = runtime.create_buffer(grad_out.size() * sizeof(float), grad_out.data());
+    auto grad_x_buffer = runtime.create_buffer(batch * in_features * sizeof(float));
+
+    const auto shader = counter_backward_input_fused_spirv(in_features, out_features, C);
+    const std::vector<const VulkanBuffer*> buffers = {&grad_out_buffer, &state_buffer, &scale_buffer, &grad_x_buffer};
+    const auto run = runtime.dispatch_storage_buffers(
+        shader.data(), shader.size(), buffers, {},
+        static_cast<std::uint32_t>(batch * in_features), 1, 1);
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    if (!run.success) return result;
+    result.output.resize(batch * in_features);
+    grad_x_buffer.download(result.output.data(), result.output.size() * sizeof(float));
+    return result;
+}
+
+VulkanU32TensorResult run_vulkan_compact_counter_increment(
+    const std::vector<std::uint32_t>& packed_state_words,
+    const std::vector<std::uint32_t>& packed_increment_words) {
+    VulkanU32TensorResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (packed_state_words.empty()) return fail("Vulkan compact-counter increment requires non-empty state");
+    if (packed_state_words.size() != packed_increment_words.size()) {
+        return fail("Vulkan compact-counter increment state/increment sizes must match");
+    }
+    std::vector<std::uint32_t> out(packed_state_words.size(), 0);
+    const auto shader = counter_increment_spirv();
+    const std::vector<VulkanStorageBufferSpec> buffers = {
+        {packed_state_words.data(), packed_state_words.size() * sizeof(std::uint32_t)},
+        {packed_increment_words.data(), packed_increment_words.size() * sizeof(std::uint32_t)},
+        {out.data(), out.size() * sizeof(std::uint32_t)},
+    };
+    const auto run = run_vulkan_storage_buffer_compute(
+        shader.data(), shader.size(), buffers, {2}, static_cast<std::uint32_t>(out.size()), 1, 1);
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    if (!run.success) return result;
+    if (run.outputs.size() != 1 || run.outputs[0].size() != out.size() * sizeof(std::uint32_t)) {
+        result.success = false;
+        result.error = "Vulkan compact-counter increment returned malformed output";
+        return result;
+    }
+    result.output.resize(out.size());
+    std::memcpy(result.output.data(), run.outputs[0].data(), run.outputs[0].size());
+    return result;
+}
+
+VulkanF32TensorResult run_vulkan_sgd_update(const std::vector<float>& param,
+                                            const std::vector<float>& grad,
+                                            float lr) {
+    VulkanF32TensorResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (param.empty()) return fail("Vulkan SGD update requires non-empty parameters");
+    if (param.size() != grad.size()) return fail("Vulkan SGD update param/grad sizes must match");
+    if (!std::isfinite(lr)) return fail("Vulkan SGD update requires finite lr");
+    std::vector<float> out(param.size(), 0.0f);
+    const auto shader = sgd_update_spirv(lr);
+    const std::vector<VulkanStorageBufferSpec> buffers = {
+        {param.data(), param.size() * sizeof(float)},
+        {grad.data(), grad.size() * sizeof(float)},
+        {out.data(), out.size() * sizeof(float)},
+    };
+    const auto run = run_vulkan_storage_buffer_compute(
+        shader.data(), shader.size(), buffers, {2}, static_cast<std::uint32_t>(out.size()), 1, 1);
+    result.success = run.success;
+    result.device_name = run.device_name;
+    result.error = run.error;
+    if (!run.success) return result;
+    if (run.outputs.size() != 1 || run.outputs[0].size() != out.size() * sizeof(float)) {
+        result.success = false;
+        result.error = "Vulkan SGD update returned malformed output";
+        return result;
+    }
     result.output.resize(out.size());
     std::memcpy(result.output.data(), run.outputs[0].data(), run.outputs[0].size());
     return result;

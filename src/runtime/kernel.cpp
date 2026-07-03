@@ -6,6 +6,7 @@
 #include <motifcl/runtime/opencl_context.hpp>
 #include <motifcl/runtime/profiler.hpp>
 
+#include <algorithm>
 #include <cstring>
 #include <type_traits>
 #include <utility>
@@ -48,6 +49,85 @@ std::vector<std::pair<int, std::size_t>> local_arg_pairs(const std::vector<Kerne
         out.emplace_back(arg.index, arg.bytes);
     }
     return out;
+}
+
+bool kernel_binding_matches(const std::string& binding_kernel_name, const std::string& launch_kernel_name) {
+    return binding_kernel_name.empty() || binding_kernel_name == launch_kernel_name;
+}
+
+const autograd::GraphScalarArgOverride* find_scalar_override(
+    const std::vector<autograd::GraphScalarArgOverride>& overrides,
+    const std::string& kernel_name,
+    int arg_index) {
+    for (const auto& override_arg : overrides) {
+        if (override_arg.arg_index == arg_index &&
+            kernel_binding_matches(override_arg.kernel_name, kernel_name)) {
+            return &override_arg;
+        }
+    }
+    return nullptr;
+}
+
+const autograd::GraphLocalArgOverride* find_local_override(
+    const std::vector<autograd::GraphLocalArgOverride>& overrides,
+    const std::string& kernel_name,
+    int arg_index) {
+    for (const auto& override_arg : overrides) {
+        if (override_arg.arg_index == arg_index &&
+            kernel_binding_matches(override_arg.kernel_name, kernel_name)) {
+            return &override_arg;
+        }
+    }
+    return nullptr;
+}
+
+void apply_scalar_args(cl_kernel kernel,
+                       const std::string& kernel_name,
+                       const std::vector<std::pair<int, std::vector<std::uint8_t>>>& scalar_args,
+                       const std::vector<autograd::GraphScalarArgOverride>& scalar_overrides) {
+    for (const auto& arg : scalar_args) {
+        const auto* override_arg = find_scalar_override(scalar_overrides, kernel_name, arg.first);
+        const auto& bytes = override_arg ? override_arg->bytes : arg.second;
+        MCL_CHECK_CL(clSetKernelArg(kernel,
+                                    static_cast<cl_uint>(arg.first),
+                                    bytes.size(),
+                                    bytes.empty() ? nullptr : bytes.data()));
+    }
+    for (const auto& override_arg : scalar_overrides) {
+        if (!kernel_binding_matches(override_arg.kernel_name, kernel_name)) continue;
+        const bool already_captured = std::any_of(scalar_args.begin(), scalar_args.end(),
+                                                  [&](const auto& arg) {
+                                                      return arg.first == override_arg.arg_index;
+                                                  });
+        if (already_captured) continue;
+        MCL_CHECK_CL(clSetKernelArg(kernel,
+                                    static_cast<cl_uint>(override_arg.arg_index),
+                                    override_arg.bytes.size(),
+                                    override_arg.bytes.empty() ? nullptr : override_arg.bytes.data()));
+    }
+}
+
+void apply_local_args(cl_kernel kernel,
+                      const std::string& kernel_name,
+                      const std::vector<std::pair<int, std::size_t>>& local_args,
+                      const std::vector<autograd::GraphLocalArgOverride>& local_overrides) {
+    for (const auto& arg : local_args) {
+        const auto* override_arg = find_local_override(local_overrides, kernel_name, arg.first);
+        const std::size_t bytes = override_arg ? override_arg->bytes : arg.second;
+        MCL_CHECK_CL(clSetKernelArg(kernel, static_cast<cl_uint>(arg.first), bytes, nullptr));
+    }
+    for (const auto& override_arg : local_overrides) {
+        if (!kernel_binding_matches(override_arg.kernel_name, kernel_name)) continue;
+        const bool already_captured = std::any_of(local_args.begin(), local_args.end(),
+                                                  [&](const auto& arg) {
+                                                      return arg.first == override_arg.arg_index;
+                                                  });
+        if (already_captured) continue;
+        MCL_CHECK_CL(clSetKernelArg(kernel,
+                                    static_cast<cl_uint>(override_arg.arg_index),
+                                    override_arg.bytes,
+                                    nullptr));
+    }
 }
 
 }
@@ -180,9 +260,14 @@ Event Kernel::launch1d(std::size_t global, std::size_t local) {
         launch.local_args = local_args;
         launch.retained_state = state;
         launch.retained_kernel = retained;
-        autograd::record_kernel_launch(std::move(launch), [state, retained, global, local, buffer_args](const std::unordered_map<int, cl_mem>& bindings,
-                                                                                                        const std::vector<std::pair<int, int>>& tensor_arg_bindings) {
+        autograd::record_kernel_launch(std::move(launch), [state, retained, global, local, buffer_args, scalar_args, local_args, kernel_name = name_](
+                                                                                                        const std::unordered_map<int, cl_mem>& bindings,
+                                                                                                        const std::vector<std::pair<int, int>>& tensor_arg_bindings,
+                                                                                                        const std::vector<autograd::GraphScalarArgOverride>& scalar_overrides,
+                                                                                                        const std::vector<autograd::GraphLocalArgOverride>& local_overrides) {
             MCL_CHECK(state && state->valid(), "replay without live OpenCL context");
+            apply_scalar_args(retained.get(), kernel_name, scalar_args, scalar_overrides);
+            apply_local_args(retained.get(), kernel_name, local_args, local_overrides);
             for (const auto& arg : buffer_args) {
                 cl_mem mem = arg.second;
                 for (const auto& binding : tensor_arg_bindings) {
@@ -239,9 +324,14 @@ Event Kernel::launch2d(std::size_t gx, std::size_t gy, std::size_t lx, std::size
         launch.local_args = local_args;
         launch.retained_state = state;
         launch.retained_kernel = retained;
-        autograd::record_kernel_launch(std::move(launch), [state, retained, gx, gy, lx, ly, buffer_args](const std::unordered_map<int, cl_mem>& bindings,
-                                                                                                         const std::vector<std::pair<int, int>>& tensor_arg_bindings) {
+        autograd::record_kernel_launch(std::move(launch), [state, retained, gx, gy, lx, ly, buffer_args, scalar_args, local_args, kernel_name = name_](
+                                                                                                         const std::unordered_map<int, cl_mem>& bindings,
+                                                                                                         const std::vector<std::pair<int, int>>& tensor_arg_bindings,
+                                                                                                         const std::vector<autograd::GraphScalarArgOverride>& scalar_overrides,
+                                                                                                         const std::vector<autograd::GraphLocalArgOverride>& local_overrides) {
             MCL_CHECK(state && state->valid(), "replay without live OpenCL context");
+            apply_scalar_args(retained.get(), kernel_name, scalar_args, scalar_overrides);
+            apply_local_args(retained.get(), kernel_name, local_args, local_overrides);
             for (const auto& arg : buffer_args) {
                 cl_mem mem = arg.second;
                 for (const auto& binding : tensor_arg_bindings) {

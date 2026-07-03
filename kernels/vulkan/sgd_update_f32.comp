@@ -1,0 +1,21 @@
+// SGD update: out = param - lr * grad, one invocation per element.
+// `out` may alias `param` (in-place update), so neither buffer is marked
+// readonly/writeonly.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) buffer ParamBuf { float param[]; };
+layout(std430, set = 0, binding = 1) readonly buffer GradBuf { float grad[]; };
+layout(std430, set = 0, binding = 2) buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    float lr;
+} p;
+
+void main() {
+    const uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+    outv[gid] = param[gid] - p.lr * grad[gid];
+}
