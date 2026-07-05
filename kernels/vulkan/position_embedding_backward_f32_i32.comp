@@ -1,0 +1,30 @@
+// Position embedding backward: grad_position[pos, d] = sum_b grad_out[(b*seq+pos)*embed + d].
+// One invocation per output element. The host pre-zeroes the output table so
+// positions >= seq_len stay finite (matches OpenCL host code). Mirrors
+// kernels/embedding.cl:position_embedding_backward_f32_i32.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer GBuf { float grad_out[]; };
+layout(std430, set = 0, binding = 1) buffer OBuf { float grad_position[]; };
+
+layout(push_constant) uniform Push {
+    int batch;
+    int seq_len;
+    int embed_dim;
+    int n;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    if (gid >= p.n) return;
+    const int pos = gid / p.embed_dim;
+    const int d = gid - pos * p.embed_dim;
+    if (pos >= p.seq_len) return;
+    float acc = 0.0;
+    for (int b = 0; b < p.batch; ++b) {
+        acc += grad_out[(b * p.seq_len + pos) * p.embed_dim + d];
+    }
+    grad_position[gid] = acc;
+}

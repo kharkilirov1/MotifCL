@@ -156,6 +156,311 @@ int main() {
                    "persistent Vulkan sub output mismatch");
         }
 
+        // === Slice E1: embedding gather, device-resident OpenCL-free witness ===
+        // weight[V=4, D=3], indices[T=4] -> out[T*D].
+        {
+            const std::size_t V = 4, D = 3, T = 4;
+            const std::vector<float> weight = {
+                1.0f, 2.0f, 3.0f,      // vocab 0
+                4.0f, 5.0f, 6.0f,      // vocab 1
+                -1.0f, -2.0f, -3.0f,   // vocab 2
+                0.5f, 0.25f, 0.0f,     // vocab 3
+            };
+            const std::vector<std::int32_t> indices = {3, 0, 1, 2};
+            const std::vector<float> expected = {
+                0.5f, 0.25f, 0.0f,
+                1.0f, 2.0f, 3.0f,
+                4.0f, 5.0f, 6.0f,
+                -1.0f, -2.0f, -3.0f,
+            };
+            auto w_buf = runtime.create_buffer(weight.size() * sizeof(float), weight.data());
+            auto i_buf = runtime.create_buffer(indices.size() * sizeof(std::int32_t), indices.data());
+            auto o_buf = runtime.create_buffer(expected.size() * sizeof(float));
+            const auto r = run_vulkan_embedding_gather(runtime, w_buf, i_buf, o_buf, V, D, T);
+            expect(r.success, "device-resident Vulkan embedding gather must succeed");
+            expect(r.error.empty(), "Vulkan embedding gather success must not carry an error");
+            std::vector<float> out(expected.size(), 0.0f);
+            o_buf.download(out.data(), out.size() * sizeof(float));
+            bool gather_ok = out.size() == expected.size();
+            for (std::size_t i = 0; i < out.size() && gather_ok; ++i)
+                if (!close_enough(out[i], expected[i], 1e-6f)) gather_ok = false;
+            expect(gather_ok, "Vulkan embedding gather output mismatch vs CPU reference");
+        }
+
+        // === Slice E1: embedding weight backward, device-resident witness ===
+        {
+            const std::size_t V = 3, D = 2, T = 3;
+            const std::vector<std::int32_t> indices = {0, 2, 0};
+            const std::vector<float> grad_out = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+            // Reference: grad_w[v, d] = sum_t (idx[t]==v) * grad_out[t*D+d]
+            std::vector<float> expected(V * D, 0.0f);
+            for (std::size_t t = 0; t < T; ++t) {
+                for (std::size_t d = 0; d < D; ++d) {
+                    expected[indices[t] * D + d] += grad_out[t * D + d];
+                }
+            }
+            auto i_buf = runtime.create_buffer(indices.size() * sizeof(std::int32_t), indices.data());
+            auto g_buf = runtime.create_buffer(grad_out.size() * sizeof(float), grad_out.data());
+            auto o_buf = runtime.create_buffer(V * D * sizeof(float));
+            const auto r = run_vulkan_embedding_weight_backward(runtime, i_buf, g_buf, o_buf, V, D, T);
+            expect(r.success, "device-resident Vulkan embedding weight backward must succeed");
+            expect(r.error.empty(), "Vulkan embedding weight backward success must not carry an error");
+            std::vector<float> out(V * D, 0.0f);
+            o_buf.download(out.data(), out.size() * sizeof(float));
+            bool bw_ok = out.size() == expected.size();
+            for (std::size_t i = 0; i < out.size() && bw_ok; ++i)
+                if (!close_enough(out[i], expected[i], 1e-6f)) bw_ok = false;
+            expect(bw_ok, "Vulkan embedding weight backward output mismatch vs CPU reference");
+        }
+
+        // === Slice E1: token+position embedding forward + position backward ===
+        {
+            const std::size_t V = 2, S = 2, D = 2;
+            const std::size_t token_count = 3;  // B=1.5 -> not, use B=1, T=3 conceptually
+            // Use B*T=3 tokens, seq_len=2 means pos wraps: token_linear%seq.
+            const std::vector<float> tw = {10.0f, 11.0f, 20.0f, 21.0f};
+            const std::vector<float> pw = {0.1f, 0.2f, 0.3f, 0.4f};
+            const std::vector<std::int32_t> ids = {0, 1, 0};
+            // Expected out[token_linear, d] = tw[ids[tl]*D+d] + pw[(tl%S)*D+d]
+            std::vector<float> expected(token_count * D);
+            for (std::size_t tl = 0; tl < token_count; ++tl) {
+                for (std::size_t d = 0; d < D; ++d) {
+                    expected[tl * D + d] = tw[ids[tl] * D + d] + pw[(tl % S) * D + d];
+                }
+            }
+            auto tw_buf = runtime.create_buffer(tw.size() * sizeof(float), tw.data());
+            auto pw_buf = runtime.create_buffer(pw.size() * sizeof(float), pw.data());
+            auto id_buf = runtime.create_buffer(ids.size() * sizeof(std::int32_t), ids.data());
+            auto o_buf = runtime.create_buffer(expected.size() * sizeof(float));
+            const auto fr = run_vulkan_token_position_embedding(runtime, tw_buf, pw_buf, id_buf, o_buf,
+                                                                 V, S, D);
+            expect(fr.success, "device-resident Vulkan token+position embedding must succeed");
+            expect(fr.error.empty(), "Vulkan token+position embedding success must not carry an error");
+            std::vector<float> out(expected.size(), 0.0f);
+            o_buf.download(out.data(), out.size() * sizeof(float));
+            bool fwd_ok = out.size() == expected.size();
+            for (std::size_t i = 0; i < out.size() && fwd_ok; ++i)
+                if (!close_enough(out[i], expected[i], 1e-6f)) fwd_ok = false;
+            expect(fwd_ok, "Vulkan token+position embedding output mismatch vs CPU reference");
+
+            // Position backward: batch=2 over the same grad_out table (so B*T=4).
+            const std::size_t batch = 2, seq = 2;
+            const std::vector<float> go = {0.5f, 0.5f, 1.0f, 1.0f, 2.0f, 2.0f, 3.0f, 3.0f};
+            std::vector<float> expected_pw(seq * D, 0.0f);
+            for (std::size_t b = 0; b < batch; ++b) {
+                for (std::size_t pos = 0; pos < seq; ++pos) {
+                    for (std::size_t d = 0; d < D; ++d) {
+                        expected_pw[pos * D + d] += go[(b * seq + pos) * D + d];
+                    }
+                }
+            }
+            auto go_buf = runtime.create_buffer(go.size() * sizeof(float), go.data());
+            auto gpw_buf = runtime.create_buffer(seq * D * sizeof(float));
+            // Pre-zero the table to match the host contract (positions >= seq_len stay 0).
+            std::vector<float> zeros(seq * D, 0.0f);
+            gpw_buf.upload(zeros.data(), zeros.size() * sizeof(float));
+            const auto br = run_vulkan_position_embedding_backward(runtime, go_buf, gpw_buf,
+                                                                     batch, seq, D);
+            expect(br.success, "device-resident Vulkan position embedding backward must succeed");
+            expect(br.error.empty(), "Vulkan position embedding backward success must not carry an error");
+            std::vector<float> pw_out(seq * D, 0.0f);
+            gpw_buf.download(pw_out.data(), pw_out.size() * sizeof(float));
+            bool pw_ok = pw_out.size() == expected_pw.size();
+            for (std::size_t i = 0; i < pw_out.size() && pw_ok; ++i)
+                if (!close_enough(pw_out[i], expected_pw[i], 1e-6f)) pw_ok = false;
+            expect(pw_ok, "Vulkan position embedding backward output mismatch vs CPU reference");
+        }
+
+        // === Slice E2: rope (interleaved) forward + inverse, device-resident ===
+        {
+            const std::size_t B = 1, T = 2, n_head = 1, head_dim = 4;
+            const std::size_t channels = n_head * head_dim;
+            const std::size_t rows = B * T;
+            const float theta = 10000.0f;
+            const std::vector<float> xv = {1.0f, 0.0f, 0.0f, 1.0f, 2.0f, 0.0f, 0.0f, 2.0f};
+            // Reference: angle uses position t (0,1).
+            std::vector<float> expected(rows * channels);
+            for (std::size_t t = 0; t < T; ++t) {
+                for (std::size_t pair = 0; pair < head_dim / 2; ++pair) {
+                    const std::size_t pair_d = 2 * pair;
+                    const float exponent = static_cast<float>(pair_d) / static_cast<float>(head_dim);
+                    const float angle = static_cast<float>(t) / std::pow(theta, exponent);
+                    const float cs = std::cos(angle), sn = std::sin(angle);
+                    const float even = xv[t * channels + pair_d];
+                    const float odd = xv[t * channels + pair_d + 1];
+                    expected[t * channels + pair_d] = even * cs - odd * sn;
+                    expected[t * channels + pair_d + 1] = even * sn + odd * cs;
+                }
+            }
+            auto x_buf = runtime.create_buffer(xv.size() * sizeof(float), xv.data());
+            auto o_buf = runtime.create_buffer(expected.size() * sizeof(float));
+            const auto fr = run_vulkan_rope(runtime, x_buf, o_buf, B, T, channels, n_head, head_dim,
+                                             /*rotary_dim=*/0, /*token_offset=*/0, theta, /*inverse=*/false);
+            expect(fr.success, "device-resident Vulkan rope forward must succeed");
+            expect(fr.error.empty(), "Vulkan rope forward success must not carry an error");
+            std::vector<float> out(expected.size(), 0.0f);
+            o_buf.download(out.data(), out.size() * sizeof(float));
+            bool fwd_ok = out.size() == expected.size();
+            for (std::size_t i = 0; i < out.size() && fwd_ok; ++i)
+                if (!close_enough(out[i], expected[i], 1e-5f)) fwd_ok = false;
+            expect(fwd_ok, "Vulkan rope forward output mismatch vs CPU reference");
+
+            // Inverse: feed rope(out) backward must recover xv (rotations cancel).
+            auto o2_buf = runtime.create_buffer(xv.size() * sizeof(float));
+            const auto ir = run_vulkan_rope(runtime, o_buf, o2_buf, B, T, channels, n_head, head_dim,
+                                             0, 0, theta, /*inverse=*/true);
+            expect(ir.success, "device-resident Vulkan rope inverse must succeed");
+            std::vector<float> roundtrip(xv.size(), 0.0f);
+            o2_buf.download(roundtrip.data(), roundtrip.size() * sizeof(float));
+            bool inv_ok = roundtrip.size() == xv.size();
+            for (std::size_t i = 0; i < roundtrip.size() && inv_ok; ++i)
+                if (!close_enough(roundtrip[i], xv[i], 1e-4f)) inv_ok = false;
+            expect(inv_ok, "Vulkan rope inverse must recover the original input");
+        }
+
+        // === Slice E2: rope_split_half forward, device-resident witness ===
+        {
+            const std::size_t B = 1, T = 2, n_head = 1, head_dim = 4;
+            const std::size_t channels = n_head * head_dim;
+            const std::size_t rows = B * T;
+            const float theta = 10000.0f;
+            const std::vector<float> xv = {1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+            const std::size_t half_dim = head_dim / 2;
+            std::vector<float> expected(rows * channels, 0.0f);
+            for (std::size_t t = 0; t < T; ++t) {
+                for (std::size_t pair = 0; pair < half_dim; ++pair) {
+                    const float exponent = static_cast<float>(2 * pair) / static_cast<float>(head_dim);
+                    const float angle = static_cast<float>(t) / std::pow(theta, exponent);
+                    const float cs = std::cos(angle), sn = std::sin(angle);
+                    const float first = xv[t * channels + pair];
+                    const float second = xv[t * channels + half_dim + pair];
+                    expected[t * channels + pair] = first * cs - second * sn;
+                    expected[t * channels + half_dim + pair] = second * cs + first * sn;
+                }
+            }
+            auto x_buf = runtime.create_buffer(xv.size() * sizeof(float), xv.data());
+            auto o_buf = runtime.create_buffer(expected.size() * sizeof(float));
+            const auto r = run_vulkan_rope_split_half(runtime, x_buf, o_buf, B, T, channels, n_head,
+                                                      head_dim, 0, 0, theta, false);
+            expect(r.success, "device-resident Vulkan rope_split_half must succeed");
+            std::vector<float> out(expected.size(), 0.0f);
+            o_buf.download(out.data(), out.size() * sizeof(float));
+            bool ok_sh = out.size() == expected.size();
+            for (std::size_t i = 0; i < out.size() && ok_sh; ++i)
+                if (!close_enough(out[i], expected[i], 1e-5f)) ok_sh = false;
+            expect(ok_sh, "Vulkan rope_split_half output mismatch vs CPU reference");
+        }
+
+        // === Slice E2: rope_positions forward, device-resident witness ===
+        {
+            const std::size_t B = 1, T = 2, n_head = 1, head_dim = 4;
+            const std::size_t channels = n_head * head_dim;
+            const std::size_t rows = B * T;
+            const float theta = 10000.0f;
+            const std::vector<float> xv = {1.0f, 0.0f, 0.0f, 1.0f, 2.0f, 0.0f, 0.0f, 2.0f};
+            const std::vector<std::int32_t> pos = {0, 5};
+            std::vector<float> expected(rows * channels, 0.0f);
+            for (std::size_t t = 0; t < T; ++t) {
+                for (std::size_t pair = 0; pair < head_dim / 2; ++pair) {
+                    const std::size_t pair_d = 2 * pair;
+                    const float exponent = static_cast<float>(pair_d) / static_cast<float>(head_dim);
+                    const float angle = static_cast<float>(pos[t]) / std::pow(theta, exponent);
+                    const float cs = std::cos(angle), sn = std::sin(angle);
+                    const float even = xv[t * channels + pair_d];
+                    const float odd = xv[t * channels + pair_d + 1];
+                    expected[t * channels + pair_d] = even * cs - odd * sn;
+                    expected[t * channels + pair_d + 1] = even * sn + odd * cs;
+                }
+            }
+            auto x_buf = runtime.create_buffer(xv.size() * sizeof(float), xv.data());
+            auto p_buf = runtime.create_buffer(pos.size() * sizeof(std::int32_t), pos.data());
+            auto o_buf = runtime.create_buffer(expected.size() * sizeof(float));
+            const auto r = run_vulkan_rope_positions(runtime, x_buf, p_buf, o_buf, B, T, channels,
+                                                      n_head, head_dim, 0, theta);
+            expect(r.success, "device-resident Vulkan rope_positions must succeed");
+            std::vector<float> out(expected.size(), 0.0f);
+            o_buf.download(out.data(), out.size() * sizeof(float));
+            bool ok_rp = out.size() == expected.size();
+            for (std::size_t i = 0; i < out.size() && ok_rp; ++i)
+                if (!close_enough(out[i], expected[i], 1e-5f)) ok_rp = false;
+            expect(ok_rp, "Vulkan rope_positions output mismatch vs CPU reference");
+        }
+
+        // === Slice E2: rope_positions_split_half forward, device-resident witness ===
+        {
+            const std::size_t B = 1, T = 1, n_head = 1, head_dim = 4;
+            const std::size_t channels = n_head * head_dim;
+            const std::size_t rows = B * T;
+            const float theta = 10000.0f;
+            const std::vector<float> xv = {1.0f, 2.0f, 3.0f, 4.0f};
+            const std::vector<std::int32_t> pos = {3};
+            const std::size_t half_dim = head_dim / 2;
+            std::vector<float> expected(rows * channels, 0.0f);
+            for (std::size_t pair = 0; pair < half_dim; ++pair) {
+                const float exponent = static_cast<float>(2 * pair) / static_cast<float>(head_dim);
+                const float angle = static_cast<float>(pos[0]) / std::pow(theta, exponent);
+                const float cs = std::cos(angle), sn = std::sin(angle);
+                const float first = xv[pair];
+                const float second = xv[half_dim + pair];
+                expected[pair] = first * cs - second * sn;
+                expected[half_dim + pair] = second * cs + first * sn;
+            }
+            auto x_buf = runtime.create_buffer(xv.size() * sizeof(float), xv.data());
+            auto p_buf = runtime.create_buffer(pos.size() * sizeof(std::int32_t), pos.data());
+            auto o_buf = runtime.create_buffer(expected.size() * sizeof(float));
+            const auto r = run_vulkan_rope_positions_split_half(runtime, x_buf, p_buf, o_buf, B, T,
+                                                                 channels, n_head, head_dim, 0, theta);
+            expect(r.success, "device-resident Vulkan rope_positions_split_half must succeed");
+            std::vector<float> out(expected.size(), 0.0f);
+            o_buf.download(out.data(), out.size() * sizeof(float));
+            bool ok_rps = out.size() == expected.size();
+            for (std::size_t i = 0; i < out.size() && ok_rps; ++i)
+                if (!close_enough(out[i], expected[i], 1e-5f)) ok_rps = false;
+            expect(ok_rps, "Vulkan rope_positions_split_half output mismatch vs CPU reference");
+        }
+
+        // === Slice C2 fix: mul_scalar / add_scalar device-resident witnesses ===
+        // These elementwise-scalar kernels close the SubBackward/MulBackward/
+        // DivBackward/ScalarBackward/DropoutBackward chain on Vulkan.
+        {
+            const std::vector<float> xv = {1.0f, -2.0f, 3.5f, 4.0f, 0.25f, -0.5f};
+            const float alpha = -2.0f;
+            std::vector<float> expected(xv.size());
+            for (std::size_t i = 0; i < xv.size(); ++i) expected[i] = xv[i] * alpha;
+            auto x_buf = runtime.create_buffer(xv.size() * sizeof(float), xv.data());
+            auto o_buf = runtime.create_buffer(expected.size() * sizeof(float));
+            const auto r = run_vulkan_mul_scalar(runtime, x_buf, o_buf, xv.size(), alpha);
+            expect(r.success, "device-resident Vulkan mul_scalar must succeed");
+            expect(r.error.empty(), "Vulkan mul_scalar success must not carry an error");
+            std::vector<float> out(expected.size(), 0.0f);
+            o_buf.download(out.data(), out.size() * sizeof(float));
+            bool mul_ok = out.size() == expected.size();
+            for (std::size_t i = 0; i < out.size() && mul_ok; ++i)
+                if (!close_enough(out[i], expected[i], 1e-6f)) mul_ok = false;
+            expect(mul_ok, "Vulkan mul_scalar output mismatch vs CPU reference");
+
+            // add_scalar
+            const float value = 0.75f;
+            for (std::size_t i = 0; i < xv.size(); ++i) expected[i] = xv[i] + value;
+            auto o2_buf = runtime.create_buffer(expected.size() * sizeof(float));
+            const auto r2 = run_vulkan_add_scalar(runtime, x_buf, o2_buf, xv.size(), value);
+            expect(r2.success, "device-resident Vulkan add_scalar must succeed");
+            std::vector<float> out2(expected.size(), 0.0f);
+            o2_buf.download(out2.data(), out2.size() * sizeof(float));
+            bool add_ok = out2.size() == expected.size();
+            for (std::size_t i = 0; i < out2.size() && add_ok; ++i)
+                if (!close_enough(out2[i], expected[i], 1e-6f)) add_ok = false;
+            expect(add_ok, "Vulkan add_scalar output mismatch vs CPU reference");
+
+            // Non-finite alpha must be rejected (validation gap M-class fix).
+            const auto r3 = run_vulkan_mul_scalar(runtime, x_buf, o_buf, xv.size(),
+                                                   std::numeric_limits<float>::infinity());
+            expect(!r3.success, "Vulkan mul_scalar must reject non-finite alpha");
+            const auto r4 = run_vulkan_add_scalar(runtime, x_buf, o2_buf, xv.size(),
+                                                    std::numeric_limits<float>::quiet_NaN());
+            expect(!r4.success, "Vulkan add_scalar must reject NaN value");
+        }
+
         const std::vector<float> device_sgd_param = {1.0f, 2.0f, -3.0f, 4.0f};
         const std::vector<float> device_sgd_grad = {0.5f, -1.0f, 2.0f, -0.25f};
         auto sgd_param_buffer = runtime.create_buffer(device_sgd_param.size() * sizeof(float),

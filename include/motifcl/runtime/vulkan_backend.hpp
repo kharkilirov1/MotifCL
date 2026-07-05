@@ -411,6 +411,19 @@ VulkanOpResult run_vulkan_add(VulkanRuntime& runtime,
                               const VulkanBuffer& b,
                               VulkanBuffer& out,
                               std::size_t elements);
+// Elementwise scalar multiply/add: out = x * alpha / out = x + value.
+// Needed by scale/mul_scalar/add_scalar ops and the SubBackward/MulBackward/
+// DivBackward/ScalarBackward chains on Vulkan (closes the C2 review gap).
+VulkanOpResult run_vulkan_mul_scalar(VulkanRuntime& runtime,
+                                     const VulkanBuffer& x,
+                                     VulkanBuffer& out,
+                                     std::size_t elements,
+                                     float alpha);
+VulkanOpResult run_vulkan_add_scalar(VulkanRuntime& runtime,
+                                     const VulkanBuffer& x,
+                                     VulkanBuffer& out,
+                                     std::size_t elements,
+                                     float value);
 VulkanOpResult run_vulkan_sub(VulkanRuntime& runtime,
                               const VulkanBuffer& a,
                               const VulkanBuffer& b,
@@ -471,5 +484,91 @@ VulkanOpResult run_vulkan_f32_m1_matmul(VulkanRuntime& runtime,
                                         std::size_t n);
 VulkanF32MatmulSmokeResult run_vulkan_f32_matmul_smoke();
 std::string vulkan_version_string(std::uint32_t version);
+
+// === Embedding + position-embedding (Slice E1) ===
+// out[token_count * embed_dim] = weight[indices[token], :] (zero on OOB index).
+VulkanOpResult run_vulkan_embedding_gather(VulkanRuntime& runtime,
+                                           const VulkanBuffer& weight,
+                                           const VulkanBuffer& indices,
+                                           VulkanBuffer& out,
+                                           std::size_t vocab_size,
+                                           std::size_t embed_dim,
+                                           std::size_t token_count);
+// Backward: grad_weight[vocab, embed] = sum over tokens where indices[t]==vocab.
+VulkanOpResult run_vulkan_embedding_weight_backward(VulkanRuntime& runtime,
+                                                    const VulkanBuffer& indices,
+                                                    const VulkanBuffer& grad_out,
+                                                    VulkanBuffer& grad_weight,
+                                                    std::size_t vocab_size,
+                                                    std::size_t embed_dim,
+                                                    std::size_t token_count);
+// Token + position embedding: out = token_weight[token_ids] + pos_weight[pos].
+VulkanOpResult run_vulkan_token_position_embedding(VulkanRuntime& runtime,
+                                                    const VulkanBuffer& token_weight,
+                                                    const VulkanBuffer& pos_weight,
+                                                    const VulkanBuffer& token_ids,
+                                                    VulkanBuffer& out,
+                                                    std::size_t vocab_size,
+                                                    std::size_t seq_len,
+                                                    std::size_t embed_dim);
+// Backward of pos embedding: grad_position[pos, d] = sum_b grad_out[(b*seq+pos)*embed + d].
+// The output table must be zero-initialized by the host (positions >= seq_len
+// receive no gradient and stay zero, matching the OpenCL host contract).
+VulkanOpResult run_vulkan_position_embedding_backward(VulkanRuntime& runtime,
+                                                       const VulkanBuffer& grad_out,
+                                                       VulkanBuffer& grad_position,
+                                                       std::size_t batch,
+                                                       std::size_t seq_len,
+                                                       std::size_t embed_dim);
+
+// === RoPE (Slice E2) — interleaved and split-half layouts ===
+// rope_f32 is reused for backward via the inverse flag (negate angle), exactly
+// as the OpenCL rope_impl helper does.
+VulkanOpResult run_vulkan_rope(VulkanRuntime& runtime,
+                               const VulkanBuffer& x,
+                               VulkanBuffer& out,
+                               std::size_t batch,
+                               std::size_t tokens,
+                               std::size_t channels,
+                               std::size_t n_head,
+                               std::size_t head_dim,
+                               std::size_t rotary_dim,
+                               std::size_t token_offset,
+                               float theta,
+                               bool inverse);
+VulkanOpResult run_vulkan_rope_positions(VulkanRuntime& runtime,
+                                         const VulkanBuffer& x,
+                                         const VulkanBuffer& positions,
+                                         VulkanBuffer& out,
+                                         std::size_t batch,
+                                         std::size_t tokens,
+                                         std::size_t channels,
+                                         std::size_t n_head,
+                                         std::size_t head_dim,
+                                         std::size_t rotary_dim,
+                                         float theta);
+VulkanOpResult run_vulkan_rope_split_half(VulkanRuntime& runtime,
+                                          const VulkanBuffer& x,
+                                          VulkanBuffer& out,
+                                          std::size_t batch,
+                                          std::size_t tokens,
+                                          std::size_t channels,
+                                          std::size_t n_head,
+                                          std::size_t head_dim,
+                                          std::size_t rotary_dim,
+                                          std::size_t token_offset,
+                                          float theta,
+                                          bool inverse);
+VulkanOpResult run_vulkan_rope_positions_split_half(VulkanRuntime& runtime,
+                                                    const VulkanBuffer& x,
+                                                    const VulkanBuffer& positions,
+                                                    VulkanBuffer& out,
+                                                    std::size_t batch,
+                                                    std::size_t tokens,
+                                                    std::size_t channels,
+                                                    std::size_t n_head,
+                                                    std::size_t head_dim,
+                                                    std::size_t rotary_dim,
+                                                    float theta);
 
 } // namespace motifcl

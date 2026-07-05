@@ -568,6 +568,9 @@ bool can_use_fused_packed_qkv_q4_0_decode(const Tensor& x,
         autograd::is_enabled()) {
         return false;
     }
+    // Q4_0 fused decode kernels are OpenCL-only; refuse Vulkan tensors
+    // (quant-layout Vulkan port is a separate gap; see VULKAN_PORT_PROTOCOL.md).
+    if (x.valid() && x.backend().is_vulkan()) return false;
     const Tensor& qweight = decode_quantized_weight(qkv);
     return x.valid() &&
            x.dtype() == DType::F32 &&
@@ -633,6 +636,8 @@ bool can_use_fused_packed_swiglu_q4_0_decode(const Tensor& x,
         autograd::is_enabled()) {
         return false;
     }
+    // Q4_0 fused decode kernels are OpenCL-only; refuse Vulkan tensors.
+    if (x.valid() && x.backend().is_vulkan()) return false;
     const Tensor& qweight = decode_quantized_weight(gate_up);
     return use_swiglu &&
            dropout_p == 0.0f &&
@@ -1780,6 +1785,10 @@ bool can_use_fused_qk_norm_rope_decode(const Tensor& q,
                                        bool use_rope,
                                        int rotary_dim) {
     if (env_enabled("MOTIFCL_DISABLE_FUSED_QK_NORM_ROPE_DECODE") || autograd::is_enabled()) return false;
+    // Fused decode kernels are OpenCL-only; explicitly refuse Vulkan tensors so
+    // inference on a Vulkan backend falls through to the decomposed path instead
+    // of crashing on a null OpenCL context (Slice E gap, see VULKAN_PORT_PROTOCOL.md).
+    if (q.valid() && q.backend().is_vulkan()) return false;
     if (!use_rope || !q.valid() || !k.valid() || !q_norm.weight.data.valid() || !k_norm.weight.data.valid()) return false;
     if (q.dtype() != DType::F32 || k.dtype() != DType::F32 ||
         q_norm.weight.data.dtype() != DType::F32 || k_norm.weight.data.dtype() != DType::F32) {
@@ -1958,6 +1967,9 @@ bool can_use_fused_rope_cache_append_decode(const Tensor& q,
                                             bool use_rope,
                                             int rotary_dim) {
     if (env_enabled("MOTIFCL_DISABLE_FUSED_ROPE_CACHE_APPEND_DECODE") || autograd::is_enabled()) return false;
+    // Fused decode kernels are OpenCL-only; explicitly refuse Vulkan tensors
+    // (Slice E gap; see VULKAN_PORT_PROTOCOL.md).
+    if (q.valid() && q.backend().is_vulkan()) return false;
     if (!use_rope || !q.valid() || !k.valid() || !v.valid() || !cache_k.valid() || !cache_v.valid()) return false;
     if (q.dtype() != DType::F32 || k.dtype() != DType::F32 || v.dtype() != DType::F32 ||
         cache_k.dtype() != DType::F32 || cache_v.dtype() != DType::F32) {

@@ -598,6 +598,20 @@ int main(int argc, char** argv) {
                      motifcl::sgd_update(fx->t0, fx->t2, 0.0f);
                      backend_ptr->finish();
                  });
+        // mul_scalar / scale: closes the SubBackward/MulBackward/ScalarBackward
+        // chain on Vulkan (Slice C2). Same bandwidth profile as add/sub (rw2:
+        // read x + write out).
+        add_case("mul_scalar_f32", 0.60, rw2,
+                 [fx, &runtime]() -> std::string {
+                     auto r = motifcl::run_vulkan_mul_scalar(runtime, fx->b0, fx->b3,
+                                                              fx->rows * fx->cols, -1.0f);
+                     return r.success ? std::string() : r.error;
+                 },
+                 [fx, backend_ptr]() {
+                     motifcl::autograd::NoGradGuard guard;
+                     auto out = motifcl::scale(fx->t0, -1.0f);
+                     backend_ptr->finish();
+                 });
     }
 
     // SwiGLU fwd + bwd (packed 512 x 2*1024)
@@ -653,6 +667,110 @@ int main(int argc, char** argv) {
             };
         }
         cases.push_back(std::move(bwd));
+    }
+
+    // ---- Embedding gather + RoPE (Slice E + F perf records) ----
+    // Shapes mirror typical transformer prefill: V=4096 vocab, D=64 embed/head_dim,
+    // B*T=512 tokens, n_head=8 → channels=64 for rope (single seq, batch folded).
+    // Buffers must outlive the bench iteration loops, so hold them in a shared
+    // fixture (mirrors RowOpFixture pattern above) — local VulkanBuffer decls
+    // would dangle once the setup block exits before iteration starts.
+    struct EmbRopeFixture {
+        motifcl::VulkanBuffer weight;   // [V, D] f32
+        motifcl::VulkanBuffer indices;  // [T] i32
+        motifcl::VulkanBuffer emb_out;  // [T, D] f32
+        motifcl::VulkanBuffer rope_x;   // [rope_rows, channels] f32
+        motifcl::VulkanBuffer rope_out; // [rope_rows, channels] f32
+        std::shared_ptr<motifcl::Tensor> cl_w, cl_idx, cl_rope_x;
+    };
+    {
+        const std::size_t V = 4096, D = 64, T = 512;
+        const std::size_t n_head = 8, channels = n_head * D;  // 512
+        const std::size_t rope_rows = T;                       // batch folded into tokens
+        const auto w_host = random_host(V * D, 0x6a6a);
+        std::vector<std::int32_t> idx_host(T);
+        for (std::size_t t = 0; t < T; ++t) idx_host[t] = static_cast<std::int32_t>((t * 7) % V);
+        const auto x_host = random_host(rope_rows * channels, 0x7b7b);
+
+        auto fx = std::make_shared<EmbRopeFixture>();
+        fx->weight = runtime.create_buffer(w_host.size() * sizeof(float), w_host.data());
+        fx->indices = runtime.create_buffer(idx_host.size() * sizeof(std::int32_t), idx_host.data());
+        fx->emb_out = runtime.create_buffer(T * D * sizeof(float));
+        fx->rope_x = runtime.create_buffer(x_host.size() * sizeof(float), x_host.data());
+        fx->rope_out = runtime.create_buffer(rope_rows * channels * sizeof(float));
+        if (opencl_available) {
+            fx->cl_w = std::make_shared<motifcl::Tensor>(
+                motifcl::Tensor::from_cpu(*cl_backend, {static_cast<int64_t>(V), static_cast<int64_t>(D)},
+                                          motifcl::DType::F32, w_host.data()));
+            fx->cl_idx = std::make_shared<motifcl::Tensor>(
+                motifcl::Tensor::from_cpu(*cl_backend, {static_cast<int64_t>(T)}, motifcl::DType::I32,
+                                          idx_host.data()));
+            fx->cl_rope_x = std::make_shared<motifcl::Tensor>(
+                motifcl::Tensor::from_cpu(*cl_backend, {static_cast<int64_t>(rope_rows),
+                                                        static_cast<int64_t>(channels)},
+                                          motifcl::DType::F32, x_host.data()));
+        }
+        auto backend_ptr = cl_backend.get();
+
+        // embedding_gather: read T rows from a [V,D] table + write T*D out.
+        // Bandwidth ≈ (T*D + T*D) bytes (index vector negligible).
+        {
+            BenchCase bc;
+            bc.op = "embedding_gather_f32_i32";
+            std::ostringstream shape;
+            shape << "V" << V << "D" << D << "T" << T;
+            bc.shape = shape.str();
+            bc.target_ratio = 0.60;
+            bc.work_bytes = 2.0 * T * D * sizeof(float);
+            bc.vulkan_iter = [fx, &runtime, V, D, T]() -> std::string {
+                auto r = motifcl::run_vulkan_embedding_gather(runtime, fx->weight, fx->indices,
+                                                               fx->emb_out, V, D, T);
+                return r.success ? std::string() : r.error;
+            };
+            if (opencl_available) {
+                bc.opencl_iter = [fx, backend_ptr, V, D]() {
+                    motifcl::autograd::NoGradGuard guard;
+                    // The Embedding ctor takes Backend&; use the Tensor's own backend
+                    // (the fixture-held cl_w keeps the backend alive via shared_ptr).
+                    motifcl::Backend& be = fx->cl_w->backend();
+                    motifcl::nn::Embedding emb(be, static_cast<int>(V), static_cast<int>(D),
+                                                /*skip_weight_init=*/true);
+                    emb.weight.data = *fx->cl_w;
+                    emb.weight.trainable = false;
+                    auto out = emb.forward(*fx->cl_idx);
+                    backend_ptr->finish();
+                };
+            }
+            cases.push_back(std::move(bc));
+        }
+
+        // rope (interleaved): read x + write out, channels=T*channels total elements.
+        {
+            BenchCase bc;
+            bc.op = "rope_f32";
+            std::ostringstream shape;
+            shape << "T" << rope_rows << "h" << n_head << "d" << D;
+            bc.shape = shape.str();
+            bc.target_ratio = 0.40;  // trig (cos/sin/pow) per pair — heavier than add
+            bc.work_bytes = 2.0 * rope_rows * channels * sizeof(float);
+            bc.vulkan_iter = [fx, &runtime, rope_rows, channels, n_head, D]() -> std::string {
+                auto r = motifcl::run_vulkan_rope(runtime, fx->rope_x, fx->rope_out,
+                                                   /*batch=*/1, rope_rows, channels, n_head, D,
+                                                   /*rotary_dim=*/0, /*token_offset=*/0, 10000.0f,
+                                                   /*inverse=*/false);
+                return r.success ? std::string() : r.error;
+            };
+            if (opencl_available) {
+                bc.opencl_iter = [fx, n_head, rope_rows, backend_ptr]() {
+                    motifcl::autograd::NoGradGuard guard;
+                    auto out = motifcl::rope(*fx->cl_rope_x, static_cast<int>(n_head),
+                                              /*batch_size=*/1, static_cast<int64_t>(rope_rows), 10000.0f,
+                                              /*rotary_dim=*/0, /*token_offset=*/0);
+                    backend_ptr->finish();
+                };
+            }
+            cases.push_back(std::move(bc));
+        }
     }
 
     // ---- GQA forward + forward+backward (non-causal, batch=1) ----

@@ -731,6 +731,11 @@ QKV qkv_split(const Tensor& packed, int64_t q_dim, int64_t k_dim, int64_t v_dim)
     MCL_CHECK(packed.dtype() == DType::F32 && packed.ndim() == 2, "qkv_split expects packed f32 [rows, q+k+v]");
     MCL_CHECK(q_dim > 0 && k_dim > 0 && v_dim > 0 && packed.shape()[1] == q_dim + k_dim + v_dim,
               "qkv_split dimension mismatch");
+    // OpenCL-only kernel; ModernSelfAttention::project_qkv's non-split fallback
+    // reaches here on Vulkan. Refuse Vulkan until a device kernel lands.
+    MCL_CHECK(!packed.backend().is_vulkan(),
+              "qkv_split is not Vulkan-native yet (use split q/k/v projections via separate "
+              "Linear layers, or OpenCL backend)");
     auto q = Tensor::empty(packed.backend(), {packed.shape()[0], q_dim}, DType::F32);
     auto k_out = Tensor::empty(packed.backend(), {packed.shape()[0], k_dim}, DType::F32);
     auto v_out = Tensor::empty(packed.backend(), {packed.shape()[0], v_dim}, DType::F32);
@@ -772,6 +777,34 @@ Tensor rope_impl(const Tensor& x, int n_head, int64_t batch_size, int64_t seq_le
     int64_t rd = rotary_dim <= 0 ? head_dim : rotary_dim;
     MCL_CHECK(rd <= head_dim && rd % 2 == 0, "rope rotary_dim must be even and <= head_dim");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    if (x.backend().is_vulkan()) {
+        auto& runtime = x.backend().vulkan_runtime();
+        const VulkanOpResult result = split_half
+            ? run_vulkan_rope_split_half(runtime, x.storage().vulkan_buffer, out.storage().vulkan_buffer,
+                                         static_cast<std::size_t>(batch_size),
+                                         static_cast<std::size_t>(seq_len),
+                                         static_cast<std::size_t>(x.shape()[1]),
+                                         static_cast<std::size_t>(n_head),
+                                         static_cast<std::size_t>(head_dim),
+                                         static_cast<std::size_t>(rd),
+                                         static_cast<std::size_t>(token_offset),
+                                         theta, inverse)
+            : run_vulkan_rope(runtime, x.storage().vulkan_buffer, out.storage().vulkan_buffer,
+                              static_cast<std::size_t>(batch_size),
+                              static_cast<std::size_t>(seq_len),
+                              static_cast<std::size_t>(x.shape()[1]),
+                              static_cast<std::size_t>(n_head),
+                              static_cast<std::size_t>(head_dim),
+                              static_cast<std::size_t>(rd),
+                              static_cast<std::size_t>(token_offset),
+                              theta, inverse);
+        MCL_CHECK(result.success, std::string("vulkan rope failed: ") + result.error);
+        autograd::record_op(split_half
+                                ? (inverse ? "rope_split_half_backward_f32" : "rope_split_half_f32")
+                                : (inverse ? "rope_backward_f32" : "rope_f32"),
+                            {x.id()}, {out.id()});
+        return out;
+    }
     auto kernel = x.backend().kernels.get(split_half ? "rope_split_half_f32" : "rope_f32");
     const int total = static_cast<int>(x.numel());
     kernel.set_arg(0, x.buffer());
@@ -828,6 +861,23 @@ Tensor rope_positions(const Tensor& x, const Tensor& positions, int n_head,
     rd = std::min<int64_t>(rd, head_dim);
     rd -= rd % 2;
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    if (x.backend().is_vulkan()) {
+        const auto result = run_vulkan_rope_positions(
+            x.backend().vulkan_runtime(),
+            x.storage().vulkan_buffer,
+            positions.storage().vulkan_buffer,
+            out.storage().vulkan_buffer,
+            static_cast<std::size_t>(batch_size),
+            static_cast<std::size_t>(seq_len),
+            static_cast<std::size_t>(x.shape()[1]),
+            static_cast<std::size_t>(n_head),
+            static_cast<std::size_t>(head_dim),
+            static_cast<std::size_t>(rd),
+            theta);
+        MCL_CHECK(result.success, std::string("vulkan rope_positions failed: ") + result.error);
+        autograd::record_op("rope_positions_f32", {x.id(), positions.id()}, {out.id()});
+        return out;
+    }
     auto kernel = x.backend().kernels.get("rope_positions_f32");
     const int total = static_cast<int>(x.numel());
     kernel.set_arg(0, x.buffer());
@@ -860,6 +910,23 @@ Tensor rope_positions_split_half(const Tensor& x, const Tensor& positions, int n
     rd = std::min<int64_t>(rd, head_dim);
     rd -= rd % 2;
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    if (x.backend().is_vulkan()) {
+        const auto result = run_vulkan_rope_positions_split_half(
+            x.backend().vulkan_runtime(),
+            x.storage().vulkan_buffer,
+            positions.storage().vulkan_buffer,
+            out.storage().vulkan_buffer,
+            static_cast<std::size_t>(batch_size),
+            static_cast<std::size_t>(seq_len),
+            static_cast<std::size_t>(x.shape()[1]),
+            static_cast<std::size_t>(n_head),
+            static_cast<std::size_t>(head_dim),
+            static_cast<std::size_t>(rd),
+            theta);
+        MCL_CHECK(result.success, std::string("vulkan rope_positions_split_half failed: ") + result.error);
+        autograd::record_op("rope_positions_split_half_f32", {x.id(), positions.id()}, {out.id()});
+        return out;
+    }
     auto kernel = x.backend().kernels.get("rope_positions_split_half_f32");
     const int total = static_cast<int>(x.numel());
     kernel.set_arg(0, x.buffer());
@@ -1246,6 +1313,10 @@ Tensor grouped_query_attention_masked(const Tensor& q, const Tensor& k, const Te
 void kv_cache_append(const Tensor& new_k, const Tensor& new_v, Tensor& cache_k, Tensor& cache_v,
                      int64_t batch_size, int64_t new_tokens, int64_t max_tokens, int64_t start_pos) {
     require_attention_microkernel();
+    // OpenCL-only KV-cache path; Vulkan decode path needs device kernels
+    // (Slice gap; see VULKAN_PORT_PROTOCOL.md).
+    MCL_CHECK(!cache_k.backend().is_vulkan(),
+              "kv_cache_append is not Vulkan-native yet (use OpenCL backend for KV-cache decode)");
     const int64_t kv_channels = validate_kv_cache_args(new_k, new_v, cache_k, cache_v,
                                                        batch_size, new_tokens, max_tokens, start_pos,
                                                        "kv_cache_append", true);
@@ -1295,6 +1366,8 @@ void kv_cache_append_positions(const Tensor& new_k, const Tensor& new_v, const T
                                Tensor& cache_k, Tensor& cache_v,
                                int64_t batch_size, int64_t new_tokens, int64_t max_tokens) {
     require_attention_microkernel();
+    MCL_CHECK(!cache_k.backend().is_vulkan(),
+              "kv_cache_append_positions is not Vulkan-native yet (use OpenCL backend for KV-cache decode)");
     const int64_t kv_channels = validate_kv_cache_args(new_k, new_v, cache_k, cache_v,
                                                        batch_size, new_tokens, max_tokens, 0,
                                                        "kv_cache_append_positions", false);
@@ -1324,6 +1397,8 @@ void paged_kv_cache_append(const Tensor& new_k, const Tensor& new_v, const Tenso
                            int64_t page_size, int64_t page_count,
                            int64_t start_pos) {
     require_attention_microkernel();
+    MCL_CHECK(!cache_k_pages.backend().is_vulkan(),
+              "paged_kv_cache_append is not Vulkan-native yet (use OpenCL backend for paged decode)");
     const int64_t kv_channels = validate_paged_kv_cache_args(new_k, new_v, page_table,
                                                              cache_k_pages, cache_v_pages,
                                                              batch_size, new_tokens,
@@ -1386,6 +1461,8 @@ Tensor paged_grouped_query_attention(const Tensor& q, const Tensor& k_pages, con
                                      int64_t page_size, int64_t page_count,
                                      float scale_override) {
     require_attention_microkernel();
+    MCL_CHECK(!q.backend().is_vulkan(),
+              "paged_grouped_query_attention is not Vulkan-native yet (use OpenCL backend for paged decode)");
     MCL_CHECK(q.dtype() == DType::F32 && is_supported_kv_cache_dtype(k_pages.dtype()) &&
               k_pages.dtype() == v_pages.dtype(),
               "paged_grouped_query_attention expects f32 q and f32/q8_0/q4_0 k/v pages");

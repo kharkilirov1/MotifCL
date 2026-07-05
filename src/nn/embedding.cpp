@@ -8,6 +8,7 @@
 #include <motifcl/autograd/node.hpp>
 #include <motifcl/core/error.hpp>
 #include <motifcl/runtime/backend.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 
 namespace motifcl::nn {
 namespace {
@@ -21,6 +22,19 @@ Tensor embedding_weight_backward(const Tensor& indices, const Tensor& grad_out, 
     const int embed_dim = static_cast<int>(weight_shape[1]);
     MCL_CHECK(grad_out.numel() == indices.numel() * embed_dim, "embedding_weight_backward grad_out shape mismatch");
     auto out = Tensor::empty(indices.backend(), weight_shape, DType::F32);
+    if (indices.backend().is_vulkan()) {
+        const auto result = run_vulkan_embedding_weight_backward(
+            indices.backend().vulkan_runtime(),
+            indices.storage().vulkan_buffer,
+            grad_out.storage().vulkan_buffer,
+            out.storage().vulkan_buffer,
+            static_cast<std::size_t>(vocab_size),
+            static_cast<std::size_t>(embed_dim),
+            static_cast<std::size_t>(indices.numel()));
+        MCL_CHECK(result.success, std::string("vulkan embedding weight backward failed: ") + result.error);
+        autograd::record_op("embedding_weight_backward_f32_i32", {indices.id(), grad_out.id()}, {out.id()});
+        return out;
+    }
     auto k = indices.backend().kernels.get("embedding_weight_backward_f32_i32");
     int n = vocab_size * embed_dim;
     k.set_arg(0, indices.buffer());
@@ -45,6 +59,18 @@ Tensor position_embedding_backward(const Tensor& grad_out, const Shape& position
     // gradient, so zero-initialize the full table to keep those rows finite (Tensor::empty
     // would leave them uninitialized and intermittently non-finite on some drivers).
     auto out = Tensor::zeros(grad_out.backend(), position_shape, DType::F32);
+    if (grad_out.backend().is_vulkan()) {
+        const auto result = run_vulkan_position_embedding_backward(
+            grad_out.backend().vulkan_runtime(),
+            grad_out.storage().vulkan_buffer,
+            out.storage().vulkan_buffer,
+            static_cast<std::size_t>(batch),
+            static_cast<std::size_t>(seq_len),
+            static_cast<std::size_t>(embed_dim));
+        MCL_CHECK(result.success, std::string("vulkan position embedding backward failed: ") + result.error);
+        autograd::record_op("position_embedding_backward_f32_i32", {grad_out.id()}, {out.id()});
+        return out;
+    }
     auto k = grad_out.backend().kernels.get("position_embedding_backward_f32_i32");
     int n = static_cast<int>(seq_len * embed_dim);
     k.set_arg(0, grad_out.buffer());
@@ -123,6 +149,11 @@ Tensor Embedding::forward(const Tensor& indices) {
     auto out = Tensor::empty(indices.backend(), out_shape, DType::F32);
     int n = static_cast<int>(token_count * embed_dim_);
     if (quantized_weight_transposed_.valid()) {
+        // Quantized (Q4_K/Q5_K) gather is OpenCL-only today; the non-quantized
+        // path has a Vulkan branch, but the quant-layout decode does not.
+        MCL_CHECK(!indices.backend().is_vulkan(),
+                  "Embedding quantized (Q4_K/Q5_K) gather is not Vulkan-native yet "
+                  "(use F32 weights or OpenCL backend)");
         MCL_CHECK(indices.backend_ptr() == quantized_weight_transposed_.backend_ptr(),
                   "Embedding indices and quantized weights must share backend");
         const char* kernel_name = quantized_weight_dtype_ == DType::Q4_K
@@ -141,6 +172,23 @@ Tensor Embedding::forward(const Tensor& indices) {
     }
 
     MCL_CHECK(indices.backend_ptr() == weight.data.backend_ptr(), "Embedding indices and weights must share backend");
+    if (indices.backend().is_vulkan()) {
+        const auto result = run_vulkan_embedding_gather(
+            indices.backend().vulkan_runtime(),
+            weight.data.storage().vulkan_buffer,
+            indices.storage().vulkan_buffer,
+            out.storage().vulkan_buffer,
+            static_cast<std::size_t>(vocab_size_),
+            static_cast<std::size_t>(embed_dim_),
+            static_cast<std::size_t>(token_count));
+        MCL_CHECK(result.success, std::string("vulkan embedding gather failed: ") + result.error);
+        autograd::record_op("embedding_gather_f32_i32", {weight.data.id(), indices.id()}, {out.id()});
+        if (autograd::is_enabled() && weight.data.requires_grad()) {
+            out.set_requires_grad(true);
+            out._set_grad_fn(std::make_shared<EmbeddingBackwardNode>(indices, weight.data));
+        }
+        return out;
+    }
     auto k = indices.backend().kernels.get("embedding_gather_f32_i32");
     k.set_arg(0, weight.data.buffer());
     k.set_arg(1, indices.buffer());
@@ -187,6 +235,24 @@ Tensor token_position_embedding(const Tensor& token_ids, const Tensor& token_wei
     MCL_CHECK(position_weight.shape()[0] >= T, "position embedding table is shorter than sequence length");
 
     auto out = Tensor::empty(token_ids.backend(), {B * T, D}, DType::F32);
+    if (token_ids.backend().is_vulkan()) {
+        const auto result = run_vulkan_token_position_embedding(
+            token_ids.backend().vulkan_runtime(),
+            token_weight.storage().vulkan_buffer,
+            position_weight.storage().vulkan_buffer,
+            token_ids.storage().vulkan_buffer,
+            out.storage().vulkan_buffer,
+            static_cast<std::size_t>(V),
+            static_cast<std::size_t>(T),
+            static_cast<std::size_t>(D));
+        MCL_CHECK(result.success, std::string("vulkan token+position embedding failed: ") + result.error);
+        autograd::record_op("token_position_embedding_f32_i32", {token_weight.id(), position_weight.id(), token_ids.id()}, {out.id()});
+        if (autograd::is_enabled() && (token_weight.requires_grad() || position_weight.requires_grad())) {
+            out.set_requires_grad(true);
+            out._set_grad_fn(std::make_shared<TokenPositionEmbeddingBackwardNode>(token_ids, token_weight, position_weight, B, T));
+        }
+        return out;
+    }
     auto k = token_ids.backend().kernels.get("token_position_embedding_f32_i32");
     int n = static_cast<int>(B * T * D);
     k.set_arg(0, token_weight.buffer());

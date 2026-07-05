@@ -3849,6 +3849,380 @@ std::uint32_t find_host_visible_coherent_memory_type(const VkPhysicalDeviceMemor
 
 } // namespace
 
+VulkanOpResult run_vulkan_embedding_gather(VulkanRuntime& runtime,
+                                           const VulkanBuffer& weight,
+                                           const VulkanBuffer& indices,
+                                           VulkanBuffer& out,
+                                           std::size_t vocab_size,
+                                           std::size_t embed_dim,
+                                           std::size_t token_count) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (vocab_size == 0 || embed_dim == 0 || token_count == 0)
+        return fail("Vulkan embedding gather requires non-zero shapes");
+    // Push-constant `n = token_count * embed_dim` is int32; reject overflow.
+    constexpr std::size_t kMaxInt32 = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (token_count > kMaxInt32 / embed_dim) return fail("Vulkan embedding gather token_count*embed_dim overflows int32 push constant");
+    const auto weight_bytes = vocab_size * embed_dim * sizeof(float);
+    const auto idx_bytes = token_count * sizeof(std::int32_t);
+    const auto out_bytes = token_count * embed_dim * sizeof(float);
+    if (weight.nbytes() < weight_bytes) return fail("Vulkan embedding gather weight buffer too small");
+    if (indices.nbytes() < idx_bytes) return fail("Vulkan embedding gather indices buffer too small");
+    if (out.nbytes() < out_bytes) return fail("Vulkan embedding gather output buffer too small");
+
+    const struct {
+        std::int32_t vocab_size;
+        std::int32_t embed_dim;
+        std::int32_t n;
+        std::int32_t _pad;
+    } push{static_cast<std::int32_t>(vocab_size),
+           static_cast<std::int32_t>(embed_dim),
+           static_cast<std::int32_t>(token_count * embed_dim),
+           0};
+    const std::vector<const VulkanBuffer*> buffers = {&weight, &indices, &out};
+    const std::size_t total = token_count * embed_dim;
+    return runtime.dispatch_cached(vkspirv::k_embedding_gather_f32_i32,
+                                   vkspirv::k_embedding_gather_f32_i32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_embedding_weight_backward(VulkanRuntime& runtime,
+                                                    const VulkanBuffer& indices,
+                                                    const VulkanBuffer& grad_out,
+                                                    VulkanBuffer& grad_weight,
+                                                    std::size_t vocab_size,
+                                                    std::size_t embed_dim,
+                                                    std::size_t token_count) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (vocab_size == 0 || embed_dim == 0 || token_count == 0)
+        return fail("Vulkan embedding weight backward requires non-zero shapes");
+    // Push-constant `n = vocab_size * embed_dim` is int32; reject overflow.
+    constexpr std::size_t kMaxInt32 = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (vocab_size > kMaxInt32 / embed_dim) return fail("Vulkan embedding weight backward vocab_size*embed_dim overflows int32 push constant");
+    const auto idx_bytes = token_count * sizeof(std::int32_t);
+    const auto grad_bytes = token_count * embed_dim * sizeof(float);
+    const auto out_bytes = vocab_size * embed_dim * sizeof(float);
+    if (indices.nbytes() < idx_bytes) return fail("Vulkan embedding weight backward indices buffer too small");
+    if (grad_out.nbytes() < grad_bytes) return fail("Vulkan embedding weight backward grad buffer too small");
+    if (grad_weight.nbytes() < out_bytes) return fail("Vulkan embedding weight backward output buffer too small");
+
+    const struct {
+        std::int32_t vocab_size;
+        std::int32_t embed_dim;
+        std::int32_t token_count;
+        std::int32_t n;
+    } push{static_cast<std::int32_t>(vocab_size),
+           static_cast<std::int32_t>(embed_dim),
+           static_cast<std::int32_t>(token_count),
+           static_cast<std::int32_t>(vocab_size * embed_dim)};
+    const std::vector<const VulkanBuffer*> buffers = {&indices, &grad_out, &grad_weight};
+    const std::size_t total = vocab_size * embed_dim;
+    return runtime.dispatch_cached(vkspirv::k_embedding_weight_backward_f32_i32,
+                                   vkspirv::k_embedding_weight_backward_f32_i32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_token_position_embedding(VulkanRuntime& runtime,
+                                                    const VulkanBuffer& token_weight,
+                                                    const VulkanBuffer& pos_weight,
+                                                    const VulkanBuffer& token_ids,
+                                                    VulkanBuffer& out,
+                                                    std::size_t vocab_size,
+                                                    std::size_t seq_len,
+                                                    std::size_t embed_dim) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (vocab_size == 0 || seq_len == 0 || embed_dim == 0)
+        return fail("Vulkan token+position embedding requires non-zero shapes");
+    // The token_ids buffer length is implied by out.nbytes / embed_dim, matching
+    // the OpenCL host contract.
+    const auto token_count = out.nbytes() / (embed_dim * sizeof(float));
+    if (token_count == 0) return fail("Vulkan token+position embedding output buffer too small");
+    // Push-constant `n = token_count * embed_dim` is sent as int32; reject
+    // shapes whose product would overflow the kernel's `if (gid >= p.n)` guard.
+    constexpr std::size_t kMaxInt32 = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (token_count > kMaxInt32 / embed_dim) return fail("Vulkan token+position embedding token_count*embed_dim overflows int32 push constant");
+    if (token_weight.nbytes() < vocab_size * embed_dim * sizeof(float))
+        return fail("Vulkan token+position embedding token weight buffer too small");
+    if (pos_weight.nbytes() < seq_len * embed_dim * sizeof(float))
+        return fail("Vulkan token+position embedding position weight buffer too small");
+    if (token_ids.nbytes() < token_count * sizeof(std::int32_t))
+        return fail("Vulkan token+position embedding token_ids buffer too small");
+
+    const struct {
+        std::int32_t vocab_size;
+        std::int32_t seq_len;
+        std::int32_t embed_dim;
+        std::int32_t n;
+    } push{static_cast<std::int32_t>(vocab_size),
+           static_cast<std::int32_t>(seq_len),
+           static_cast<std::int32_t>(embed_dim),
+           static_cast<std::int32_t>(token_count * embed_dim)};
+    const std::vector<const VulkanBuffer*> buffers = {&token_weight, &pos_weight, &token_ids, &out};
+    const std::size_t total = token_count * embed_dim;
+    return runtime.dispatch_cached(vkspirv::k_token_position_embedding_f32_i32,
+                                   vkspirv::k_token_position_embedding_f32_i32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_position_embedding_backward(VulkanRuntime& runtime,
+                                                       const VulkanBuffer& grad_out,
+                                                       VulkanBuffer& grad_position,
+                                                       std::size_t batch,
+                                                       std::size_t seq_len,
+                                                       std::size_t embed_dim) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || seq_len == 0 || embed_dim == 0)
+        return fail("Vulkan position embedding backward requires non-zero shapes");
+    const auto grad_bytes = batch * seq_len * embed_dim * sizeof(float);
+    const auto out_bytes = grad_position.nbytes();
+    if (grad_out.nbytes() < grad_bytes) return fail("Vulkan position embedding backward grad buffer too small");
+    if (out_bytes < seq_len * embed_dim * sizeof(float))
+        return fail("Vulkan position embedding backward output buffer too small");
+    // Output table size (rows) is the table length, which the host zeroed.
+    const auto out_rows = out_bytes / (embed_dim * sizeof(float));
+
+    const struct {
+        std::int32_t batch;
+        std::int32_t seq_len;
+        std::int32_t embed_dim;
+        std::int32_t n;
+    } push{static_cast<std::int32_t>(batch),
+           static_cast<std::int32_t>(seq_len),
+           static_cast<std::int32_t>(embed_dim),
+           static_cast<std::int32_t>(out_rows * embed_dim)};
+    const std::vector<const VulkanBuffer*> buffers = {&grad_out, &grad_position};
+    const std::size_t total = out_rows * embed_dim;
+    return runtime.dispatch_cached(vkspirv::k_position_embedding_backward_f32_i32,
+                                   vkspirv::k_position_embedding_backward_f32_i32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_rope(VulkanRuntime& runtime,
+                               const VulkanBuffer& x,
+                               VulkanBuffer& out,
+                               std::size_t batch,
+                               std::size_t tokens,
+                               std::size_t channels,
+                               std::size_t n_head,
+                               std::size_t head_dim,
+                               std::size_t rotary_dim,
+                               std::size_t token_offset,
+                               float theta,
+                               bool inverse) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || tokens == 0 || channels == 0 || n_head == 0 || head_dim == 0)
+        return fail("Vulkan rope requires non-zero shapes");
+    if (channels % n_head != 0) return fail("Vulkan rope channels must divide n_head");
+    if (head_dim * n_head != channels) return fail("Vulkan rope head_dim*n_head must equal channels");
+    if (!std::isfinite(theta) || theta <= 0.0f) return fail("Vulkan rope theta must be positive finite");
+    // Guard the dispatch size: group_count_x = (total+63)/64 is narrowed to
+    // uint32 below; reject shapes whose product would overflow.
+    constexpr std::size_t kMaxRopeElements = static_cast<std::size_t>(std::uint32_t(-1)) * 64u;
+    if (batch > kMaxRopeElements / tokens / channels) return fail("Vulkan rope shape product overflows dispatch range");
+    const auto total = batch * tokens * channels;
+    const auto bytes = total * sizeof(float);
+    if (x.nbytes() < bytes) return fail("Vulkan rope x buffer too small");
+    if (out.nbytes() < bytes) return fail("Vulkan rope output buffer too small");
+
+    const struct {
+        std::int32_t batch;
+        std::int32_t tokens;
+        std::int32_t channels;
+        std::int32_t n_head;
+        std::int32_t head_dim;
+        std::int32_t rotary_dim;
+        std::int32_t token_offset;
+        float theta;
+        std::int32_t inverse;
+    } push{static_cast<std::int32_t>(batch),
+           static_cast<std::int32_t>(tokens),
+           static_cast<std::int32_t>(channels),
+           static_cast<std::int32_t>(n_head),
+           static_cast<std::int32_t>(head_dim),
+           static_cast<std::int32_t>(rotary_dim),
+           static_cast<std::int32_t>(token_offset),
+           theta,
+           inverse ? 1 : 0};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &out};
+    return runtime.dispatch_cached(vkspirv::k_rope_f32, vkspirv::k_rope_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_rope_positions(VulkanRuntime& runtime,
+                                         const VulkanBuffer& x,
+                                         const VulkanBuffer& positions,
+                                         VulkanBuffer& out,
+                                         std::size_t batch,
+                                         std::size_t tokens,
+                                         std::size_t channels,
+                                         std::size_t n_head,
+                                         std::size_t head_dim,
+                                         std::size_t rotary_dim,
+                                         float theta) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || tokens == 0 || channels == 0 || n_head == 0 || head_dim == 0)
+        return fail("Vulkan rope_positions requires non-zero shapes");
+    if (channels % n_head != 0) return fail("Vulkan rope_positions channels must divide n_head");
+    if (head_dim * n_head != channels) return fail("Vulkan rope_positions head_dim*n_head must equal channels");
+    if (!std::isfinite(theta) || theta <= 0.0f) return fail("Vulkan rope_positions theta must be positive finite");
+    const auto total = batch * tokens * channels;
+    const auto bytes = total * sizeof(float);
+    if (x.nbytes() < bytes) return fail("Vulkan rope_positions x buffer too small");
+    if (positions.nbytes() < batch * tokens * sizeof(std::int32_t))
+        return fail("Vulkan rope_positions positions buffer too small");
+    if (out.nbytes() < bytes) return fail("Vulkan rope_positions output buffer too small");
+
+    const struct {
+        std::int32_t batch;
+        std::int32_t tokens;
+        std::int32_t channels;
+        std::int32_t n_head;
+        std::int32_t head_dim;
+        std::int32_t rotary_dim;
+        float theta;
+    } push{static_cast<std::int32_t>(batch),
+           static_cast<std::int32_t>(tokens),
+           static_cast<std::int32_t>(channels),
+           static_cast<std::int32_t>(n_head),
+           static_cast<std::int32_t>(head_dim),
+           static_cast<std::int32_t>(rotary_dim),
+           theta};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &positions, &out};
+    return runtime.dispatch_cached(vkspirv::k_rope_positions_f32, vkspirv::k_rope_positions_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_rope_split_half(VulkanRuntime& runtime,
+                                          const VulkanBuffer& x,
+                                          VulkanBuffer& out,
+                                          std::size_t batch,
+                                          std::size_t tokens,
+                                          std::size_t channels,
+                                          std::size_t n_head,
+                                          std::size_t head_dim,
+                                          std::size_t rotary_dim,
+                                          std::size_t token_offset,
+                                          float theta,
+                                          bool inverse) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || tokens == 0 || channels == 0 || n_head == 0 || head_dim == 0)
+        return fail("Vulkan rope_split_half requires non-zero shapes");
+    if (channels % n_head != 0) return fail("Vulkan rope_split_half channels must divide n_head");
+    if (head_dim * n_head != channels) return fail("Vulkan rope_split_half head_dim*n_head must equal channels");
+    if (!std::isfinite(theta) || theta <= 0.0f) return fail("Vulkan rope_split_half theta must be positive finite");
+    const auto total = batch * tokens * channels;
+    const auto bytes = total * sizeof(float);
+    if (x.nbytes() < bytes) return fail("Vulkan rope_split_half x buffer too small");
+    if (out.nbytes() < bytes) return fail("Vulkan rope_split_half output buffer too small");
+
+    const struct {
+        std::int32_t batch;
+        std::int32_t tokens;
+        std::int32_t channels;
+        std::int32_t n_head;
+        std::int32_t head_dim;
+        std::int32_t rotary_dim;
+        std::int32_t token_offset;
+        float theta;
+        std::int32_t inverse;
+    } push{static_cast<std::int32_t>(batch),
+           static_cast<std::int32_t>(tokens),
+           static_cast<std::int32_t>(channels),
+           static_cast<std::int32_t>(n_head),
+           static_cast<std::int32_t>(head_dim),
+           static_cast<std::int32_t>(rotary_dim),
+           static_cast<std::int32_t>(token_offset),
+           theta,
+           inverse ? 1 : 0};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &out};
+    return runtime.dispatch_cached(vkspirv::k_rope_split_half_f32, vkspirv::k_rope_split_half_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_rope_positions_split_half(VulkanRuntime& runtime,
+                                                    const VulkanBuffer& x,
+                                                    const VulkanBuffer& positions,
+                                                    VulkanBuffer& out,
+                                                    std::size_t batch,
+                                                    std::size_t tokens,
+                                                    std::size_t channels,
+                                                    std::size_t n_head,
+                                                    std::size_t head_dim,
+                                                    std::size_t rotary_dim,
+                                                    float theta) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || tokens == 0 || channels == 0 || n_head == 0 || head_dim == 0)
+        return fail("Vulkan rope_positions_split_half requires non-zero shapes");
+    if (channels % n_head != 0) return fail("Vulkan rope_positions_split_half channels must divide n_head");
+    if (head_dim * n_head != channels) return fail("Vulkan rope_positions_split_half head_dim*n_head must equal channels");
+    if (!std::isfinite(theta) || theta <= 0.0f) return fail("Vulkan rope_positions_split_half theta must be positive finite");
+    const auto total = batch * tokens * channels;
+    const auto bytes = total * sizeof(float);
+    if (x.nbytes() < bytes) return fail("Vulkan rope_positions_split_half x buffer too small");
+    if (positions.nbytes() < batch * tokens * sizeof(std::int32_t))
+        return fail("Vulkan rope_positions_split_half positions buffer too small");
+    if (out.nbytes() < bytes) return fail("Vulkan rope_positions_split_half output buffer too small");
+
+    const struct {
+        std::int32_t batch;
+        std::int32_t tokens;
+        std::int32_t channels;
+        std::int32_t n_head;
+        std::int32_t head_dim;
+        std::int32_t rotary_dim;
+        float theta;
+    } push{static_cast<std::int32_t>(batch),
+           static_cast<std::int32_t>(tokens),
+           static_cast<std::int32_t>(channels),
+           static_cast<std::int32_t>(n_head),
+           static_cast<std::int32_t>(head_dim),
+           static_cast<std::int32_t>(rotary_dim),
+           theta};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &positions, &out};
+    return runtime.dispatch_cached(vkspirv::k_rope_positions_split_half_f32,
+                                   vkspirv::k_rope_positions_split_half_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
+}
+
 std::string vulkan_version_string(std::uint32_t version) {
     const auto major = (version >> 22u) & 0x7fu;
     const auto minor = (version >> 12u) & 0x3ffu;
@@ -6328,6 +6702,19 @@ VulkanOpResult run_vulkan_i8_scaled_matmul(VulkanRuntime& runtime,
         result.error = message;
         return result;
     };
+    // dispatch_storage_buffers does its own vkQueueSubmit+vkQueueWaitIdle and
+    // bypasses batch_begin/batch_end and capture/replay (which only
+    // dispatch_cached participates in). Refuse to call it inside an active
+    // batch/capture so we don't break the atomic-submit contract or drop the
+    // dispatch from the recording.
+    if (runtime.batch_active()) {
+        return fail("Vulkan i8 scaled matmul cannot run inside an active batch "
+                    "(dispatch_storage_buffers bypasses batch recording)");
+    }
+    if (runtime.capture_active()) {
+        return fail("Vulkan i8 scaled matmul cannot run while capturing "
+                    "(dispatch_storage_buffers bypasses capture recording)");
+    }
     if (m == 0 || k == 0 || n == 0) return fail("Vulkan i8 scaled matmul requires non-zero M, K, and N");
     if (k > kMaxSpecializedK) return fail("Vulkan i8 scaled matmul currently supports K up to 256");
     if (m > kMaxDispatchDim || n > kMaxDispatchDim) {
@@ -6607,6 +6994,62 @@ VulkanOpResult run_vulkan_add(VulkanRuntime& runtime,
                                    static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
 }
 
+VulkanOpResult run_vulkan_mul_scalar(VulkanRuntime& runtime,
+                                     const VulkanBuffer& x,
+                                     VulkanBuffer& out,
+                                     std::size_t elements,
+                                     float alpha) {
+    VulkanOpResult result;
+    constexpr std::size_t kMaxElements = 16 * 1024 * 1024;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (elements == 0) return fail("Vulkan mul_scalar requires non-zero element count");
+    if (elements > kMaxElements * 16) return fail("Vulkan mul_scalar element count exceeds supported range");
+    if (!std::isfinite(alpha)) return fail("Vulkan mul_scalar requires finite alpha");
+    const auto nbytes = elements * sizeof(float);
+    if (x.nbytes() < nbytes) return fail("Vulkan mul_scalar x buffer is too small");
+    if (out.nbytes() < nbytes) return fail("Vulkan mul_scalar output buffer is too small");
+
+    const struct {
+        float alpha;
+        std::uint32_t n;
+    } push{alpha, static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &out};
+    return runtime.dispatch_cached(vkspirv::k_mul_scalar_f32, vkspirv::k_mul_scalar_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_add_scalar(VulkanRuntime& runtime,
+                                     const VulkanBuffer& x,
+                                     VulkanBuffer& out,
+                                     std::size_t elements,
+                                     float value) {
+    VulkanOpResult result;
+    constexpr std::size_t kMaxElements = 16 * 1024 * 1024;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (elements == 0) return fail("Vulkan add_scalar requires non-zero element count");
+    if (elements > kMaxElements * 16) return fail("Vulkan add_scalar element count exceeds supported range");
+    if (!std::isfinite(value)) return fail("Vulkan add_scalar requires finite value");
+    const auto nbytes = elements * sizeof(float);
+    if (x.nbytes() < nbytes) return fail("Vulkan add_scalar x buffer is too small");
+    if (out.nbytes() < nbytes) return fail("Vulkan add_scalar output buffer is too small");
+
+    const struct {
+        float value;
+        std::uint32_t n;
+    } push{value, static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &out};
+    return runtime.dispatch_cached(vkspirv::k_add_scalar_f32, vkspirv::k_add_scalar_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
 VulkanOpResult run_vulkan_sub(VulkanRuntime& runtime,
                               const VulkanBuffer& a,
                               const VulkanBuffer& b,
@@ -6775,6 +7218,13 @@ VulkanOpResult run_vulkan_compact_counter_apply_update_fused(VulkanRuntime& runt
         return fail("Vulkan counter update requires non-zero dimensions");
     }
     if (in_features % 4 != 0) return fail("Vulkan counter update requires in_features % 4 == 0");
+    // Validate optimizer hyperparameters: NaN/Inf in lr/lr_scale/rms_beta/rms_eps
+    // silently poisons the whole weight update (and a negative rms_eps would
+    // bypass the max(sqrt(vv), eps) guard in row_stats). Mirror SGD/RMSNorm.
+    if (!std::isfinite(lr)) return fail("Vulkan counter update requires finite lr");
+    if (!std::isfinite(lr_scale)) return fail("Vulkan counter update requires finite lr_scale");
+    if (!std::isfinite(rms_beta)) return fail("Vulkan counter update requires finite rms_beta");
+    if (!std::isfinite(rms_eps) || rms_eps < 0.0f) return fail("Vulkan counter update requires non-negative finite rms_eps");
     if (!runtime.supports_storage_buffer_i8()) {
         return fail("Vulkan counter update requires VK_KHR_8bit_storage (uniformAndStorageBuffer8BitAccess)");
     }

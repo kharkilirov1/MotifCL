@@ -30,6 +30,11 @@ bool strict_vulkan_activation_required() {
 
 Tensor unary(const Tensor& x, const std::string& kernel_name) {
     MCL_CHECK(x.dtype() == DType::F32, kernel_name + " supports f32 only");
+    // Only gelu has a Vulkan device path; relu/silu/exp/sqrt/rsqrt still go
+    // through the OpenCL kernel cache. Refuse Vulkan so the failure is loud.
+    MCL_CHECK(!x.backend().is_vulkan(),
+              std::string(kernel_name) + " is not Vulkan-native yet (only gelu/swiglu have Vulkan "
+              "device paths; use OpenCL backend)");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     auto k = x.backend().kernels.get(kernel_name);
     int n = static_cast<int>(x.numel());
@@ -44,6 +49,11 @@ Tensor unary(const Tensor& x, const std::string& kernel_name) {
 Tensor unary_backward_kernel(const Tensor& x, const Tensor& grad_out, const std::string& kernel_name) {
     MCL_CHECK(x.dtype() == DType::F32 && grad_out.dtype() == DType::F32, kernel_name + " supports f32 only");
     MCL_CHECK(x.shape() == grad_out.shape(), kernel_name + " shape mismatch");
+    // gelu_backward has its own Vulkan device path; relu_backward (and any
+    // future unary_backward) does not. Refuse Vulkan so the failure is loud.
+    MCL_CHECK(!x.backend().is_vulkan(),
+              std::string(kernel_name) + " is not Vulkan-native yet (only gelu_backward has a Vulkan "
+              "device path; use OpenCL backend)");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     auto k = x.backend().kernels.get(kernel_name);
     int n = static_cast<int>(x.numel());

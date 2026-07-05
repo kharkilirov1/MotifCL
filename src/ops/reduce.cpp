@@ -16,6 +16,11 @@ constexpr std::size_t kReduceWorkgroup = 256;
 Tensor sum_rows(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::F32, "sum_rows supports f32 only");
     MCL_CHECK(x.ndim() == 2, "sum_rows expects rank-2 tensor");
+    // OpenCL-only reduction; needed by AddBiasRowsBackward/AddBiasGeluRowsBackward
+    // on Vulkan (which are themselves OpenCL-only today, so the chain refuses
+    // earlier — but guard here too for direct callers).
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "sum_rows is not Vulkan-native yet (use OpenCL backend)");
     auto out = Tensor::empty(x.backend(), {x.shape()[1]}, DType::F32);
     auto k = x.backend().kernels.get("sum_rows_f32");
     int rows = static_cast<int>(x.shape()[0]);

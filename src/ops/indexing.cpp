@@ -186,6 +186,10 @@ Tensor dropout(const Tensor& x, float p, bool training) {
     MCL_CHECK(x.dtype() == DType::F32, "dropout supports f32 only");
     MCL_CHECK(p >= 0.0f && p < 1.0f, "dropout probability must be in [0, 1)");
     if (!training || p == 0.0f) return mul_scalar(x, 1.0f);
+    // OpenCL-only dropout kernel; transformer training with dropout_p>0 on
+    // Vulkan needs a device kernel with PRNG (Slice gap; see VULKAN_PORT_PROTOCOL.md).
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "dropout with p>0 is not Vulkan-native yet (use dropout_p=0, or OpenCL backend)");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     auto mask_tensor = Tensor::empty(x.backend(), x.shape(), DType::F32);
     const float keep_scale = 1.0f / (1.0f - p);

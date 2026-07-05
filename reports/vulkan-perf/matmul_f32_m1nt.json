@@ -4,7 +4,7 @@
   "opencl_device": "Ellesmere",
   "methodology": "median wall-time of 50 runs after 5 warmup; gpu_us from VK_QUERY_TYPE_TIMESTAMP; ratio = opencl_wall / vulkan_wall",
   "rows": [
-    {"shape": "1x1024x1024", "dtype": "f32", "median_us": 202.6, "min_us": 184.3, "p99_us": 387.3, "gpu_median_us": 46.4, "achieved_gflops": 10.3512, "opencl_baseline_us": 870.7, "ratio": 4.29763, "target_ratio": 0.33, "result": "PASS"},
-    {"shape": "1x2048x2048", "dtype": "f32", "median_us": 459.8, "min_us": 356.6, "p99_us": 568, "gpu_median_us": 215.84, "achieved_gflops": 18.244, "opencl_baseline_us": 2378.8, "ratio": 5.17355, "target_ratio": 0.33, "result": "PASS"}
+    {"shape": "1x1024x1024", "dtype": "f32", "median_us": 203.7, "min_us": 180.1, "p99_us": 1271.4, "gpu_median_us": 46.4, "achieved_gflops": 10.2953, "opencl_baseline_us": 883.3, "ratio": 4.33628, "target_ratio": 0.33, "result": "PASS"},
+    {"shape": "1x2048x2048", "dtype": "f32", "median_us": 412.8, "min_us": 351.7, "p99_us": 692, "gpu_median_us": 216.96, "achieved_gflops": 20.3212, "opencl_baseline_us": 2338.9, "ratio": 5.66594, "target_ratio": 0.33, "result": "PASS"}
   ]
 }

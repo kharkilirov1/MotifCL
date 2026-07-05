@@ -1,0 +1,56 @@
+// RoPE "split half" layout: rotates the first half against the second half of
+// each head. Reused for backward via the inverse flag (negate angle), matching
+// the OpenCL rope_impl reuse. Mirrors kernels/attention.cl:rope_split_half_f32.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer OBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    int batch;
+    int tokens;
+    int channels;
+    int n_head;
+    int head_dim;
+    int rotary_dim;
+    int token_offset;
+    float theta;
+    int inverse;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    const int total = p.batch * p.tokens * p.channels;
+    if (gid >= total) return;
+    const int d = gid % p.head_dim;
+    const int c = gid % p.channels;
+    const int token = (gid / p.channels) % p.tokens;
+    const int b = gid / (p.tokens * p.channels);
+    const int head = c / p.head_dim;
+    if (head >= p.n_head) return;
+    const int half_dim = p.head_dim >> 1;
+    if (half_dim <= 0 || d >= half_dim * 2) {
+        outv[gid] = x[gid];
+        return;
+    }
+    int rd = p.rotary_dim <= 0 ? p.head_dim : p.rotary_dim;
+    rd = min(rd, p.head_dim);
+    rd = rd - (rd & 1);
+    const int rotate_pairs = rd >> 1;
+    const int pair_index = d < half_dim ? d : d - half_dim;
+    if (pair_index >= rotate_pairs) {
+        outv[gid] = x[gid];
+        return;
+    }
+    const float exponent = float(2 * pair_index) / float(p.head_dim);
+    float angle = float(p.token_offset + token) / pow(p.theta, exponent);
+    if (p.inverse != 0) angle = -angle;
+    const float cs = cos(angle);
+    const float sn = sin(angle);
+    const int base = (b * p.tokens + token) * p.channels + head * p.head_dim;
+    const float first  = x[base + pair_index];
+    const float second = x[base + half_dim + pair_index];
+    outv[gid] = (d < half_dim) ? (first * cs - second * sn) : (second * cs + first * sn);
+}

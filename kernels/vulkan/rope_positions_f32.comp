@@ -1,0 +1,50 @@
+// RoPE with per-token position ids (i32 positions table). Forward only — OpenCL
+// has no backward variant, so Vulkan matches that scope. Mirrors
+// kernels/attention.cl:rope_positions_f32.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) readonly buffer PBuf { int positions[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    int batch;
+    int tokens;
+    int channels;
+    int n_head;
+    int head_dim;
+    int rotary_dim;
+    float theta;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    const int total = p.batch * p.tokens * p.channels;
+    if (gid >= total) return;
+    const int d = gid % p.head_dim;
+    const int c = gid % p.channels;
+    const int token = (gid / p.channels) % p.tokens;
+    const int b = gid / (p.tokens * p.channels);
+    const int head = c / p.head_dim;
+    if (head >= p.n_head) return;
+    int rd = p.rotary_dim <= 0 ? p.head_dim : p.rotary_dim;
+    rd = min(rd, p.head_dim);
+    rd = rd - (rd & 1);
+    if (d >= rd) {
+        outv[gid] = x[gid];
+        return;
+    }
+    int pos = positions[b * p.tokens + token];
+    if (pos < 0) pos = 0;
+    const int pair_d = d & ~1;
+    const float exponent = float(pair_d) / float(p.head_dim);
+    const float angle = float(pos) / pow(p.theta, exponent);
+    const float cs = cos(angle);
+    const float sn = sin(angle);
+    const int base = (b * p.tokens + token) * p.channels + head * p.head_dim;
+    const float even = x[base + pair_d];
+    const float odd  = x[base + pair_d + 1];
+    outv[gid] = (d == pair_d) ? (even * cs - odd * sn) : (even * sn + odd * cs);
+}

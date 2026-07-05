@@ -154,9 +154,11 @@ Vulkan является первичным backend'ом: persistent runtime (cac
 - scalar-scale Q8_0 x Q8_0 matmul (без autograd; остальные quant-layouts — OpenCL legacy)
 - non-causal unmasked F32 GQA batch=1 fwd+bwd (causal/windowed/masked — OpenCL legacy, явно отклоняются)
 - production `CounterStateLinear` U8: decode/inference/backward-input + fused state update (`apply_update_backward`)
+- embedding gather (`nn::Embedding::forward`) + `token_position_embedding` (token + position tables) — forward И backward (embedding weight gradient, position gradient) device-resident на Vulkan-тензорах
+- RoPE: `rope` (interleaved) с forward+backward через inverse-flag reuse, `rope_split_half`, `rope_positions`, `rope_positions_split_half` — все четыре варианта device-resident на Vulkan-тензорах
 - dispatch capture/replay (без `cl_mem`), батчированный тренировочный шаг (invariant 9)
 
-OpenCL остаётся optional legacy backend (регрессионный паритет + непортированные пути); `-DMOTIFCL_ENABLE_OPENCL=OFF` собирает полную библиотеку со стабом загрузчика. Остающиеся transition-гэпы: causal/masked/windowed attention, quant-layouts кроме scalar-scale Q8, `apply_update_seed` (dense grad_w), OpenCL `GraphExecutor` rebinding/арены (Vulkan-реплей — fixed-binding), embedding/rope/dropout и другие не перечисленные выше опы. Отдельно: scalar-scale Q8 matmul и standalone vector-API хелперы всё ещё идут через legacy one-shot dispatch (per-call pipeline, generated SPIR-V) — корректны, но не перенесены на кэшированный путь; это помеченный transition-остаток, не «done» по перф-инвариантам.
+OpenCL остаётся optional legacy backend (регрессионный паритет + непортированные пути); `-DMOTIFCL_ENABLE_OPENCL=OFF` собирает полную библиотеку со стабом загрузчика. Остающиеся transition-гэпы: causal/masked/windowed attention, quant-layouts кроме scalar-scale Q8, `apply_update_seed` (dense grad_w), OpenCL `GraphExecutor` rebinding/арены (Vulkan-реплей — fixed-binding), dropout и другие не перечисленные выше опы. Отдельно: scalar-scale Q8 matmul и standalone vector-API хелперы всё ещё идут через legacy one-shot dispatch (per-call pipeline, generated SPIR-V) — корректны, но не перенесены на кэшированный путь; это помеченный transition-остаток, не «done» по перф-инвариантам.
 
 Python bindings now expose `Backend.vulkan()`, `Backend.create()` runtime selection via `MOTIFCL_BACKEND=vulkan|vk`, `Backend.kind`, `is_vulkan()`, and `is_opencl()`.  Local verification note: current machine has no `pybind11` Python package/dev config, so the CMake Python target is skipped by configure and the binding source was not compiled here.
 
@@ -167,6 +169,11 @@ Latest verification (2026-07-03, RX 580):
 - OFF-сборка: команды в Slice 5 выше — 34/34 (Vulkan passed / OpenCL skipped), grep линковки standalone чист.
 - Perf-записи: `reports/vulkan-perf/SUMMARY.md` (регенерируется `build/port-vk/benchmarks/bench_vulkan_perf.exe` из корня; медиана 50 прогонов после 5 warmup; Vulkan GPU-время дополнительно из timestamp queries). Все опы PASS против бюджетов из docs/PORT_PROMPT.md; исторический скалярный microbench-результат 83.79 ms на 64^3 matmul устранён кэшем пайплайнов + tiled-кернелами (теперь ~0.2 ms wall, ~7 us GPU).
 - Инвариант 6/7/9 доказан флэт-таймингом 1000 реплеев в `test_vulkan_runtime_standalone` (вторая половина <= 1.5x первой).
+
+Latest verification (2026-07-05, embedding + RoPE slices E1–E2):
+
+- ON-сборка (`build/port-vk`): `ctest --test-dir build/port-vk --timeout 300` — **36/36 passed** (включая расширенные `test_vulkan_backend` / `test_vulkan_runtime_standalone` с embedding-gather/weight-backward/token+pos и четырьмя RoPE-вариантами, forward+backward parity vs CPU reference, inverse-roundtrip).
+- OFF-сборка (`build/codex-vulkan-off`, `-DMOTIFCL_ENABLE_OPENCL=OFF`): **36/36 passed** (Vulkan passed, OpenCL skipped), `ninja -t commands test_vulkan_runtime_standalone | grep -ci opencl` → 0 (OpenCL-free standalone witness, инвариант 2).
 
 ## Memory-native method на Vulkan (Slices R1-R3, 2026-07-05)
 
@@ -249,3 +256,173 @@ Witness (R3):
   активации между forward и backward; backward создаёт кратковременный recompute-graph.
 - Concat/slice ops: обойдены pair API; нужны только если reversible block стекать в
   `nn::Sequential` (требует single-Tensor forward).
+
+## Embedding + RoPE на Vulkan (Slices E1–E2, 2026-07-05)
+
+**Контекст:** `nn::Embedding::forward` (token embedding gather), `token_position_embedding`
+(token + position tables, используется transformer forward), и четыре варианта RoPE
+(`rope`, `rope_split_half`, `rope_positions`, `rope_positions_split_half` — выбираются
+`ModernSelfAttention::apply_rope`/`apply_rope_positions` по конфигу) были последним
+блоком transformer forward, остававшимся на OpenCL-пути `kernels.get(...)` +
+`.buffer()`. Эти срезы переносят их на Vulkan-тензорное, device-resident API с
+cached-pipeline dispatch и full autograd, тем же шаблоном что `sub`/`add`/`rmsnorm`
+(Slices R1–R4).
+
+**Статус:** ВЫПОЛНЕНО. Все инварианты 1–5 из основного protocol выполнены для каждого
+среза.
+
+### Slice E1 — embedding (gather + weight backward + token+position + position backward)
+
+- `kernels/vulkan/embedding_gather_f32_i32.comp` — elementwise coalesced gather
+  (1-element-per-lane, `local_size=64`), бит-в-бит с
+  `kernels/embedding.cl:embedding_gather_f32_i32` (0 на OOB индексе).
+- `kernels/vulkan/embedding_weight_backward_f32_i32.comp` — per-`(vocab, d)` lane с
+  loop over `token_count`, суммирует град в выбранные строки. Зеркало
+  `kernels/embedding.cl:embedding_weight_backward_f32_i32`.
+- `kernels/vulkan/token_position_embedding_f32_i32.comp` — gather token + position
+  table, `pos = token_linear % seq_len`, бит-в-бит с OpenCL-кернелом.
+- `kernels/vulkan/position_embedding_backward_f32_i32.comp` — суммирует град по
+  batch-измерению в position table; host пред-zero'ит таблицу (контракт
+  `position_shape[0] >= seq_len`).
+- `src/runtime/vulkan_backend.cpp` — `run_vulkan_embedding_gather`,
+  `run_vulkan_embedding_weight_backward`, `run_vulkan_token_position_embedding`,
+  `run_vulkan_position_embedding_backward` через `dispatch_cached` против embedded
+  SPIR-V (`vulkan_spirv_kernels.inc`); validate shapes, buffer sizes, конечность
+  гиперпараметров.
+- `src/nn/embedding.cpp` — `Embedding::forward`, `token_position_embedding`, и обе
+  backward helper'а (`embedding_weight_backward`, `position_embedding_backward`)
+  имеют `if (backend.is_vulkan())` ветку поверх существующего OpenCL-пути; autograd
+  nodes (`EmbeddingBackwardNode`, `TokenPositionEmbeddingBackwardNode`) сохранены.
+
+Witness (E1):
+- `tests/test_vulkan_runtime_standalone.cpp` — OpenCL-free (инвариант 2),
+  device-resident parity vs CPU reference (инвариант 5) для всех четырёх операций;
+  weight backward OOB-row zeroing, position backward batch-summation.
+- `tests/test_vulkan_backend.cpp` — Tensor-level parity: `nn::Embedding` forward +
+  `weight.backward(grad_out)` vs CPU gather/scatter, `token_position_embedding`
+  forward + backward (token + position grads) vs CPU.
+
+### Slice E2 — RoPE (interleaved + split-half, fixed-offset + per-token positions)
+
+- `kernels/vulkan/rope_f32.comp` — interleaved pair layout с `inverse` push-const flag;
+  переиспользуется для backward через инверсию знака угла (тот же трюк, что OpenCL
+  `rope_impl` helper). Бит-в-бит с `kernels/attention.cl:rope_f32`.
+- `kernels/vulkan/rope_split_half_f32.comp` — split-half layout (первые `head_dim/2`
+  вращаются против вторых), с `inverse` flag; зеркало `rope_split_half_f32`.
+- `kernels/vulkan/rope_positions_f32.comp` — per-token i32 positions table (forward
+  only, соответствует OpenCL — backward отсутствует).
+- `kernels/vulkan/rope_positions_split_half_f32.comp` — split-half + positions
+  (forward only).
+- `src/runtime/vulkan_backend.cpp` — `run_vulkan_rope`, `run_vulkan_rope_positions`,
+  `run_vulkan_rope_split_half`, `run_vulkan_rope_positions_split_half` через
+  `dispatch_cached`; validate `head_dim*n_head == channels`, положительность theta.
+- `src/ops/attention.cpp` — `rope_impl` (покрывает `rope` + `rope_split_half` через
+  `split_half`/`inverse` флаги) и `rope_positions`/`rope_positions_split_half` имеют
+  `if (x.backend().is_vulkan())` ветки; `RopeBackwardNode::backward` переиспользует
+  ту же ветку через `inverse=true`.
+
+Witness (E2):
+- `tests/test_vulkan_runtime_standalone.cpp` — OpenCL-free, device-resident: rope
+  forward parity, rope inverse roundtrip (`rope(rope(x), inverse=true) == x`),
+  rope_split_half / rope_positions / rope_positions_split_half forward parity.
+- `tests/test_vulkan_backend.cpp` — Tensor-level: `rope` forward + backward (vs CPU
+  ref, угол — позиция в последовательности `t`, не flat row), `rope_split_half`,
+  `rope_positions`, `rope_positions_split_half` forward parity vs CPU refs.
+
+### Embedding/RoPE — что НЕ сделано (явно)
+
+- Fused decode kernels (`qk_norm_rope_decode_f32`,
+  `qk_norm_rope_cache_append_decode_f32`, `rope_cache_append_decode_f32`) —
+  inference-only оптимизации, остаются OpenCL legacy (помечены в remaining gaps).
+- Quantized embedding (`embedding_gather_transposed_q4_k_i32` /
+  `q5_k_i32`) — отдельный quant-layout срез.
+- `rope_positions` / `rope_positions_split_half` backward — отсутствует в OpenCL,
+  Vulkan соответствует этому scope.
+- Dropout (отдельный gap).
+
+## Bug-audit fixes (Slice F: scalar ops + OpenCL-only guards, 2026-07-05)
+
+Полное ревью Vulkan-порта (см. `docs/superpowers/plans/` и git history) выявило
+класс latent-багов: ops, которые на Vulkan-тензорах тихо доходили до `kernels.get(...)`
+и падали на null OpenCL context, либо пропускали validation. Slice F закрывает
+самые критичные находки ревью.
+
+### F1 — Elementwise scalar device-path (`scale`/`mul_scalar`/`add_scalar`)
+
+`SubBackward`/`MulBackward`/`DivBackward`/`ScalarBackward`/`DropoutBackward(p==0)`
+все вызывают `scale`/`mul_scalar`, у которого раньше не было Vulkan-ветки —
+backward chain падал на Vulkan-тензорах. Добавлено:
+
+- `kernels/vulkan/mul_scalar_f32.comp`, `kernels/vulkan/add_scalar_f32.comp` —
+  elementwise coalesced (1-element-per-lane, `local_size=64`), бит-в-бит с
+  `kernels/basic.cl`.
+- `run_vulkan_mul_scalar`/`run_vulkan_add_scalar` (vulkan_backend.cpp) —
+  `dispatch_cached`, validate finite scalar + element count + buffer sizes.
+- `src/ops/basic_ops.cpp::elementwise_scalar` теперь имеет `is_vulkan()` ветку.
+
+Witness: `tests/test_vulkan_backend.cpp` — `scale`/`add_scalar` forward parity
+vs CPU; **`sub` backward с `b.requires_grad=true`** (chain `SubBackward → scale(-1)`)
+теперь проходит на Vulkan (раньше crash).
+
+### F2 — Явные guards для OpenCL-only ops (CRITICAL review findings)
+
+Раньше эти ops падали с null-context crash на Vulkan-тензорах. Теперь они
+`MCL_CHECK(!is_vulkan(), ...)` с понятным сообщением, указывающим обход
+(use OpenCL backend / use_bias=false / dropout_p=0). Список:
+
+- `nn::Embedding::forward` quantized-transposed (Q4_K/Q5_K) gather (M3).
+- `add_bias_rows` (C1) — закрывает `nn::Linear(use_bias=true)` на Vulkan.
+- `mul`/`div` binary elementwise через `elementwise_binary` (C2 partial).
+- `scale_inplace`/`add_inplace` (in-place нужен отдельный device kernel —
+  readonly+writeonly aliasing в одном Vulkan dispatch это UB).
+- `qkv_split` (C3).
+- `kv_cache_append` / `kv_cache_append_positions` / `paged_kv_cache_append` /
+  `paged_grouped_query_attention` (C5/C6).
+- `dropout(p>0)` (C6).
+- `unary`/`unary_backward_kernel` → покрывает `relu`/`silu`/`exp`/`sqrt`/`rsqrt`
+  и `relu_backward` (gelu имеет собственные Vulkan-ветки, не страдает) (H4).
+- `sum_rows` / `mul_rows` / `add_bias_gelu_rows` (H5).
+- Fused decode predicates `can_use_fused_qk_norm_rope_decode`,
+  `can_use_fused_qk_norm_rope_cache_append_decode`,
+  `can_use_fused_rope_cache_append_decode`,
+  `can_use_fused_packed_qkv_q4_0_decode`,
+  `can_use_fused_packed_swiglu_q4_0_decode` — все возвращают false на Vulkan
+  тензорах (C4).
+
+Witness: `tests/test_vulkan_backend.cpp::expect_vulkan_guard` — 11 ops
+проверены на то, что они громко `MCL_CHECK`-падают с упоминанием Vulkan (а не
+crash'ат на null context).
+
+### F3 — Validation gaps
+
+- `run_vulkan_compact_counter_apply_update_fused` теперь проверяет
+  `std::isfinite(lr/lr_scale/rms_beta)` и `rms_eps >= 0` (раньше NaN/Inf
+  тихо отравляли весь update) (M4).
+- `run_vulkan_i8_scaled_matmul` теперь reject'ит вызов при активном
+  `batch_active()` / `capture_active()` — `dispatch_storage_buffers` делает
+  собственный submit и не участвует в batch/capture recording (H1).
+- `run_vulkan_rope[_positions][_split_half]` reject'ят shape product overflow
+  перед `static_cast<uint32_t>((total+63)/64)` (L1).
+- `run_vulkan_embedding_gather` / `run_vulkan_embedding_weight_backward` /
+  `run_vulkan_token_position_embedding` reject'ят `int32` push-constant
+  overflow для `n = a*b` products (L2).
+
+### Slice F — что НЕ сделано (явно)
+
+Реальные Vulkan device-kernels для перечисленных в F2 ops — это следующий срез
+(отдельные .comp + run_vulkan_* + wiring). Slice F только превращает silent
+crash в громкое `MCL_CHECK` с понятным сообщением + закрывает backward chain
+через scalar device-path. Пользователь может:
+
+- использовать OpenCL backend для неподдерживаемых ops, либо
+- убрать проблемную фичу (`use_bias=false`, `dropout_p=0`, не-Q4_K embedding).
+
+Latest verification (2026-07-05, после Slice F):
+
+- ON-сборка (`build/port-vk`): `ctest --test-dir build/port-vk --timeout 300` —
+  **36/36 passed** (включая новые scalar-parity + sub-backward-chain + 11
+  guard-enforcement свидетелей в `test_vulkan_backend`, и mul_scalar/add_scalar
+  device-resident свидетелей + non-fine-validation reject'ы в
+  `test_vulkan_runtime_standalone`).
+- OFF-сборка (`build/codex-vulkan-off`): **36/36 passed** (Vulkan passed /
+  OpenCL skipped), `ninja -t commands test_vulkan_runtime_standalone | grep -ci opencl` → **0**.
