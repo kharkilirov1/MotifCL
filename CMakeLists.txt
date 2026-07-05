@@ -130,6 +130,7 @@ set(MOTIFCL_SOURCES
     src/nn/module.cpp
     src/nn/linear.cpp
     src/nn/compact_counter.cpp
+    src/nn/reversible.cpp
     src/nn/embedding.cpp
     src/nn/rmsnorm.cpp
     src/nn/attention.cpp

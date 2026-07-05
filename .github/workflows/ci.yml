@@ -231,6 +231,7 @@ jobs:
         run: >
           cmake --build build/vulkan-off --parallel 2
           --target test_vulkan_runtime_standalone test_vulkan_backend test_vulkan_train_step
+          test_vulkan_reversible test_vulkan_memory_native
 
       - name: Assert the standalone witness links without OpenCL
         run: |
@@ -242,4 +243,4 @@ jobs:
       - name: Run Vulkan-only tests (skip cleanly without a GPU)
         run: >
           ctest --test-dir build/vulkan-off --output-on-failure
-          -R "test_vulkan_runtime_standalone|test_vulkan_backend|test_vulkan_train_step"
+          -R "test_vulkan_runtime_standalone|test_vulkan_backend|test_vulkan_train_step|test_vulkan_reversible|test_vulkan_memory_native"

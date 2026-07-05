@@ -411,6 +411,11 @@ VulkanOpResult run_vulkan_add(VulkanRuntime& runtime,
                               const VulkanBuffer& b,
                               VulkanBuffer& out,
                               std::size_t elements);
+VulkanOpResult run_vulkan_sub(VulkanRuntime& runtime,
+                              const VulkanBuffer& a,
+                              const VulkanBuffer& b,
+                              VulkanBuffer& out,
+                              std::size_t elements);
 VulkanOpResult run_vulkan_sgd_update(VulkanRuntime& runtime,
                                       const VulkanBuffer& param,
                                       const VulkanBuffer& grad,

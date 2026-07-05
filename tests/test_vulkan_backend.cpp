@@ -309,6 +309,18 @@ int main() {
                        "Vulkan-native Tensor add output mismatch");
             }
 
+            // Tensor-level sub parity on Vulkan (mirror of add; needed for reversible inverse coupling).
+            auto VSubY = sub(VAddA, VAddB);
+            const auto vsub_y = VSubY.to_vector<float>();
+            expect(vsub_y.size() == add_a.size(),
+                   "Vulkan-native Tensor sub must return input-sized output");
+            if (vsub_y.size() == add_a.size()) {
+                for (std::size_t i = 0; i < add_a.size(); ++i) {
+                    expect(std::fabs(vsub_y[i] - (add_a[i] - add_b[i])) <= 1e-6f,
+                           "Vulkan-native Tensor sub output mismatch");
+                }
+            }
+
             auto VSgdParam = Tensor::from_cpu(vk_backend, {2, 2}, DType::F32, add_a.data());
             auto VSgdGrad = Tensor::from_cpu(vk_backend, {2, 2}, DType::F32, add_b.data());
             sgd_update(VSgdParam, VSgdGrad, 0.1f);

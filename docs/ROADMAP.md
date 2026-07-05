@@ -3,6 +3,20 @@
 This file tracks the remaining engineering boundaries after the modern HF
 compatibility pass.
 
+## Memory-native training method on Vulkan (slices R1-R3 done; 2026-07-05)
+
+- Existing (Vulkan-native): `nn::CounterStateLinear` (counter synapse — pillar A:
+  decode/forward/backward_input + fused `apply_update_backward`), `nn::ReversibleBlock`
+  (reversible activations — pillar B: NoGrad forward + inverse-recovery + recompute backward
+  through `autograd::IsolatedBackwardScope`). `sub` Vulkan device path added for inverse
+  coupling. OpenCL-free witnesses `test_vulkan_reversible`, `test_vulkan_memory_native`
+  (counter recovery ternary-acc 100%, 4-block reversible+counter stack loss 7.60 → 0.064).
+- Missing: attention coupling (`nn::multihead_attention` OpenCL-only; Vulkan-GQA covers
+  batch=1 non-causal only — need batched+causal Vulkan GQA for reversible attention coupling),
+  concat/slice ops (obviated by pair API; needed only if reversible block is stacked in
+  `nn::Sequential`), numerical peak-activation-memory measurement (currently qualitative),
+  integration with `ModernTransformerBlock`.
+
 ## Highest-impact remaining work
 
 1. **Quantized modern inference follow-up**

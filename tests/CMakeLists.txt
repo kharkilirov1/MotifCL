@@ -32,6 +32,8 @@ set(MOTIFCL_TESTS
     test_artifact_fuzz
     test_split_qkv_train_repro
     test_vulkan_train_step
+    test_vulkan_reversible
+    test_vulkan_memory_native
 )
 
 # MinGW test executables need the toolchain runtime DLLs (libstdc++-6.dll,

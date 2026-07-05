@@ -172,13 +172,26 @@ Recompute через attention корректен; forward не хранит а�
 | Counter-слой + autograd-узел | `include/motifcl/nn/compact_counter.hpp`, `src/nn/compact_counter.cpp` |
 | Kernel-route (counter → compact_counter.cl) | `src/runtime/backend.cpp` |
 | Counter-регрессия (teacher-recovery) | `tests/test_counter_state.cpp` |
-| Reversible-регрессия (на attention) | `tests/test_reversible_attn.cpp` |
+| Reversible Module + autograd-узел (Vulkan-native) | `include/motifcl/nn/reversible.hpp`, `src/nn/reversible.cpp`, `tests/test_vulkan_reversible.cpp`, `tests/test_vulkan_memory_native.cpp` |
+| Reversible-регрессия (на attention, OpenCL legacy) | `tests/test_reversible_attn.cpp` |
 | f16 matmul autograd (`F16MatMulBackward`, f32-точный backward + cast) | `src/ops/matmul.cpp`, `tests/test_f16_matmul_autograd.cpp` |
 | Дизайн / точки врезки | `docs/COUNTER_STATE_NATIVE_DESIGN.md` |
 
-Reversible пока собирается из примитивов (`add`/`sub`/`Linear`/`multihead_attention`) с
-`NoGradGuard`-forward; оформление как `nn::ReversibleBlock` Module требует concat/slice-ops
-и multi-output autograd-узла (см. §7).
+Reversible теперь упакован как `nn::ReversibleBlock` Module (`include/motifcl/nn/reversible.hpp`,
+`src/nn/reversible.cpp`) и работает на Vulkan-тензорах без OpenCL. Coupling API:
+`std::pair<Tensor,Tensor> forward(x1, x2)`. Реализация — `NoGradGuard`-forward (активации
+не хранятся) + собственный backward-узел с inverse-recovery (`x2 = y2 − G(y1)`, `x1 = y1 − F(x2)`,
+под NoGrad) и recompute-forward + nested backward под `autograd::IsolatedBackwardScope`
+(чтобы nested backward запустил свежий `BackwardEngine` и под `"set_enabled(true)"`-блоком,
+т.к. внешний `BackwardEngine::run` оборачивает topo-loop в `NoGradGuard`). Multi-output
+обрабатывается per-output инстансами backward-узла с `part`-дискриминатором (как `QKVSplitBackwardNode`),
+без изменения базового `autograd::Node`. Coupling-модули F/G — любые `Module` с
+`forward(const Tensor&)`: `nn::Linear` (без bias, т.к. `add_bias_rows` пока OpenCL-only),
+`nn::Sequential(Linear, GELU)`, `nn::CounterStateLinear`. OpenCL-free witness:
+`tests/test_vulkan_reversible.cpp` (parity vs reference, rel-err ~3e-5).
+OpenCL-free memory-native end-to-end witness (counter+reversible вместе):
+`tests/test_vulkan_memory_native.cpp` (counter recovery тернар-acc 100%,
+4-block reversible+counter stack loss 7.60 → 0.064 за 50 шагов).
 
 ---
 
@@ -245,8 +258,16 @@ Reversible пока собирается из примитивов (`add`/`sub`/
 
 ## 7. Границы и открытые вопросы
 
-- **Reversible как Module:** нужны concat/slice-ops + multi-output autograd-узел для
-  `nn::ReversibleBlock`; числовой замер пиковой памяти активаций (сейчас — качественный).
+- ~~**Reversible как Module:** нужны concat/slice-ops + multi-output autograd-узел для
+  `nn::ReversibleBlock`; числовой замер пиковой памяти активаций (сейчас — качественный).~~
+  **Реализовано (Vulkan-first, 2026-07-05):** `nn::ReversibleBlock` работает на Vulkan-тензорах
+  (`include/motifcl/nn/reversible.hpp`, `src/nn/reversible.cpp`), OpenCL-free witnesses
+  `tests/test_vulkan_reversible.cpp` (parity vs reference) и `tests/test_vulkan_memory_native.cpp`
+  (end-to-end counter+reversible). Coupling F/G ∈ {Linear (без bias), Sequential(Linear,GELU),
+  CounterStateLinear}; attention-coupling требует batched+causal Vulkan GQA (отдельный план).
+  Остаются открытыми: числовой замер пиковой памяти активаций (сейчас — качественный),
+  concat/slice ops (обойдены pair API, но нужны для стекания в `Sequential`) и stacking
+  поверх `ModernTransformerBlock`.
 - **In-backward update несовместим** с grad-accumulation, weight-sharing, DDP all-reduce,
   activation-checkpointing — нужен явный планировщик; целевой режим — eager-training.
 - **Тернаризация** структурно ограничивает точную FP32-регрессию (ternary-QAT 62× на

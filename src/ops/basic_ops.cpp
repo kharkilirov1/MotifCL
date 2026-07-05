@@ -74,6 +74,31 @@ Tensor add_vulkan_f32_device(const Tensor& a, const Tensor& b) {
     return out;
 }
 
+// sub Vulkan helpers — mirror add. Reused for inverse coupling in reversible blocks.
+bool vulkan_sub_supported(const Tensor& a, const Tensor& b) {
+    const bool base = a.dtype() == DType::F32 &&
+                      b.dtype() == DType::F32 &&
+                      a.shape() == b.shape() &&
+                      a.backend_ptr() == b.backend_ptr() &&
+                      a.numel() > 0;
+    if (!base) return false;
+    // sub on Vulkan only needs the device-resident path (no standalone vector
+    // fallback for host-staging tensors — call sites use real Vulkan backends).
+    return a.backend().is_vulkan();
+}
+
+Tensor sub_vulkan_f32_device(const Tensor& a, const Tensor& b) {
+    auto out = Tensor::empty(a.backend(), a.shape(), DType::F32);
+    const auto result = run_vulkan_sub(a.backend().vulkan_runtime(),
+                                       a.storage().vulkan_buffer,
+                                       b.storage().vulkan_buffer,
+                                       out.storage().vulkan_buffer,
+                                       static_cast<std::size_t>(a.numel()));
+    MCL_CHECK(result.success, std::string("vulkan sub f32 failed: ") + result.error);
+    autograd::record_op("sub_vulkan_f32", {a.id(), b.id()}, {out.id()});
+    return out;
+}
+
 Tensor elementwise_binary(const Tensor& a, const Tensor& b, const std::string& kernel_name) {
     require_f32_same_shape(a, b, kernel_name.c_str());
     auto out = Tensor::empty(a.backend(), a.shape(), DType::F32);
@@ -397,6 +422,12 @@ Tensor add_broadcast(const Tensor& a, const Tensor& b) {
 }
 
 Tensor sub(const Tensor& a, const Tensor& b) {
+    if (a.shape() == b.shape() && a.backend().is_vulkan() && vulkan_sub_supported(a, b)) {
+        auto out = sub_vulkan_f32_device(a, b);
+        attach_binary_grad(out, a, b, std::make_shared<SubBackward>(a, b));
+        return out;
+    }
+    MCL_CHECK(!a.backend().is_vulkan(), "vulkan backend does not support this sub shape");
     auto out = elementwise_binary(a, b, "sub_f32");
     attach_binary_grad(out, a, b, std::make_shared<SubBackward>(a, b));
     return out;

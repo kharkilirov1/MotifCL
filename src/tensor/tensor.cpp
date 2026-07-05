@@ -94,7 +94,26 @@ struct BackwardEngine {
         }
     }
 };
+}  // close anonymous namespace
+
+// IsolatedBackwardScope save/restore the thread-local active backward engine
+// pointer (defined in the anonymous namespace above). Exposed through two
+// internal accessor functions declared in <motifcl/autograd/node.hpp> so the
+// IsolatedBackwardScope RAII type itself can live in tape.cpp next to
+// NoGradGuard, with no BackwardEngine type leakage across TUs.
+namespace autograd {
+
+void* _save_and_clear_active_backward_engine() {
+    void* saved = g_active_backward_engine;
+    g_active_backward_engine = nullptr;
+    return saved;
 }
+
+void _restore_active_backward_engine(void* engine) {
+    g_active_backward_engine = static_cast<BackwardEngine*>(engine);
+}
+
+} // namespace autograd
 
 namespace {
 

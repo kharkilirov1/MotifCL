@@ -167,3 +167,85 @@ Latest verification (2026-07-03, RX 580):
 - OFF-сборка: команды в Slice 5 выше — 34/34 (Vulkan passed / OpenCL skipped), grep линковки standalone чист.
 - Perf-записи: `reports/vulkan-perf/SUMMARY.md` (регенерируется `build/port-vk/benchmarks/bench_vulkan_perf.exe` из корня; медиана 50 прогонов после 5 warmup; Vulkan GPU-время дополнительно из timestamp queries). Все опы PASS против бюджетов из docs/PORT_PROMPT.md; исторический скалярный microbench-результат 83.79 ms на 64^3 matmul устранён кэшем пайплайнов + tiled-кернелами (теперь ~0.2 ms wall, ~7 us GPU).
 - Инвариант 6/7/9 доказан флэт-таймингом 1000 реплеев в `test_vulkan_runtime_standalone` (вторая половина <= 1.5x первой).
+
+## Memory-native method на Vulkan (Slices R1-R3, 2026-07-05)
+
+**Контекст:** memory-native training method (см. `docs/MEMORY_NATIVE_TRAINING_METHOD.md`) — две
+совместные компоненты: (A) finite-state counter synapse (`nn::CounterStateLinear`, 0.75 байт/вес
+packed state, fused in-backward update); (B) reversible activations (forward без хранения
+активаций, backward через inverse-recovery + recompute). Цель — обе компоненты полностью
+работают на Vulkan-тензорах без OpenCL-контекста.
+
+**Статус:** ВЫПОЛНЕНО для Linear/Counter coupling; attention coupling требует batched+causal
+Vulkan GQA (отдельный план). Все инварианты 1-10 из `docs/PORT_PROMPT.md` выполнены для
+каждого среза.
+
+### Slice R1 — `sub` Vulkan device path
+
+Требовался для inverse coupling: `x2 = y2 − G(y1)`, `x1 = y1 − F(x2)`. Без Vulkan-пути `sub`
+обратное восстановление входов в reversible backward уходило бы в OpenCL.
+
+- `kernels/vulkan/sub_f32.comp` — elementwise coalesced, 1-element-per-lane (local_size=64).
+- `src/runtime/vulkan_backend.cpp` — `run_vulkan_sub` (device-resident, `dispatch_cached`).
+- `src/ops/basic_ops.cpp` — `sub()` теперь имеет `is_vulkan()` branch + `vulkan_sub_supported`
+  gate (зеркало `add`). Autograd через `SubBackward` (scale(grad, -1) на `b`).
+- Standalone vector-API overload намеренно опущен (host-staging shim не на hot path;
+  см. комментарий в `vulkan_backend.cpp`).
+
+Witness (R1):
+- `tests/test_vulkan_runtime_standalone.cpp` — OpenCL-free (инвариант 2), device-resident
+  parity vs CPU (инвариант 5), pipeline-cache через 1000-replay flat-timing (инвариант 6/7/9).
+- `tests/test_vulkan_backend.cpp` — Tensor-level parity через `motifcl::sub`.
+- Perf: `reports/vulkan-perf/sub_f32.json` — vk p50 176.6 us, gpu 29.44 us, opencl 302.5 us,
+  ratio 1.71×, бюджет 0.6 PASS.
+
+### Slice R2 — `nn::ReversibleBlock` Module
+
+- `include/motifcl/nn/reversible.hpp`, `src/nn/reversible.cpp` — Module с
+  `std::pair<Tensor,Tensor> forward(x1, x2)` (non-virtual; базовый `forward(const Tensor&)`
+  падает через `MCL_CHECK`).
+- Реализация: forward под `NoGradGuard` (активации F/G не хранятся); после NoGrad attach
+  per-output `ReversibleBackwardNode` с `part`-дискриминатором (как `QKVSplitBackwardNode` —
+  без изменения базового `autograd::Node`). Backward накапливает оба grad'а (через
+  shared `PendingGrads`), затем под `NoGradGuard` делает inverse-recovery
+  (`x2r = sub(y2, g->forward(y1)); x1r = sub(y1, f->forward(x2r))`), recompute-forward под
+  `autograd::set_enabled(true)` + `IsolatedBackwardScope` (свежий `BackwardEngine`), и
+  диспатчит восстановленные грады в исходные `x1`/`x2` через стандартный `x.backward(...)`.
+- `include/motifcl/autograd/node.hpp` + `src/tensor/tensor.cpp` + `src/autograd/tape.cpp` —
+  новый `autograd::IsolatedBackwardScope` (RAII save/clear/restore `g_active_backward_engine`
+  через внутренние accessor'ы `_save_and_clear_active_backward_engine` /
+  `_restore_active_backward_engine`). Необходим т.к. `BackwardEngine::run` оборачивает topo-loop
+  в `NoGradGuard` (`src/tensor/tensor.cpp:75`) — без scope nested backward в Node::backward
+  либо не запускался бы (filled pending map активного engine, не содержащего свежий граф),
+  либо не мог бы attach grad_fn к forward-опам recompute.
+
+Witness (R2):
+- `tests/test_vulkan_reversible.cpp` — 2-block reversible stack (Linear+GELU coupling),
+  parity vs grad-enabled reference, rel-err ~3e-5 (tolerance 1e-4). OpenCL-free.
+
+### Slice R3 — Counter coupling (memory-native full A+B на Vulkan)
+
+End-to-end memory-native training loop на Vulkan без OpenCL: reversible stack с
+`nn::CounterStateLinear` coupling.
+
+Witness (R3):
+- `tests/test_vulkan_memory_native.cpp`:
+  - Witness A: single `CounterStateLinear` teacher-recovery на Vulkan — тернарный teacher
+    восстанавливается, last_loss → 0, ternary-acc 100% (бит-в-бит паритет с OpenCL regression
+    `test_counter_state.cpp`).
+  - Witness B: 4-block reversible stack с counter coupling, loss 7.60 → 0.064 за 50 шагов
+    (100× уменьшение) — pipeline (forward + recompute-backward + counter state update)
+    полностью на Vulkan device-resident тензорах.
+
+### Memory-native — что НЕ сделано (явно)
+
+- Attention coupling: `nn::multihead_attention` OpenCL-only; Vulkan-GQA покрывает только
+  batch=1 non-causal. Для reversible attention coupling нужен batched+causal Vulkan GQA
+  (отдельный план).
+- `apply_update_seed` reference path (`dense grad_w`): намеренно OpenCL-only; per
+  `docs/MEMORY_NATIVE_TRAINING_METHOD.md` §2.7 memory-native метод не материализует ∇W, и
+  reference path нужен только для debug/unit-тестов.
+- Числовой замер пиковой памяти активаций (сейчас — качественный): forward в NoGrad не хранит
+  активации между forward и backward; backward создаёт кратковременный recompute-graph.
+- Concat/slice ops: обойдены pair API; нужны только если reversible block стекать в
+  `nn::Sequential` (требует single-Tensor forward).

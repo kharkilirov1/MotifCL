@@ -6607,6 +6607,32 @@ VulkanOpResult run_vulkan_add(VulkanRuntime& runtime,
                                    static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
 }
 
+VulkanOpResult run_vulkan_sub(VulkanRuntime& runtime,
+                              const VulkanBuffer& a,
+                              const VulkanBuffer& b,
+                              VulkanBuffer& out,
+                              std::size_t elements) {
+    VulkanOpResult result;
+    constexpr std::size_t kMaxElements = 16 * 1024 * 1024;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (elements == 0) return fail("Vulkan sub requires non-zero element count");
+    if (elements > kMaxElements * 16) return fail("Vulkan sub element count exceeds supported range");
+    const auto nbytes = elements * sizeof(float);
+    if (a.nbytes() < nbytes) return fail("Vulkan sub A buffer is too small");
+    if (b.nbytes() < nbytes) return fail("Vulkan sub B buffer is too small");
+    if (out.nbytes() < nbytes) return fail("Vulkan sub output buffer is too small");
+
+    const struct {
+        std::uint32_t n;
+    } push{static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&a, &b, &out};
+    return runtime.dispatch_cached(vkspirv::k_sub_f32, vkspirv::k_sub_f32_words, buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
 VulkanOpResult run_vulkan_sgd_update(VulkanRuntime& runtime,
                                       const VulkanBuffer& param,
                                       const VulkanBuffer& grad,
@@ -7228,6 +7254,12 @@ VulkanF32TensorResult run_vulkan_add(const std::vector<float>& a,
     std::memcpy(result.output.data(), run.outputs[0].data(), run.outputs[0].size());
     return result;
 }
+
+// Standalone vector-API overload for sub is intentionally omitted: the
+// host-staging path is not on the memory-native training hot path (only
+// device-resident dispatch is used). sub parity is covered through
+// run_vulkan_sub(runtime, ...) in the standalone test and through motifcl::sub
+// in test_vulkan_backend.
 
 VulkanF32TensorResult run_vulkan_i8_scaled_matmul(const std::vector<std::int8_t>& a,
                                                   const std::vector<std::int8_t>& b,

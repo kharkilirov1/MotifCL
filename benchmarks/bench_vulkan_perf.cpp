@@ -577,6 +577,16 @@ int main(int argc, char** argv) {
                      auto out = motifcl::add(fx->t0, fx->t2);
                      backend_ptr->finish();
                  });
+        add_case("sub_f32", 0.60, rw3,
+                 [fx, &runtime]() -> std::string {
+                     auto r = motifcl::run_vulkan_sub(runtime, fx->b0, fx->b2, fx->b3, fx->rows * fx->cols);
+                     return r.success ? std::string() : r.error;
+                 },
+                 [fx, backend_ptr]() {
+                     motifcl::autograd::NoGradGuard guard;
+                     auto out = motifcl::sub(fx->t0, fx->t2);
+                     backend_ptr->finish();
+                 });
         add_case("sgd_update_f32", 0.40, rw3,
                  [fx, &runtime]() -> std::string {
                      auto r = motifcl::run_vulkan_sgd_update(runtime, fx->b0, fx->b2, fx->b3,

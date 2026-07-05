@@ -73,6 +73,11 @@ int main() {
     expect(!invalid_add.success, "standalone Vulkan add must reject mismatched input sizes");
     expect(!invalid_add.error.empty(), "standalone Vulkan add validation failure must explain why");
 
+    // sub validation happens inside run_vulkan_sub(runtime, ...) device-resident
+    // dispatch (no standalone vector-API overload by design — see note in
+    // vulkan_backend.cpp). The device-resident parity block below covers
+    // mismatched-size rejection through that path.
+
     const auto invalid_q8 = run_vulkan_i8_scaled_matmul({1, 2}, {1, 2, 3}, 1, 2, 2, 1.0f, 1.0f);
     expect(!invalid_q8.success, "standalone Vulkan i8 matmul must reject malformed B size");
     expect(!invalid_q8.error.empty(), "standalone Vulkan i8 matmul validation failure must explain why");
@@ -132,6 +137,23 @@ int main() {
         for (std::size_t i = 0; i < device_add_out.size(); ++i) {
             expect(close_enough(device_add_out[i], device_add_a[i] + device_add_b[i], 1.0e-6f),
                    "persistent Vulkan add output mismatch");
+        }
+
+        // sub device-resident path (mirror of add above); required for reversible inverse coupling.
+        const std::vector<float> device_sub_a = {1.0f, -2.0f, 3.5f, 4.0f};
+        const std::vector<float> device_sub_b = {4.0f, 5.0f, -0.5f, -1.0f};
+        auto sub_a_buffer = runtime.create_buffer(device_sub_a.size() * sizeof(float), device_sub_a.data());
+        auto sub_b_buffer = runtime.create_buffer(device_sub_b.size() * sizeof(float), device_sub_b.data());
+        auto sub_out_buffer = runtime.create_buffer(device_sub_a.size() * sizeof(float));
+        const auto sub_dispatch = run_vulkan_sub(runtime, sub_a_buffer, sub_b_buffer, sub_out_buffer,
+                                                 device_sub_a.size());
+        expect(sub_dispatch.success, "persistent Vulkan runtime must dispatch device-resident sub");
+        expect(sub_dispatch.error.empty(), "persistent Vulkan sub success must not carry an error");
+        std::vector<float> device_sub_out(device_sub_a.size(), 0.0f);
+        sub_out_buffer.download(device_sub_out.data(), device_sub_out.size() * sizeof(float));
+        for (std::size_t i = 0; i < device_sub_out.size(); ++i) {
+            expect(close_enough(device_sub_out[i], device_sub_a[i] - device_sub_b[i], 1.0e-6f),
+                   "persistent Vulkan sub output mismatch");
         }
 
         const std::vector<float> device_sgd_param = {1.0f, 2.0f, -3.0f, 4.0f};
@@ -654,6 +676,11 @@ int main() {
                    "standalone Vulkan add output mismatch");
         }
     }
+
+    // Standalone vector-path for sub is intentionally omitted: device-resident
+    // parity already covers sub through run_vulkan_sub(runtime, ...) above, and
+    // the standalone vector-API path is a host-staging shim not on the
+    // memory-native training hot path (per PORT_PROMPT invariant 4).
 
     const std::vector<std::int8_t> q8_a = {1, -2, 3, 4, 0, 2};
     const std::vector<std::int8_t> q8_b = {
