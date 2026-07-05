@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -67,6 +68,7 @@ using VkShaderModule = struct VkShaderModule_T*;
 using VkDescriptorSetLayout = struct VkDescriptorSetLayout_T*;
 using VkPipelineLayout = struct VkPipelineLayout_T*;
 using VkPipeline = struct VkPipeline_T*;
+using VkPipelineCache = struct VkPipelineCache_T*;
 using VkDescriptorPool = struct VkDescriptorPool_T*;
 using VkDescriptorSet = struct VkDescriptorSet_T*;
 using VkCommandPool = struct VkCommandPool_T*;
@@ -92,6 +94,7 @@ constexpr VkStructureType VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET = 35;
 constexpr VkStructureType VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO = 39;
 constexpr VkStructureType VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO = 40;
 constexpr VkStructureType VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO = 42;
+constexpr VkStructureType VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO = 1000117000;
 constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 = 1000059000;
 constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES = 1000177000;
 
@@ -685,11 +688,27 @@ using PFN_vkCreateShaderModule = VkResult (*)(VkDevice device, const VkShaderMod
                                               const void* pAllocator, VkShaderModule* pShaderModule);
 using PFN_vkDestroyShaderModule = void (*)(VkDevice device, VkShaderModule shaderModule,
                                            const void* pAllocator);
-using PFN_vkCreateComputePipelines = VkResult (*)(VkDevice device, VkPipeline pipelineCache,
+using PFN_vkCreateComputePipelines = VkResult (*)(VkDevice device, VkPipelineCache pipelineCache,
                                                   std::uint32_t createInfoCount,
                                                   const VkComputePipelineCreateInfo* pCreateInfos,
                                                   const void* pAllocator, VkPipeline* pPipelines);
 using PFN_vkDestroyPipeline = void (*)(VkDevice device, VkPipeline pipeline, const void* pAllocator);
+// Pipeline cache: driver-side SPIR-V -> ISA compilation cache. Eliminates the
+// 1-5ms cold-compile cost on first use of each kernel and persists it across
+// runs when serialized to disk.
+struct VkPipelineCacheCreateInfo {
+    std::int32_t sType;
+    const void* pNext;
+    std::uint32_t flags;
+    std::size_t initialDataSize;
+    const void* pInitialData;
+};
+using PFN_vkCreatePipelineCache = VkResult (*)(VkDevice device, const VkPipelineCacheCreateInfo* pCreateInfo,
+                                               const void* pAllocator, VkPipelineCache* pPipelineCache);
+using PFN_vkDestroyPipelineCache = void (*)(VkDevice device, VkPipelineCache pipelineCache,
+                                            const void* pAllocator);
+using PFN_vkGetPipelineCacheData = VkResult (*)(VkDevice device, VkPipelineCache pipelineCache,
+                                                std::size_t* pDataSize, void* pData);
 using PFN_vkCreateCommandPool = VkResult (*)(VkDevice device, const VkCommandPoolCreateInfo* pCreateInfo,
                                              const void* pAllocator, VkCommandPool* pCommandPool);
 using PFN_vkDestroyCommandPool = void (*)(VkDevice device, VkCommandPool commandPool, const void* pAllocator);
@@ -4400,6 +4419,11 @@ struct VulkanRuntime::Impl {
     PFN_vkDestroyShaderModule destroy_shader_module = nullptr;
     PFN_vkCreateComputePipelines create_compute_pipelines = nullptr;
     PFN_vkDestroyPipeline destroy_pipeline = nullptr;
+    PFN_vkCreatePipelineCache create_pipeline_cache = nullptr;
+    PFN_vkDestroyPipelineCache destroy_pipeline_cache = nullptr;
+    PFN_vkGetPipelineCacheData get_pipeline_cache_data = nullptr;
+    VkPipelineCache vk_pipeline_cache = nullptr;
+    std::string vk_pipeline_cache_path;
     PFN_vkCreateCommandPool create_command_pool = nullptr;
     PFN_vkDestroyCommandPool destroy_command_pool = nullptr;
     PFN_vkAllocateCommandBuffers allocate_command_buffers = nullptr;
@@ -4540,6 +4564,22 @@ struct VulkanRuntime::Impl {
 
     void destroy_fast_path() {
         if (!device) return;
+        // Serialize the driver-side pipeline cache to disk so the next process
+        // start skips SPIR-V -> ISA compilation for already-seen kernels. Best
+        // effort: failures are silently ignored (cache is advisory, not required
+        // for correctness).
+        if (vk_pipeline_cache && get_pipeline_cache_data && !vk_pipeline_cache_path.empty()) {
+            std::size_t sz = 0;
+            if (get_pipeline_cache_data(device, vk_pipeline_cache, &sz, nullptr) == VK_SUCCESS && sz > 0) {
+                std::vector<std::uint8_t> blob(sz);
+                if (get_pipeline_cache_data(device, vk_pipeline_cache, &sz, blob.data()) == VK_SUCCESS) {
+                    std::ofstream out_file(vk_pipeline_cache_path, std::ios::binary | std::ios::trunc);
+                    if (out_file) out_file.write(reinterpret_cast<const char*>(blob.data()), static_cast<std::streamsize>(sz));
+                }
+            }
+        }
+        if (vk_pipeline_cache && destroy_pipeline_cache) destroy_pipeline_cache(device, vk_pipeline_cache, nullptr);
+        vk_pipeline_cache = nullptr;
         destroy_buffer_pool();
         for (auto& entry : pipeline_cache) {
             if (entry.second && destroy_pipeline) destroy_pipeline(device, entry.second, nullptr);
@@ -4629,6 +4669,45 @@ struct VulkanRuntime::Impl {
             !transfer_command_pool) {
             fast_error = "vkCreateCommandPool failed for staging transfers";
             return false;
+        }
+
+        // Pipeline cache: load persisted blob from disk (if present) so the
+        // driver skips SPIR-V -> ISA compilation for kernels seen in any prior
+        // run. The path defaults to "motifcl_vulkan_pipeline_cache.bin" in the
+        // cwd, override via MOTIFCL_VULKAN_PIPELINE_CACHE env var. Set the env
+        // var to "off" (or empty path) to disable disk persistence entirely.
+        std::vector<std::uint8_t> cache_seed;
+        const char* cache_env = std::getenv("MOTIFCL_VULKAN_PIPELINE_CACHE");
+        std::string cache_path;
+        if (cache_env && cache_env[0] != '\0' && std::string(cache_env) != "off") {
+            cache_path = cache_env;
+        } else if (!cache_env) {
+            cache_path = "motifcl_vulkan_pipeline_cache.bin";
+        }
+        if (!cache_path.empty()) {
+            std::ifstream cache_file(cache_path, std::ios::binary);
+            if (cache_file) {
+                cache_file.seekg(0, std::ios::end);
+                const auto sz = cache_file.tellg();
+                cache_file.seekg(0, std::ios::beg);
+                if (sz > 0) {
+                    cache_seed.resize(static_cast<std::size_t>(sz));
+                    cache_file.read(reinterpret_cast<char*>(cache_seed.data()), sz);
+                }
+            }
+            vk_pipeline_cache_path = cache_path;
+        }
+        const VkPipelineCacheCreateInfo cache_info{
+            VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+            nullptr,
+            0,
+            cache_seed.size(),
+            cache_seed.empty() ? nullptr : cache_seed.data(),
+        };
+        if (create_pipeline_cache(device, &cache_info, nullptr, &vk_pipeline_cache) != VK_SUCCESS) {
+            // Non-fatal: vk_pipeline_cache stays null and create_compute_pipelines
+            // falls back to per-call compilation. Log to fast_error for debug.
+            vk_pipeline_cache = nullptr;
         }
         const VkCommandBufferAllocateInfo fast_alloc{
             VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -4772,7 +4851,7 @@ struct VulkanRuntime::Impl {
             -1,
         };
         VkPipeline pipeline = nullptr;
-        const auto created = create_compute_pipelines(device, nullptr, 1, &pipeline_info, nullptr, &pipeline);
+        const auto created = create_compute_pipelines(device, vk_pipeline_cache, 1, &pipeline_info, nullptr, &pipeline);
         destroy_shader_module(device, module, nullptr);
         if (created != VK_SUCCESS || !pipeline) {
             fast_error = "vkCreateComputePipelines failed for cached dispatch";
@@ -5249,7 +5328,7 @@ struct VulkanRuntime::Impl {
             1,
             "MotifCL",
             1,
-            vk_make_api_version(0, 1, 0, 0),
+            vk_make_api_version(0, 1, 1, 0),
         };
         const VkInstanceCreateInfo create_info{
             VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -5461,6 +5540,9 @@ struct VulkanRuntime::Impl {
         destroy_shader_module = load_device(PFN_vkDestroyShaderModule{}, "vkDestroyShaderModule");
         create_compute_pipelines = load_device(PFN_vkCreateComputePipelines{}, "vkCreateComputePipelines");
         destroy_pipeline = load_device(PFN_vkDestroyPipeline{}, "vkDestroyPipeline");
+        create_pipeline_cache = load_device(PFN_vkCreatePipelineCache{}, "vkCreatePipelineCache");
+        destroy_pipeline_cache = load_device(PFN_vkDestroyPipelineCache{}, "vkDestroyPipelineCache");
+        get_pipeline_cache_data = load_device(PFN_vkGetPipelineCacheData{}, "vkGetPipelineCacheData");
         create_command_pool = load_device(PFN_vkCreateCommandPool{}, "vkCreateCommandPool");
         destroy_command_pool = load_device(PFN_vkDestroyCommandPool{}, "vkDestroyCommandPool");
         allocate_command_buffers = load_device(PFN_vkAllocateCommandBuffers{}, "vkAllocateCommandBuffers");
@@ -5746,7 +5828,7 @@ struct VulkanRuntime::Impl {
             nullptr,
             -1,
         };
-        if (create_compute_pipelines(device, nullptr, 1, &compute_pipeline_info, nullptr, &pipeline) != VK_SUCCESS ||
+        if (create_compute_pipelines(device, vk_pipeline_cache, 1, &compute_pipeline_info, nullptr, &pipeline) != VK_SUCCESS ||
             !pipeline) {
             return fail_with_cleanup("vkCreateComputePipelines failed");
         }

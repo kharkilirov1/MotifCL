@@ -114,6 +114,11 @@ struct VulkanDeviceCaps {
     std::uint32_t max_shared_memory_bytes = 16384;
     std::uint32_t max_workgroup_invocations = 128;
     std::uint32_t max_push_constant_bytes = 128;
+    // Subgroup (vulkan1.1+): when subgroup_arithmetic_compute is true, kernels
+    // may use subgroupAdd / subgroupBroadcast to replace shared-memory tree
+    // reductions (5 barriers + 5 LDS round-trips per reduction -> zero).
+    bool subgroup_arithmetic_compute = false;
+    std::uint32_t subgroup_size = 0;
 };
 
 // Recording of cached-path dispatches for replay. Holds shared ownership of

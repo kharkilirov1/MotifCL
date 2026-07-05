@@ -49,7 +49,11 @@ def compile_shader(glslc, path):
     cmd = [
         glslc,
         "-fshader-stage=compute",
-        "--target-env=vulkan1.0",
+        # vulkan1.1 unlocks subgroup ops (subgroupAdd / subgroupBroadcast) used
+        # by the reduction kernels (softmax_rows, rmsnorm, GQA backward, etc.)
+        # to replace the manual shared-memory tree reduction (5 barriers +
+        # 5 LDS round-trips per reduction). GCN4 (RX 580) exposes subgroupSize=64.
+        "--target-env=vulkan1.1",
         "-O",
         path,
         "-o",

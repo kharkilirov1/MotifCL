@@ -9,6 +9,7 @@ out/
 # Local review/build artifacts
 build_review*/
 motifcl_tuning.json
+motifcl_vulkan_pipeline_cache.bin
 .agent_backup*/
 *.log
 

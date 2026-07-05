@@ -426,3 +426,73 @@ Latest verification (2026-07-05, после Slice F):
   `test_vulkan_runtime_standalone`).
 - OFF-сборка (`build/codex-vulkan-off`): **36/36 passed** (Vulkan passed /
   OpenCL skipped), `ninja -t commands test_vulkan_runtime_standalone | grep -ci opencl` → **0**.
+
+## Perf optimizations (Slice G, 2026-07-05)
+
+Perf-review выявило, что 21/32 ops host-bound (GPU < 25% wall), train_step
+показывал 11% GPU util (156 us GPU / 1436 us wall). Slice G закрывает самые
+безопасные оптимизации из ревью:
+
+### G1 — Driver-side VkPipelineCache + disk persistence
+
+`run_vulkan_*` dispatch'и кэшировали только MotifCL-side pipeline handles
+(`pipeline_cache` map по SPIR-V pointer); но **driver-side SPIR-V→ISA
+компиляция** не кэшировалась — `vkCreateComputePipelines(... pipelineCache=nullptr)`
+на каждом cache miss, ~1-5 ms cold compile на каждый из ~40 kernels, не
+персистилось между запусками.
+
+- `src/runtime/vulkan_backend.cpp` — добавлены typedefs (`VkPipelineCache`,
+  `VkPipelineCacheCreateInfo`), PFN (`vkCreatePipelineCache` /
+  `vkDestroyPipelineCache` / `vkGetPipelineCacheData`), member
+  `vk_pipeline_cache`, и `VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO`
+  константа.
+- При `ensure_fast_path` создаётся `VkPipelineCache`, seeded из disk blob
+  (path: env `MOTIFCL_VULKAN_PIPELINE_CACHE` или default
+  `motifcl_vulkan_pipeline_cache.bin` в cwd; env="off" отключает).
+- `create_compute_pipelines` (оба call-site'а — cached и dispatch_storage_buffers)
+  теперь передаёт `vk_pipeline_cache` вместо nullptr.
+- `destroy_fast_path` сериализует cache обратно на диск (best-effort).
+- На RX 580 cache file = 35-132 KB (все ~40 kernels).
+
+Эффект: cold-start (первый train step в процессе / первый запуск бинарника)
+быстрее на ~40 ms суммарно (40 kernels × ~1 ms compile). Steady-state
+wall-time также уменьшился — `vkCreateComputePipelines` вызывается при первом
+использовании каждого kernel в процессе, теперь это ISA-loaded, не compile.
+
+### G2 — SPIR-V target-env vulkan1.0 → vulkan1.1
+
+`tools/gen_vulkan_spirv.py` теперь компилирует .comp с `--target-env=vulkan1.1`,
+instance создаётся с `api_version=1.1`. Разблокирует subgroup ops
+(`subgroupAdd` / `subgroupBroadcast`) для будущего использования в reduction
+kernels (softmax, rmsnorm, GQA backward, counter_row_stats) — заменит manual
+shared-memory tree reduction (5 barriers + 5 LDS round-trips на каждый
+reduction). На GCN4 (RX 580) subgroupSize=64, arithmetic supported.
+
+Сам по себе bump target-env **не использует** subgroup ops пока ни в одном
+kernel — это подготовка для следующего среза. Существующие kernels работают
+идентично (regenerated SPIR-V, parity tests 36/36 green).
+
+### Slice G — что НЕ сделано (отложено)
+
+- **Subgroup rewrite** (O4) — требует runtime detect `caps.subgroup_arithmetic_compute`
+  через `vkGetPhysicalDeviceProperties2` + chain с `VkPhysicalDeviceSubgroupProperties`,
+  плюс осторожное тестирование на нескольких GPU. Поле `subgroup_arithmetic_compute`
+  уже добавлено в `VulkanDeviceCaps` (header), но не заполняется. Отложено в
+  отдельный срез.
+- **Register-block matmul** (O1+O2) — порт OpenCL `matmul_register_block4_f32`
+  (32×32×16 tile, 4×4 register sub-tile per lane → 16 outputs/lane вместо 1).
+  Механическая работа + полный parity re-test. Отложено.
+- **Counter grad_out hoist** (O12) — OpenCL имеет ту же redundancy, hoist
+  только в Vulkan сломал бы bit-exact parity. Пропущено (GPU time всего 1.6 us).
+- **Softmax exp cache** (O11) — попытка, но glslc выдавал странные ошибки
+  порядка `#version`; откачено как risk > reward.
+
+### Verification после Slice G
+
+- ON-сборка: `ctest --test-dir build/port-vk` — **36/36 passed**.
+- OFF-сборка: `ctest --test-dir build/codex-vulkan-off` — **36/36 passed**.
+- bench (3 прогона train_step): **1327 / 1371 / 1266 us** против baseline 1436 us
+  → **~8% faster** steady-state, ratio 3.52× → 3.6-4.9× (OpenCL jitter ±30%).
+- 9 ops ускорились на 10-40 us (counter_backward -39us, gelu -23us,
+  embedding -22us, mul_scalar -22us, rmsnorm -20us); остальные в пределах
+  desktop-OS timing noise. Никаких регрессий за пределами шума.
