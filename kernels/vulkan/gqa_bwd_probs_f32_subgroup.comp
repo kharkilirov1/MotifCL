@@ -1,0 +1,91 @@
+// Grouped-query attention backward, stage 1 of 3 (non-causal, batch=1):
+// recompute softmax probabilities and the softmax-backward "ds" term.
+// Subgroup reduction variant: 3 tree reductions replaced by subgroupMax /
+// subgroupAdd. probs[] and dps[] still live in shared memory (re-read by
+// subsequent passes within this kernel and by stages 2/3 of the backward).
+#version 450
+
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KBuf { float k[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VBuf { float v[]; };
+layout(std430, set = 0, binding = 3) readonly buffer DoutBuf { float dout[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer PBuf { float p_out[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer DsBuf { float ds_out[]; };
+
+layout(push_constant) uniform Push {
+    uint query_tokens;
+    uint key_tokens;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    float scale;
+} p;
+
+shared float probs[1024];
+shared float dps[1024];
+
+void main() {
+    const uint tq = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint lane = gl_LocalInvocationID.x;
+    if (tq >= p.query_tokens || h >= p.n_head) return;
+
+    const uint group_size = p.n_head / p.n_kv_head;
+    const uint g = h / group_size;
+    const uint q_stride = p.n_head * p.head_dim;
+    const uint kv_stride = p.n_kv_head * p.head_dim;
+    const uint q_base = tq * q_stride + h * p.head_dim;
+    const uint kv_off = g * p.head_dim;
+    const uint row_base = (h * p.query_tokens + tq) * p.key_tokens;
+
+    // Softmax recompute (max then sum), with subgroup reductions.
+    float maxv = -3.402823466e+38;
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        float dot = 0.0;
+        const uint k_base = tk * kv_stride + kv_off;
+        for (uint d = 0u; d < p.head_dim; ++d) {
+            dot += q[q_base + d] * k[k_base + d];
+        }
+        probs[tk] = dot * p.scale;
+        maxv = max(maxv, probs[tk]);
+    }
+    maxv = subgroupMax(maxv);
+
+    subgroupMemoryBarrier();
+    float sum = 0.0;
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        const float e = exp(probs[tk] - maxv);
+        probs[tk] = e;
+        sum += e;
+    }
+    sum = subgroupAdd(sum);
+    const float inv_sum = 1.0 / sum;
+
+    // dp[tk] = dout . v_row, and the row dot = sum(dp * p).
+    subgroupMemoryBarrier();
+    float dot_dp_p = 0.0;
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        const float prob = probs[tk] * inv_sum;
+        probs[tk] = prob;
+        float dp = 0.0;
+        const uint v_base = tk * kv_stride + kv_off;
+        for (uint d = 0u; d < p.head_dim; ++d) {
+            dp += dout[q_base + d] * v[v_base + d];
+        }
+        dps[tk] = dp;
+        dot_dp_p += dp * prob;
+    }
+    dot_dp_p = subgroupAdd(dot_dp_p);
+
+    subgroupMemoryBarrier();
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        const float prob = probs[tk];
+        p_out[row_base + tk] = prob;
+        ds_out[row_base + tk] = prob * (dps[tk] - dot_dp_p);
+    }
+}

@@ -96,6 +96,7 @@ constexpr VkStructureType VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO = 40;
 constexpr VkStructureType VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO = 42;
 constexpr VkStructureType VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO = 1000117000;
 constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 = 1000059000;
+constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES = 1000090008;
 constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES = 1000177000;
 
 constexpr VkQueueFlags VK_QUEUE_COMPUTE_BIT = 0x00000002u;
@@ -643,6 +644,25 @@ using PFN_vkEnumerateDeviceExtensionProperties = VkResult (*)(VkPhysicalDevice p
                                                               VkExtensionProperties* pProperties);
 using PFN_vkGetPhysicalDeviceFeatures2 = void (*)(VkPhysicalDevice physicalDevice,
                                                   VkPhysicalDeviceFeatures2* pFeatures);
+// vulkan1.1: physical-device properties2 chain. Used to read subgroup
+// properties (subgroupSize, supportedStages, supportedOperations) so kernels
+// can opt into subgroupAdd / subgroupBroadcast only when the device actually
+// supports arithmetic subgroup operations in compute.
+struct VkPhysicalDeviceSubgroupProperties {
+    std::int32_t sType;
+    void* pNext;
+    std::uint32_t subgroupSize;
+    std::uint32_t supportedStages;       // bitmask, VK_SHADER_STAGE_COMPUTE_BIT = 0x00000010
+    std::uint32_t supportedOperations;   // bitmask, VK_SUBGROUP_FEATURE_ARITHMETIC_BIT = 0x00000004
+    std::uint32_t quadOperationsInAllStages;
+};
+struct VkPhysicalDeviceProperties2 {
+    std::int32_t sType;
+    void* pNext;
+    void* pProperties;  // VkPhysicalDeviceProperties* (opaque prefix layout)
+};
+using PFN_vkGetPhysicalDeviceProperties2 = void (*)(VkPhysicalDevice physicalDevice,
+                                                     VkPhysicalDeviceProperties2* pProperties);
 using PFN_vkCreateDevice = VkResult (*)(VkPhysicalDevice physicalDevice,
                                         const VkDeviceCreateInfo* pCreateInfo,
                                         const void* pAllocator,
@@ -5366,6 +5386,9 @@ struct VulkanRuntime::Impl {
         auto get_physical_device_features2 =
             load_instance_function<PFN_vkGetPhysicalDeviceFeatures2>(
                 get_proc, instance, "vkGetPhysicalDeviceFeatures2");
+        auto get_physical_device_properties2 =
+            load_instance_function<PFN_vkGetPhysicalDeviceProperties2>(
+                get_proc, instance, "vkGetPhysicalDeviceProperties2");
         auto create_device = load_instance_function<PFN_vkCreateDevice>(get_proc, instance, "vkCreateDevice");
         get_device_proc = load_instance_function<PFN_vkGetDeviceProcAddr>(get_proc, instance, "vkGetDeviceProcAddr");
         if (!enumerate_physical_devices || !get_queue_family_properties || !get_memory_properties ||
@@ -5437,6 +5460,42 @@ struct VulkanRuntime::Impl {
             }
         }
         caps.timestamps = timestamp_valid_bits > 0 && caps.timestamp_period_ns > 0.0;
+
+        // Subgroup capability detection (vulkan1.1+): query
+        // VkPhysicalDeviceSubgroupProperties through the properties2 chain.
+        // caps.subgroup_arithmetic_compute gates whether reduction kernels
+        // may use subgroupAdd / subgroupBroadcast instead of the manual
+        // shared-memory tree reduction.
+        if (get_physical_device_properties2) {
+            VkPhysicalDeviceSubgroupProperties subgroup{
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+                nullptr,
+                0, 0, 0, 0,
+            };
+            // VkPhysicalDeviceProperties2 layout = {sType, pNext,
+            // VkPhysicalDeviceProperties properties[inline]}. The full struct
+            // is ~1840 bytes; use a 4096-byte aligned buffer so the driver can
+            // safely fill in the inline properties without heap corruption.
+            // Only sType + pNext are written by us; the driver writes the rest.
+            struct alignas(8) Properties2Storage {
+                std::int32_t sType;
+                void* pNext;
+                std::array<std::uint8_t, 4080> tail;
+            };
+            Properties2Storage storage{};
+            constexpr std::int32_t VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 = 1000059000;
+            storage.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            storage.pNext = &subgroup;
+            get_physical_device_properties2(physical_device,
+                                             reinterpret_cast<VkPhysicalDeviceProperties2*>(&storage));
+            // VK_SHADER_STAGE_COMPUTE_BIT = 0x10, VK_SUBGROUP_FEATURE_ARITHMETIC_BIT = 0x4.
+            if ((subgroup.supportedStages & 0x10u) && (subgroup.supportedOperations & 0x4u) &&
+                subgroup.subgroupSize > 0) {
+                caps.subgroup_arithmetic_compute = true;
+                caps.subgroup_size = subgroup.subgroupSize;
+            }
+        }
+
         get_memory_properties(physical_device, &memory_properties);
 
         bool has_i8_storage_extension = false;
@@ -6849,7 +6908,10 @@ VulkanOpResult run_vulkan_softmax_rows(VulkanRuntime& runtime,
         std::uint32_t cols;
     } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
     const std::vector<const VulkanBuffer*> buffers = {&x, &out};
-    return runtime.dispatch_cached(vkspirv::k_softmax_rows_f32, vkspirv::k_softmax_rows_f32_words, buffers,
+    const bool use_sg = runtime.caps().subgroup_arithmetic_compute;
+    const auto* spirv = use_sg ? vkspirv::k_softmax_rows_f32_subgroup : vkspirv::k_softmax_rows_f32;
+    const auto words = use_sg ? vkspirv::k_softmax_rows_f32_subgroup_words : vkspirv::k_softmax_rows_f32_words;
+    return runtime.dispatch_cached(spirv, words, buffers,
                                    &push, sizeof(push), static_cast<std::uint32_t>(rows), 1, 1);
 }
 
@@ -6907,7 +6969,10 @@ VulkanOpResult run_vulkan_rmsnorm(VulkanRuntime& runtime,
         float eps;
     } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols), eps};
     const std::vector<const VulkanBuffer*> buffers = {&x, &weight, &out};
-    return runtime.dispatch_cached(vkspirv::k_rmsnorm_f32, vkspirv::k_rmsnorm_f32_words, buffers, &push,
+    const bool use_sg = runtime.caps().subgroup_arithmetic_compute;
+    const auto* spirv = use_sg ? vkspirv::k_rmsnorm_f32_subgroup : vkspirv::k_rmsnorm_f32;
+    const auto words = use_sg ? vkspirv::k_rmsnorm_f32_subgroup_words : vkspirv::k_rmsnorm_f32_words;
+    return runtime.dispatch_cached(spirv, words, buffers, &push,
                                    sizeof(push), static_cast<std::uint32_t>(rows), 1, 1);
 }
 
@@ -6938,7 +7003,10 @@ VulkanOpResult run_vulkan_rmsnorm_backward_x(VulkanRuntime& runtime,
         float eps;
     } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols), eps};
     const std::vector<const VulkanBuffer*> buffers = {&x, &weight, &grad_out, &grad_x};
-    return runtime.dispatch_cached(vkspirv::k_rmsnorm_bwd_x_f32, vkspirv::k_rmsnorm_bwd_x_f32_words, buffers,
+    const bool use_sg = runtime.caps().subgroup_arithmetic_compute;
+    const auto* spirv = use_sg ? vkspirv::k_rmsnorm_bwd_x_f32_subgroup : vkspirv::k_rmsnorm_bwd_x_f32;
+    const auto words = use_sg ? vkspirv::k_rmsnorm_bwd_x_f32_subgroup_words : vkspirv::k_rmsnorm_bwd_x_f32_words;
+    return runtime.dispatch_cached(spirv, words, buffers,
                                    &push, sizeof(push), static_cast<std::uint32_t>(rows), 1, 1);
 }
 
@@ -7230,7 +7298,10 @@ VulkanOpResult run_vulkan_softmax_cross_entropy(VulkanRuntime& runtime,
         std::uint32_t cols;
     } row_push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
     const std::vector<const VulkanBuffer*> row_buffers = {&logits, &targets, &partial};
-    auto stage = runtime.dispatch_cached(vkspirv::k_ce_fwd_rows_f32, vkspirv::k_ce_fwd_rows_f32_words,
+    const bool use_sg = runtime.caps().subgroup_arithmetic_compute;
+    const auto* row_spirv = use_sg ? vkspirv::k_ce_fwd_rows_f32_subgroup : vkspirv::k_ce_fwd_rows_f32;
+    const auto row_words = use_sg ? vkspirv::k_ce_fwd_rows_f32_subgroup_words : vkspirv::k_ce_fwd_rows_f32_words;
+    auto stage = runtime.dispatch_cached(row_spirv, row_words,
                                          row_buffers, &row_push, sizeof(row_push),
                                          static_cast<std::uint32_t>(rows), 1, 1);
     if (!stage.success) return stage;
@@ -7240,7 +7311,10 @@ VulkanOpResult run_vulkan_softmax_cross_entropy(VulkanRuntime& runtime,
         std::uint32_t denominator;
     } mean_push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(rows)};
     const std::vector<const VulkanBuffer*> mean_buffers = {&partial, &out};
-    return runtime.dispatch_cached(vkspirv::k_mean_reduce_f32, vkspirv::k_mean_reduce_f32_words, mean_buffers,
+    const bool use_sg_mean = runtime.caps().subgroup_arithmetic_compute;
+    const auto* mean_spirv = use_sg_mean ? vkspirv::k_mean_reduce_f32_subgroup : vkspirv::k_mean_reduce_f32;
+    const auto mean_words = use_sg_mean ? vkspirv::k_mean_reduce_f32_subgroup_words : vkspirv::k_mean_reduce_f32_words;
+    return runtime.dispatch_cached(mean_spirv, mean_words, mean_buffers,
                                    &mean_push, sizeof(mean_push), 1, 1, 1);
 }
 
@@ -7336,8 +7410,12 @@ VulkanOpResult run_vulkan_compact_counter_apply_update_fused(VulkanRuntime& runt
                  rms_eps};
     const std::vector<const VulkanBuffer*> stats_buffers = {&state, &scale, &v, &grad_out, &x,
                                                             &scale_new_scratch, &denom_scratch};
-    auto stage = runtime.dispatch_cached(vkspirv::k_counter_row_stats_fused_f32,
-                                         vkspirv::k_counter_row_stats_fused_f32_words, stats_buffers,
+    const bool use_sg_stats = runtime.caps().subgroup_arithmetic_compute;
+    const auto* stats_spirv = use_sg_stats ? vkspirv::k_counter_row_stats_fused_f32_subgroup
+                                            : vkspirv::k_counter_row_stats_fused_f32;
+    const auto stats_words = use_sg_stats ? vkspirv::k_counter_row_stats_fused_f32_subgroup_words
+                                          : vkspirv::k_counter_row_stats_fused_f32_words;
+    auto stage = runtime.dispatch_cached(stats_spirv, stats_words, stats_buffers,
                                          &stats_push, sizeof(stats_push),
                                          static_cast<std::uint32_t>(out_features), 1, 1);
     if (!stage.success) return stage;
@@ -7904,7 +7982,10 @@ VulkanOpResult run_vulkan_grouped_query_attention(VulkanRuntime& runtime,
            static_cast<std::uint32_t>(n_head),       static_cast<std::uint32_t>(n_kv_head),
            static_cast<std::uint32_t>(head_dim),     scale};
     const std::vector<const VulkanBuffer*> buffers = {&q, &k, &v, &out};
-    return runtime.dispatch_cached(vkspirv::k_gqa_fwd_f32, vkspirv::k_gqa_fwd_f32_words, buffers, &push,
+    const bool use_sg_gqa = runtime.caps().subgroup_arithmetic_compute;
+    const auto* gqa_spirv = use_sg_gqa ? vkspirv::k_gqa_fwd_f32_subgroup : vkspirv::k_gqa_fwd_f32;
+    const auto gqa_words = use_sg_gqa ? vkspirv::k_gqa_fwd_f32_subgroup_words : vkspirv::k_gqa_fwd_f32_words;
+    return runtime.dispatch_cached(gqa_spirv, gqa_words, buffers, &push,
                                    sizeof(push), static_cast<std::uint32_t>(query_tokens),
                                    static_cast<std::uint32_t>(n_head), 1);
 }
@@ -7968,7 +8049,10 @@ VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtim
     // immediate mode each cached dispatch submits and waits on its fence; in
     // batch mode the cached path emits compute->compute barriers.
     const std::vector<const VulkanBuffer*> probs_buffers = {&q, &k, &v, &grad_out, &probs_scratch, &ds_scratch};
-    auto stage = runtime.dispatch_cached(vkspirv::k_gqa_bwd_probs_f32, vkspirv::k_gqa_bwd_probs_f32_words,
+    const bool use_sg_bwd = runtime.caps().subgroup_arithmetic_compute;
+    const auto* bwd_spirv = use_sg_bwd ? vkspirv::k_gqa_bwd_probs_f32_subgroup : vkspirv::k_gqa_bwd_probs_f32;
+    const auto bwd_words = use_sg_bwd ? vkspirv::k_gqa_bwd_probs_f32_subgroup_words : vkspirv::k_gqa_bwd_probs_f32_words;
+    auto stage = runtime.dispatch_cached(bwd_spirv, bwd_words,
                                          probs_buffers, &push, sizeof(push),
                                          static_cast<std::uint32_t>(query_tokens),
                                          static_cast<std::uint32_t>(n_head), 1);

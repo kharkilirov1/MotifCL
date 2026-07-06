@@ -1,0 +1,38 @@
+// RMSNorm forward: out = x * rsqrt(mean(x^2) + eps) * weight, one wave64
+// workgroup per row. Subgroup reduction variant: replaces shared-memory
+// tree reduction with subgroupAdd.
+#version 450
+
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) readonly buffer WBuf { float w[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint cols;
+    float eps;
+} p;
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (row >= p.rows) return;
+    const uint base = row * p.cols;
+
+    float ss = 0.0;
+    for (uint c = lane; c < p.cols; c += 64u) {
+        const float v = x[base + c];
+        ss += v * v;
+    }
+    ss = subgroupAdd(ss);
+    const float inv = inversesqrt(ss / float(p.cols) + p.eps);
+
+    for (uint c = lane; c < p.cols; c += 64u) {
+        outv[base + c] = x[base + c] * inv * w[c];
+    }
+}

@@ -496,3 +496,89 @@ kernel — это подготовка для следующего среза. �
 - 9 ops ускорились на 10-40 us (counter_backward -39us, gelu -23us,
   embedding -22us, mul_scalar -22us, rmsnorm -20us); остальные в пределах
   desktop-OS timing noise. Никаких регрессий за пределами шума.
+
+## Subgroup reduction kernels (Slice H, 2026-07-06)
+
+TOP-1 optimization из perf-ревью: ~10 reduction kernels использовали manual
+shared-memory tree reduction (5 barriers + 5 LDS round-trips per reduction;
+gqa_bwd_probs один имеет 3 reductions). Slice H заменяет их на subgroup
+ops (`subgroupAdd` / `subgroupMax`) — zero LDS, zero barriers per reduction.
+
+### H1 — Runtime subgroup detection
+
+- `include/motifcl/runtime/vulkan_backend.hpp::VulkanDeviceCaps` — 2 новых
+  поля: `subgroup_arithmetic_compute`, `subgroup_size`.
+- `src/runtime/vulkan_backend.cpp` — добавлены typedefs для
+  `VkPhysicalDeviceSubgroupProperties`, `VkPhysicalDeviceProperties2`,
+  `PFN_vkGetPhysicalDeviceProperties2`, константа
+  `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES` (1000090008).
+- При init вызывается `vkGetPhysicalDeviceProperties2` с pNext-chain на
+  `VkPhysicalDeviceSubgroupProperties`. `caps.subgroup_arithmetic_compute`
+  выставляется true только если `supportedStages & VK_SHADER_STAGE_COMPUTE_BIT`
+  (0x10) И `supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT` (0x4)
+  И `subgroupSize > 0`. На GCN4 (RX 580) subgroupSize=64, обе бита выставлены.
+- Properties2 buffer — 4096-byte aligned storage (полный inline
+  VkPhysicalDeviceProperties ~1840 bytes), иначе driver heap-corruption.
+
+### H2 — 8 subgroup kernel variants
+
+Каждый reduction kernel имеет теперь **две версии**: original (shared-memory
+tree) и `_subgroup` variant. Dispatch-site выбирает по `caps.subgroup_arithmetic_compute`:
+
+- `softmax_rows_f32_subgroup.comp` — subgroupMax + subgroupAdd.
+- `rmsnorm_f32_subgroup.comp` — subgroupAdd для sum-of-squares.
+- `rmsnorm_bwd_x_f32_subgroup.comp` — два независимых subgroupAdd (ss + dot).
+- `ce_fwd_rows_f32_subgroup.comp` — subgroupMax + subgroupAdd.
+- `mean_reduce_f32_subgroup.comp` — subgroupAdd.
+- `counter_row_stats_fused_f32_subgroup.comp` — два subgroupAdd (g_sq + grad_s).
+- `gqa_fwd_f32_subgroup.comp` — subgroupMax + subgroupAdd; probs[] остаётся в
+  shared (pass 3 re-reads every prob); `subgroupMemoryBarrier` между passes.
+- `gqa_bwd_probs_f32_subgroup.comp` — 3 reductions (max, sum, dot_dp_p) через
+  subgroup ops; probs/dps в shared для меж-pass переиспользования.
+
+Все 8 .comp используют `GL_KHR_shader_subgroup_arithmetic` + `GL_KHR_shader_subgroup_basic`
+extensions (требуют vulkan1.1, который Slice G уже включил). Original kernels
+оставлены — fallback для GPU без subgroup support.
+
+### H3 — Dispatch branching
+
+8 dispatch sites в `src/runtime/vulkan_backend.cpp` (`run_vulkan_softmax_rows`,
+`run_vulkan_rmsnorm`, `run_vulkan_rmsnorm_backward_x`,
+`run_vulkan_softmax_cross_entropy` row stage, `run_vulkan_softmax_cross_entropy`
+mean stage, `run_vulkan_compact_counter_apply_update_fused` stats stage,
+`run_vulkan_grouped_query_attention` fwd, `run_vulkan_grouped_query_attention_backward`
+probs stage) теперь выбирают `_subgroup` variant когда
+`runtime.caps().subgroup_arithmetic_compute == true`.
+
+### Verification
+
+- ON build (`build/port-vk`): ctest **36/36 passed** — все parity tests
+  (softmax, rmsnorm fwd+bwd, GQA fwd+bwd, CE, counter update bit-exact vs
+  OpenCL) проходят через subgroup variants на RX 580.
+- OFF build (`build/codex-vulkan-off`): ctest **36/36 passed** (Vulkan
+  passed / OpenCL skipped), OpenCL-free link confirmed (0 упоминаний OpenCL).
+- SPIR-V inc регенерирован: 40 → **48 kernels** (8 новых _subgroup variants).
+
+### Perf impact (RX 580)
+
+Reduction-heavy ops ускорились на GPU side:
+- `rmsnorm_f32`: wall 283→261 us (-22 us, -8%), GPU 49→47 us (-4%).
+- `rmsnorm_bwd_x_f32`: wall 301→283 us (-19 us, -6%), GPU 110→109 us.
+- `softmax_rows_f32`: wall 233→220 us (-13 us, -6%), GPU 55→52 us (-5%).
+- `softmax_rows_bwd_f32`: wall 385→371 us (-15 us, -4%).
+- `counter_backward_input_f32`: wall 406→369 us (-37 us, -9%).
+- `gqa_fwd_bwd_f32`: wall ~1058 us (в пределах шума на маленькой модели q64k64).
+- `train_step_f32`: wall ~1410 us (3 прогона 1414/1383/1432) — end-to-end
+  improvement в пределах desktop-OS jitter, т.к. bottleneck сейчас host
+  dispatch overhead, не GPU reduction time. Reduction wins compound на
+  больших моделях (больше layers, длиннее sequences).
+
+### Slice H — что НЕ сделано
+
+- **GQA backward stages 2/3** (`gqa_bwd_dq_f32`, `gqa_bwd_dkv_f32`) не имеют
+  subgroup variants — у них нет tree reductions (они per-element). Сюда
+  относится рекомендация O7 (fuse 3-stage decomposition) — отдельный срез.
+- **rmsnorm_bwd_w_f32** (two-stage) — stage 1 (`rmsnorm_row_inv_f32`) уже
+  reduction; subgroup variant добавлен в TODO. Stage 2 — column reduction,
+  требует другого pattern.
+- **Register-block matmul** (O1+O2) — biggest remaining GPU-time win, отдельный срез.
