@@ -1014,6 +1014,10 @@ int main(int argc, char** argv) {
             float step(motifcl::VulkanRuntime* batch_runtime) {
                 std::vector<motifcl::Tensor*> params = {&Wq, &Wk, &Wv, &Wo, &Wup, &Wdown, &Whead, &Norm1, &Norm2};
                 for (auto* p : params) p->zero_grad();
+                // Slice J #4: fold forward + backward + optimizer into one
+                // batch. Previously this was two batches with a synchronous
+                // loss.item() host stall between them; now the scalar loss is
+                // read back once after the whole step is submitted.
                 if (batch_runtime) batch_runtime->batch_begin();
                 auto a = motifcl::rmsnorm(X, Norm1, 1e-5f);
                 auto q = motifcl::matmul(a, Wq);
@@ -1029,12 +1033,10 @@ int main(int argc, char** argv) {
                 auto h2 = motifcl::add(h1, mo);
                 auto logits = motifcl::matmul(h2, Whead);
                 auto loss = motifcl::softmax_cross_entropy(logits, Targets);
-                if (batch_runtime) batch_runtime->batch_end();
-                const float value = loss.item();
-                if (batch_runtime) batch_runtime->batch_begin();
                 loss.backward();
                 for (auto* p : params) motifcl::sgd_update(*p, *p->grad(), 1e-3f);
                 if (batch_runtime) batch_runtime->batch_end();
+                const float value = loss.item();
                 return value;
             }
         };

@@ -99,7 +99,13 @@ int main() {
         for (int step = 0; step < steps; ++step) {
             for (auto* p : params) p->zero_grad();
 
-            // Forward: one command buffer, one submit.
+            // Forward + backward + optimizer: one command buffer, one submit.
+            // (Slice J #4 optimization: previously this was two batches with a
+            // synchronous loss.item() host stall between them. Folding forward
+            // and backward into a single batch removes one full submit+fence
+            // round-trip and the device->host staging copy of the scalar loss
+            // that previously serialized the GPU between the two passes. The
+            // scalar loss is downloaded once after the whole step completes.)
             if (use_batches && !runtime.batch_begin()) {
                 std::cerr << "batch_begin failed\n";
                 return 1;
@@ -118,10 +124,20 @@ int main() {
             auto h2 = add(h1, mo);
             auto logits = matmul(h2, Whead);
             auto loss = softmax_cross_entropy(logits, Targets);
+            // Backward + SGD inside the same batch — no host stall between
+            // forward and backward.
+            loss.backward();
+            for (auto* p : params) {
+                if (!p->grad()) {
+                    std::cerr << "missing gradient for a parameter at step " << step << "\n";
+                    return 1;
+                }
+                sgd_update(*p, *p->grad(), lr);
+            }
             if (use_batches) {
-                auto fwd_submit = runtime.batch_end();
-                if (!fwd_submit.success) {
-                    std::cerr << "forward batch submit failed: " << fwd_submit.error << "\n";
+                auto step_submit = runtime.batch_end();
+                if (!step_submit.success) {
+                    std::cerr << "train step batch submit failed: " << step_submit.error << "\n";
                     return 1;
                 }
             }
@@ -142,33 +158,16 @@ int main() {
                 dump("logits", logits);
             }
 
+            // Scalar loss is downloaded once per step, after the entire
+            // forward+backward+optimizer batch already submitted. This is the
+            // only host stall in the steady-state step, and it is unavoidable
+            // (we need the scalar for logging / non-finite guard).
             const float loss_value = loss.item();
             if (!std::isfinite(loss_value)) {
                 std::cerr << "non-finite loss at step " << step << "\n";
                 return 1;
             }
             losses.push_back(loss_value);
-
-            // Backward + SGD: second command buffer, one submit.
-            if (use_batches && !runtime.batch_begin()) {
-                std::cerr << "backward batch_begin failed\n";
-                return 1;
-            }
-            loss.backward();
-            for (auto* p : params) {
-                if (!p->grad()) {
-                    std::cerr << "missing gradient for a parameter at step " << step << "\n";
-                    return 1;
-                }
-                sgd_update(*p, *p->grad(), lr);
-            }
-            if (use_batches) {
-                auto bwd_submit = runtime.batch_end();
-                if (!bwd_submit.success) {
-                    std::cerr << "backward batch submit failed: " << bwd_submit.error << "\n";
-                    return 1;
-                }
-            }
         }
 
         const float first = losses.front();

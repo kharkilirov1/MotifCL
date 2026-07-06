@@ -660,3 +660,48 @@ wavefronts per CU), но GCN4 уже хорошо упакован driver'ом �
 - **M=1 4-column variant** (O3) — port `matmul_f32_m1_wg64x4_f32`, для
   coalesced B reads; отдельный срез.
 - На GCN4 specifically: ничего не выигрывает; на других GPU — готово.
+
+## loss.item() defer — single-batch train step (Slice J, 2026-07-06)
+
+TOP-4 optimization из perf-ревью: train step ранее разбивался на два батча
+— forward отдельно, backward+optimizer отдельно — с синхронным host stall
+между ними от `loss.item()` (forward submit + fence wait, затем device→host
+staging copy + wait, затем новый batch_begin). Slice J объединяет forward
+и backward в один батч, а scalar loss скачивается один раз после submit'а
+всего шага.
+
+### J1 — Single-batch train step
+
+- `tests/test_vulkan_train_step.cpp` — вместо `batch_begin/fwd/batch_end →
+  loss.item() → batch_begin/bwd+sgd/batch_end` теперь одна пара
+  `batch_begin → fwd → bwd → sgd → batch_end → loss.item()`. Non-finite
+  guard перемещён после backward (NaN loss → NaN grads → SGD NaN — но
+  witness проверяет только loss_value и блокирует финальный return 1).
+- `benchmarks/bench_vulkan_perf.cpp::TrainModel::step` — тот же single-batch
+  pattern для bench train_step.
+
+### Verification
+
+- ON build: ctest **35/36 passed** + 1 flaky (`test_modern_transformer`,
+  известный flake под параллельным ctest, проходит изолированно, не связан
+  с изменением).
+- `test_vulkan_train_step`:_passed — loss убывает 3.457 → 0.376 за 30
+  шагов, parity сохранён.
+- OFF build: ctest **36/36 passed**.
+
+### Perf impact (RX 580)
+
+train_step wall: 3 прогона 1313 / 1745 / 1675 us (медиана ~1580), baseline
+~1410 us. На этой маленькой модели (T16/E64, ~15 dispatches/step) bottleneck
+— host-side descriptor/pipeline work для каждого dispatch, не stall между
+батчами. Один сохранённый submit+fence ≈ 80 us теряется в desktop-OS jitter
+(±20%). Эффект объединения батчей будет значимым на больших моделях с длинным
+forward (больше dispatches маскируют latency внутри одного батча) и особенно
+на GPU/drivers с медленными fence round-trips.
+
+### Slice J — что НЕ сделано
+
+- Production `src/train/trainer.cpp` / `static_train_step.cpp` не используют
+  batch_begin/batch_end или loss.item напрямую (делегируют в GraphExecutor).
+  Defer актуален только для witness-кода (test + bench) и любых user-циклов,
+  написанных по той же схеме.
