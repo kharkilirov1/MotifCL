@@ -1,0 +1,96 @@
+// C[M,N] = A[K,M]^T * B[K,N] (A stored row-major as [K,M]).
+// Register-block variant: 32x32 output tile, 8x8 lanes (one wave64), each
+// lane owns a 4x4 register sub-tile. Port of matmul.cl:matmul_transa_rb4_f32.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { float A[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BBuf { float B[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer CBuf { float C[]; };
+
+layout(push_constant) uniform Push {
+    uint M;
+    uint K;
+    uint N;
+} p;
+
+#define RB_M 32
+#define RB_N 32
+#define RB_K 16
+#define RB_THREAD_M 4
+#define RB_THREAD_N 4
+
+shared float As[RB_M][RB_K + 1];
+shared float Bs[RB_K][RB_N + 1];
+
+void main() {
+    const uint lcol = gl_LocalInvocationID.x;
+    const uint lrow = gl_LocalInvocationID.y;
+    const uint lid = lrow * 8u + lcol;
+    const uint block_col = gl_WorkGroupID.x * RB_N;
+    const uint block_row = gl_WorkGroupID.y * RB_M;
+
+    float acc00 = 0.0, acc01 = 0.0, acc02 = 0.0, acc03 = 0.0;
+    float acc10 = 0.0, acc11 = 0.0, acc12 = 0.0, acc13 = 0.0;
+    float acc20 = 0.0, acc21 = 0.0, acc22 = 0.0, acc23 = 0.0;
+    float acc30 = 0.0, acc31 = 0.0, acc32 = 0.0, acc33 = 0.0;
+
+    for (uint kt = 0u; kt < p.K; kt += RB_K) {
+        // A is stored row-major as [K, M]; As[r][kk] = A[(kt+kk) * M + (block_row+r)].
+        // Decompose linear idx as kk * RB_M + r so consecutive lanes read
+        // consecutive M-stride elements after a K-stride jump — coalesces per K row.
+        for (uint idx = lid; idx < RB_M * RB_K; idx += 64u) {
+            const uint kk = idx / RB_M;
+            const uint r = idx - kk * RB_M;
+            const uint gr = block_row + r;
+            const uint gk = kt + kk;
+            As[r][kk] = (gr < p.M && gk < p.K) ? A[gk * p.M + gr] : 0.0;
+        }
+        for (uint idx = lid; idx < RB_K * RB_N; idx += 64u) {
+            const uint kk = idx / RB_N;
+            const uint c = idx - kk * RB_N;
+            const uint gk = kt + kk;
+            const uint gc = block_col + c;
+            Bs[kk][c] = (gk < p.K && gc < p.N) ? B[gk * p.N + gc] : 0.0;
+        }
+        barrier();
+
+        const uint rr = lrow * RB_THREAD_M;
+        const uint cc = lcol * RB_THREAD_N;
+        for (uint kk = 0u; kk < RB_K; ++kk) {
+            const float a0 = As[rr + 0u][kk];
+            const float a1 = As[rr + 1u][kk];
+            const float a2 = As[rr + 2u][kk];
+            const float a3 = As[rr + 3u][kk];
+            const float b0 = Bs[kk][cc + 0u];
+            const float b1 = Bs[kk][cc + 1u];
+            const float b2 = Bs[kk][cc + 2u];
+            const float b3 = Bs[kk][cc + 3u];
+            acc00 += a0 * b0; acc01 += a0 * b1; acc02 += a0 * b2; acc03 += a0 * b3;
+            acc10 += a1 * b0; acc11 += a1 * b1; acc12 += a1 * b2; acc13 += a1 * b3;
+            acc20 += a2 * b0; acc21 += a2 * b1; acc22 += a2 * b2; acc23 += a2 * b3;
+            acc30 += a3 * b0; acc31 += a3 * b1; acc32 += a3 * b2; acc33 += a3 * b3;
+        }
+        barrier();
+    }
+
+    const uint row0 = block_row + lrow * RB_THREAD_M;
+    const uint col0 = block_col + lcol * RB_THREAD_N;
+    if (row0 + 0u < p.M && col0 + 0u < p.N) C[(row0 + 0u) * p.N + col0 + 0u] = acc00;
+    if (row0 + 0u < p.M && col0 + 1u < p.N) C[(row0 + 0u) * p.N + col0 + 1u] = acc01;
+    if (row0 + 0u < p.M && col0 + 2u < p.N) C[(row0 + 0u) * p.N + col0 + 2u] = acc02;
+    if (row0 + 0u < p.M && col0 + 3u < p.N) C[(row0 + 0u) * p.N + col0 + 3u] = acc03;
+    if (row0 + 1u < p.M && col0 + 0u < p.N) C[(row0 + 1u) * p.N + col0 + 0u] = acc10;
+    if (row0 + 1u < p.M && col0 + 1u < p.N) C[(row0 + 1u) * p.N + col0 + 1u] = acc11;
+    if (row0 + 1u < p.M && col0 + 2u < p.N) C[(row0 + 1u) * p.N + col0 + 2u] = acc12;
+    if (row0 + 1u < p.M && col0 + 3u < p.N) C[(row0 + 1u) * p.N + col0 + 3u] = acc13;
+    if (row0 + 2u < p.M && col0 + 0u < p.N) C[(row0 + 2u) * p.N + col0 + 0u] = acc20;
+    if (row0 + 2u < p.M && col0 + 1u < p.N) C[(row0 + 2u) * p.N + col0 + 1u] = acc21;
+    if (row0 + 2u < p.M && col0 + 2u < p.N) C[(row0 + 2u) * p.N + col0 + 2u] = acc22;
+    if (row0 + 2u < p.M && col0 + 3u < p.N) C[(row0 + 2u) * p.N + col0 + 3u] = acc23;
+    if (row0 + 3u < p.M && col0 + 0u < p.N) C[(row0 + 3u) * p.N + col0 + 0u] = acc30;
+    if (row0 + 3u < p.M && col0 + 1u < p.N) C[(row0 + 3u) * p.N + col0 + 1u] = acc31;
+    if (row0 + 3u < p.M && col0 + 2u < p.N) C[(row0 + 3u) * p.N + col0 + 2u] = acc32;
+    if (row0 + 3u < p.M && col0 + 3u < p.N) C[(row0 + 3u) * p.N + col0 + 3u] = acc33;
+}

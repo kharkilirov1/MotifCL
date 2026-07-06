@@ -6747,6 +6747,14 @@ VulkanOpResult run_vulkan_f32_matmul(VulkanRuntime& runtime,
         std::uint32_t k;
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
+    const bool use_rb4 = runtime.caps().subgroup_arithmetic_compute;
+    if (use_rb4) {
+        // Register-block 32x32 tile, 8x8 lanes (one wave64), 16 outputs/lane.
+        const std::uint32_t groups_x = static_cast<std::uint32_t>((n + 31) / 32);
+        const std::uint32_t groups_y = static_cast<std::uint32_t>((m + 31) / 32);
+        return runtime.dispatch_cached(vkspirv::k_mm_f32_nn_rb4, vkspirv::k_mm_f32_nn_rb4_words, buffers,
+                                       &push, sizeof(push), groups_x, groups_y, 1);
+    }
     const std::uint32_t groups_x = static_cast<std::uint32_t>((n + 15) / 16);
     const std::uint32_t groups_y = static_cast<std::uint32_t>((m + 15) / 16);
     return runtime.dispatch_cached(vkspirv::k_mm_f32_nn, vkspirv::k_mm_f32_nn_words, buffers, &push,
@@ -6790,6 +6798,11 @@ VulkanOpResult run_vulkan_f32_matmul_transpose_b(VulkanRuntime& runtime,
         std::uint32_t k;
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
+    if (runtime.caps().subgroup_arithmetic_compute) {
+        return runtime.dispatch_cached(vkspirv::k_mm_f32_nt_rb4, vkspirv::k_mm_f32_nt_rb4_words, buffers, &push,
+                                       sizeof(push), static_cast<std::uint32_t>((n + 31) / 32),
+                                       static_cast<std::uint32_t>((m + 31) / 32), 1);
+    }
     return runtime.dispatch_cached(vkspirv::k_mm_f32_nt, vkspirv::k_mm_f32_nt_words, buffers, &push,
                                    sizeof(push), static_cast<std::uint32_t>((n + 15) / 16),
                                    static_cast<std::uint32_t>((m + 15) / 16), 1);
@@ -6822,6 +6835,11 @@ VulkanOpResult run_vulkan_f32_matmul_transpose_a(VulkanRuntime& runtime,
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
     const std::vector<const VulkanBuffer*> buffers = {&a, &b, &c};
+    if (runtime.caps().subgroup_arithmetic_compute) {
+        return runtime.dispatch_cached(vkspirv::k_mm_f32_tn_rb4, vkspirv::k_mm_f32_tn_rb4_words, buffers, &push,
+                                       sizeof(push), static_cast<std::uint32_t>((n + 31) / 32),
+                                       static_cast<std::uint32_t>((m + 31) / 32), 1);
+    }
     return runtime.dispatch_cached(vkspirv::k_mm_f32_tn, vkspirv::k_mm_f32_tn_words, buffers, &push,
                                    sizeof(push), static_cast<std::uint32_t>((n + 15) / 16),
                                    static_cast<std::uint32_t>((m + 15) / 16), 1);

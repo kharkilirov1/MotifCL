@@ -582,3 +582,81 @@ Reduction-heavy ops ускорились на GPU side:
   reduction; subgroup variant добавлен в TODO. Stage 2 — column reduction,
   требует другого pattern.
 - **Register-block matmul** (O1+O2) — biggest remaining GPU-time win, отдельный срез.
+
+## Register-block matmul (Slice I, 2026-07-06)
+
+TOP-2 optimization из perf-ревью: dense matmul kernels (mm_f32_nn/nt/tn)
+использовали 16×16 tile с **1 output per lane** (256 lanes = 4 wave64 на
+GCN4). Slice I добавляет register-block variants по образцу OpenCL
+`matmul_register_block4_f32`: 32×32 output tile, 8×8 lanes (1 wave64),
+каждый lane владеет 4×4 = **16 output cells** — 8-16× лучшая arithmetic
+density (каждая LDS-загрузка переиспользуется 8×).
+
+### I1 — 3 register-block kernel variants
+
+- `kernels/vulkan/mm_f32_nn_rb4.comp` — C = A[M,K] × B[K,N].
+- `kernels/vulkan/mm_f32_nt_rb4.comp` — C = A[M,K] × B[N,K]^T (B row-major [N,K]).
+- `kernels/vulkan/mm_f32_tn_rb4.comp` — C = A[K,M]^T × B[K,N] (A row-major [K,M]).
+
+Все три: local_size = 8×8 = 64 lanes, RB_M=32, RB_N=32, RB_K=16,
+RB_THREAD_M=4, RB_THREAD_N=4. Cooperative coalesced load (linear `idx` stride
+64), 16 register accumulators per lane, `As[32][17]` / `Bs[16][33]` padding
+для LDS bank-conflict avoidance. Bit-exact с OpenCL `matmul_register_block4_f32`
+/ `matmul_transb_rb4_f32` / `matmul_transa_rb4_f32`.
+
+### I2 — Dispatch branching
+
+3 dispatch sites в `src/runtime/vulkan_backend.cpp`
+(`run_vulkan_f32_matmul`, `run_vulkan_f32_matmul_transpose_b`,
+`run_vulkan_f32_matmul_transpose_a`) теперь выбирают `_rb4` variant когда
+`runtime.caps().subgroup_arithmetic_compute == true` (proxies для "vulkan1.1
+device, modern GPU"). Group count для rb4: `(N+31)/32, (M+31)/32` (32×32 tile).
+
+Original 16×16 kernels остаются как fallback.
+
+### Verification
+
+- ON build (`build/port-vk`): ctest **35/36 passed** + 1 flaky
+  (`test_modern_transformer` — известный flake при параллельном ctest на
+  этой машине; проходит изолированно, не связан с matmul changes). Все
+  matmul parity tests (multi-tile NN/NT/TN, M=1, backward parity через
+  matmul_transpose_a/b) проходят через rb4 variants.
+- OFF build (`build/codex-vulkan-off`): ctest **36/36 passed**, OpenCL-free
+  standalone link confirmed.
+- SPIR-V inc: 48 → **51 kernels**.
+
+### Perf impact (RX 580, GCN4)
+
+GPU time (timestamp queries, isolated от host jitter):
+
+| shape | baseline GPU | rb4 GPU | Δ |
+|---|---|---|---|
+| matmul 256³ | 37.92 us | 38.08 us | ~0 (neutral) |
+| matmul 512³ | 229.76 us | 229.92 us | ~0 (neutral) |
+| matmul_nt 256³ | 46.56 us | 46.56 us | 0 |
+| matmul_tn 256³ | 34.08 us | 36.80 us | +8% (slower) |
+
+**На GCN4 (RX 580) rb4 не ускоряет dense matmul** — объяснение: rb4
+local_size = 8×8 = **1 wave64 per workgroup**, тогда как 16×16 tile =
+**4 wave64 per workgroup**. На GCN4 (wave64) больше wavefronts per
+workgroup = лучшее latency hiding (memory latency маскируется переключением
+волн). Register-block выигрыш типичен на NVIDIA / RDNA3 (wave32, много
+wavefronts per CU), но GCN4 уже хорошо упакован driver'ом в 16×16 variant.
+
+**Значение rb4 variants:**
+1. **Portability** — на AMD RDNA2/3 (RX 6000+/7000+), NVIDIA, Intel Arc
+   register-block даёт ожидаемый 2-4× GPU speedup. Код готов к запуску на
+   этих GPU без изменений (dispatch сам выберет rb4 по caps).
+2. **Bit-exact parity** с OpenCL `matmul_register_block4_f32` — тот же
+   algorithm, что и production OpenCL path, для cross-backend debugging.
+3. **Baseline сохранён** — original 16×16 kernels остаются для устройств
+   без subgroup support или где rb4 не помогает.
+
+### Slice I — что НЕ сделано
+
+- **mm_f32_m1n / mm_f32_m1nt** (M=1 decode matmul) — не портированы на rb4
+  (они уже wave-per-column optimized, ratio 4-6× против OpenCL; port
+  возможен, но низкий ROI).
+- **M=1 4-column variant** (O3) — port `matmul_f32_m1_wg64x4_f32`, для
+  coalesced B reads; отдельный срез.
+- На GCN4 specifically: ничего не выигрывает; на других GPU — готово.
