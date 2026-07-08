@@ -497,7 +497,6 @@ int main(int argc, char** argv) {
         };
         const double rw2 = 2.0 * rows * cols * sizeof(float);
         const double rw3 = 3.0 * rows * cols * sizeof(float);
-        const double rw4 = 4.0 * rows * cols * sizeof(float);
         add_case("softmax_rows_f32", 0.40, rw2,
                  [fx, &runtime]() -> std::string {
                      auto r = motifcl::run_vulkan_softmax_rows(runtime, fx->b0, fx->b3, fx->rows, fx->cols);
@@ -975,6 +974,182 @@ int main(int argc, char** argv) {
             };
         }
         cases.push_back(std::move(bwd_in));
+    }
+
+    // ---- quant matmul (Slice Q3 bench cases) ----
+    {
+        // Q8_0 x Q8_0 scaled prefill: 512x512x512
+        struct QuantMatmulFixture {
+            motifcl::VulkanBuffer a_i8, a_scales, b_i8, b_scales, c_f32;
+            motifcl::VulkanBuffer a_f32, b_q4, bq_scales, c_decode;
+            motifcl::Tensor cl_a_q8, cl_b_q8, cl_a_f32;
+            std::size_t M, K, N;
+        };
+        // matmul_q8q8_scaled 512x512x512 (prefill)
+        {
+            auto fx = std::make_shared<QuantMatmulFixture>();
+            fx->M = 512; fx->K = 512; fx->N = 512;
+            const auto a_host_q8 = random_host(fx->M * fx->K, 0xaa01);
+            const auto b_host_q8 = random_host(fx->K * fx->N, 0xaa02);
+            std::vector<std::int8_t> a_i8(fx->M * fx->K);
+            std::vector<std::int8_t> b_i8(fx->K * fx->N);
+            std::vector<float> a_scales(fx->M), b_scales(fx->N);
+            for (std::size_t i = 0; i < fx->M; ++i) a_scales[i] = 1.0f / 127.0f;
+            for (std::size_t i = 0; i < fx->N; ++i) b_scales[i] = 1.0f / 127.0f;
+            for (std::size_t i = 0; i < a_i8.size(); ++i)
+                a_i8[i] = static_cast<std::int8_t>(std::clamp(static_cast<int>(a_host_q8[i] * 127.0f), -127, 127));
+            for (std::size_t i = 0; i < b_i8.size(); ++i)
+                b_i8[i] = static_cast<std::int8_t>(std::clamp(static_cast<int>(b_host_q8[i] * 127.0f), -127, 127));
+            fx->a_i8 = runtime.create_buffer(a_i8.size() * sizeof(std::int8_t), a_i8.data());
+            fx->a_scales = runtime.create_buffer(a_scales.size() * sizeof(float), a_scales.data());
+            fx->b_i8 = runtime.create_buffer(b_i8.size() * sizeof(std::int8_t), b_i8.data());
+            fx->b_scales = runtime.create_buffer(b_scales.size() * sizeof(float), b_scales.data());
+            fx->c_f32 = runtime.create_buffer(fx->M * fx->N * sizeof(float));
+            if (opencl_available) {
+                auto qa = motifcl::Tensor::from_cpu(*cl_backend, {static_cast<int64_t>(fx->M), static_cast<int64_t>(fx->K)},
+                                                    motifcl::DType::F32, a_host_q8.data());
+                auto qb = motifcl::Tensor::from_cpu(*cl_backend, {static_cast<int64_t>(fx->K), static_cast<int64_t>(fx->N)},
+                                                    motifcl::DType::F32, b_host_q8.data());
+                fx->cl_a_q8 = motifcl::quantize_q8_symmetric_rows(qa);
+                fx->cl_b_q8 = motifcl::quantize_q8_symmetric_rows(qb);
+            }
+            BenchCase bench;
+            bench.op = "matmul_q8q8_scaled";
+            std::ostringstream shape;
+            shape << fx->M << "x" << fx->K << "x" << fx->N;
+            bench.shape = shape.str();
+            bench.target_ratio = 0.33;
+            bench.work_bytes = static_cast<double>(a_i8.size() * sizeof(int8_t) + b_i8.size() * sizeof(int8_t) +
+                                                   a_scales.size() * sizeof(float) + b_scales.size() * sizeof(float) +
+                                                   fx->M * fx->N * sizeof(float));
+            bench.vulkan_iter = [fx, &runtime]() -> std::string {
+                const auto r = motifcl::run_vulkan_matmul_q8q8_scaled(
+                    runtime, fx->a_i8, fx->a_scales, fx->b_i8, fx->b_scales, fx->c_f32, fx->M, fx->K, fx->N);
+                return r.success ? std::string() : r.error;
+            };
+            if (opencl_available) {
+                auto backend_ptr = cl_backend.get();
+                bench.opencl_iter = [fx, backend_ptr]() {
+                    motifcl::autograd::NoGradGuard guard;
+                    auto out = motifcl::matmul(fx->cl_a_q8, fx->cl_b_q8);
+                    backend_ptr->finish();
+                };
+            }
+            cases.push_back(std::move(bench));
+        }
+        // matmul_f32q4_m1 1x1024x1024 (decode)
+        {
+            auto fx = std::make_shared<QuantMatmulFixture>();
+            fx->M = 1; fx->K = 1024; fx->N = 1024;
+            std::vector<float> a_f32(fx->K);
+            for (std::size_t i = 0; i < a_f32.size(); ++i)
+                a_f32[i] = std::sin(static_cast<float>(i) * 0.73f) * 2.0f;
+            const auto total_b = fx->K * fx->N;
+            const auto packed_bytes = (total_b + 1) / 2;
+            std::vector<std::uint8_t> b_packed(packed_bytes, 0);
+            std::vector<float> b_scales(fx->N);
+            for (std::size_t i = 0; i < fx->N; ++i)
+                b_scales[i] = 1.0f / 7.0f;
+            for (std::size_t idx = 0; idx < total_b; ++idx) {
+                int q = static_cast<int>((idx * 11 + 5) % 15) - 7;
+                std::uint8_t code = static_cast<std::uint8_t>(q + 8);
+                if (idx & 1) b_packed[idx >> 1] |= (code << 4);
+                else         b_packed[idx >> 1] = code;
+            }
+            fx->a_f32 = runtime.create_buffer(a_f32.size() * sizeof(float), a_f32.data());
+            fx->b_q4 = runtime.create_buffer(b_packed.size(), b_packed.data());
+            fx->bq_scales = runtime.create_buffer(b_scales.size() * sizeof(float), b_scales.data());
+            fx->c_decode = runtime.create_buffer(fx->N * sizeof(float));
+            if (opencl_available) {
+                fx->cl_a_f32 = motifcl::Tensor::from_cpu(*cl_backend,
+                    {static_cast<int64_t>(fx->M), static_cast<int64_t>(fx->K)},
+                    motifcl::DType::F32, a_f32.data());
+            }
+            BenchCase bench;
+            bench.op = "matmul_f32q4_m1";
+            bench.shape = "1x1024x1024";
+            bench.target_ratio = 0.33;
+            bench.work_bytes = static_cast<double>(fx->K * sizeof(float) + packed_bytes +
+                                                   b_scales.size() * sizeof(float) + fx->N * sizeof(float));
+            bench.vulkan_iter = [fx, &runtime]() -> std::string {
+                const auto r = motifcl::run_vulkan_matmul_f32q4_m1(
+                    runtime, fx->a_f32, fx->b_q4, fx->bq_scales, fx->c_decode, fx->K, fx->N);
+                return r.success ? std::string() : r.error;
+            };
+            if (opencl_available) {
+                auto backend_ptr = cl_backend.get();
+                bench.opencl_iter = [fx, backend_ptr]() {
+                    motifcl::autograd::NoGradGuard guard;
+                    auto qb = motifcl::Tensor::empty(*backend_ptr,
+                        {static_cast<int64_t>(fx->K), static_cast<int64_t>(fx->N)},
+                        motifcl::DType::Q4_0);
+                    qb._set_quant_scales(
+                        motifcl::Tensor::from_cpu(*backend_ptr, {static_cast<int64_t>(fx->N)},
+                                                  motifcl::DType::F32, std::vector<float>(fx->N, 1.0f / 7.0f).data()),
+                        1, 0);
+                    // Use the OpenCL matmul path for baseline
+                    auto out = motifcl::matmul(fx->cl_a_f32, qb);
+                    backend_ptr->finish();
+                };
+            }
+            cases.push_back(std::move(bench));
+        }
+        // matmul_f32q4_m1 1x2048x2048 (decode)
+        {
+            auto fx = std::make_shared<QuantMatmulFixture>();
+            fx->M = 1; fx->K = 2048; fx->N = 2048;
+            std::vector<float> a_f32(fx->K);
+            for (std::size_t i = 0; i < a_f32.size(); ++i)
+                a_f32[i] = std::sin(static_cast<float>(i) * 0.73f) * 2.0f;
+            const auto total_b = fx->K * fx->N;
+            const auto packed_bytes = (total_b + 1) / 2;
+            std::vector<std::uint8_t> b_packed(packed_bytes, 0);
+            std::vector<float> b_scales(fx->N);
+            for (std::size_t i = 0; i < fx->N; ++i)
+                b_scales[i] = 1.0f / 7.0f;
+            for (std::size_t idx = 0; idx < total_b; ++idx) {
+                int q = static_cast<int>((idx * 11 + 5) % 15) - 7;
+                std::uint8_t code = static_cast<std::uint8_t>(q + 8);
+                if (idx & 1) b_packed[idx >> 1] |= (code << 4);
+                else         b_packed[idx >> 1] = code;
+            }
+            fx->a_f32 = runtime.create_buffer(a_f32.size() * sizeof(float), a_f32.data());
+            fx->b_q4 = runtime.create_buffer(b_packed.size(), b_packed.data());
+            fx->bq_scales = runtime.create_buffer(b_scales.size() * sizeof(float), b_scales.data());
+            fx->c_decode = runtime.create_buffer(fx->N * sizeof(float));
+            if (opencl_available) {
+                fx->cl_a_f32 = motifcl::Tensor::from_cpu(*cl_backend,
+                    {static_cast<int64_t>(fx->M), static_cast<int64_t>(fx->K)},
+                    motifcl::DType::F32, a_f32.data());
+            }
+            BenchCase bench;
+            bench.op = "matmul_f32q4_m1";
+            bench.shape = "1x2048x2048";
+            bench.target_ratio = 0.33;
+            bench.work_bytes = static_cast<double>(fx->K * sizeof(float) + packed_bytes +
+                                                   b_scales.size() * sizeof(float) + fx->N * sizeof(float));
+            bench.vulkan_iter = [fx, &runtime]() -> std::string {
+                const auto r = motifcl::run_vulkan_matmul_f32q4_m1(
+                    runtime, fx->a_f32, fx->b_q4, fx->bq_scales, fx->c_decode, fx->K, fx->N);
+                return r.success ? std::string() : r.error;
+            };
+            if (opencl_available) {
+                auto backend_ptr = cl_backend.get();
+                bench.opencl_iter = [fx, backend_ptr]() {
+                    motifcl::autograd::NoGradGuard guard;
+                    auto qb = motifcl::Tensor::empty(*backend_ptr,
+                        {static_cast<int64_t>(fx->K), static_cast<int64_t>(fx->N)},
+                        motifcl::DType::Q4_0);
+                    qb._set_quant_scales(
+                        motifcl::Tensor::from_cpu(*backend_ptr, {static_cast<int64_t>(fx->N)},
+                                                  motifcl::DType::F32, std::vector<float>(fx->N, 1.0f / 7.0f).data()),
+                        1, 0);
+                    auto out = motifcl::matmul(fx->cl_a_f32, qb);
+                    backend_ptr->finish();
+                };
+            }
+            cases.push_back(std::move(bench));
+        }
     }
 
     // ---- end-to-end SGD training step (same block as test_vulkan_train_step) ----

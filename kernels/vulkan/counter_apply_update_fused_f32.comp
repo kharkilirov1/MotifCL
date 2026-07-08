@@ -70,17 +70,26 @@ void main() {
     const float dn = denom[row];
     const float Cf = float(p.C);
     int nc[4];
+    // grad_out[r*out_features + row] is independent of k: hoist it out of the k
+    // loop and accumulate all four gw[k] in a single pass over r, so grad_out is
+    // read N times per group instead of 4*N. Per-k accumulation order over r is
+    // unchanged, so each gw[k] stays bit-identical to the scalar CL port.
+    float gw[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (int r = 0; r < p.N; ++r) {
+        const float go = grad_out[r * p.out_features + row];
+        const int xbase = r * p.in_features + g * 4;
+        gw[0] += go * x[xbase];
+        gw[1] += go * x[xbase + 1];
+        gw[2] += go * x[xbase + 2];
+        gw[3] += go * x[xbase + 3];
+    }
     for (int k = 0; k < 4; ++k) {
         const int i = g * 4 + k;
         const int elem = row * p.in_features + i;
-        float gw = 0.0;
-        for (int r = 0; r < p.N; ++r) {
-            gw += grad_out[r * p.out_features + row] * x[r * p.in_features + i];
-        }
         int t;
         int c;
         cc_decode(cc[k], p.C, t, c);
-        const float tick = -p.lr * (gw / dn) * (Cf / s_new);
+        const float tick = -p.lr * (gw[k] / dn) * (Cf / s_new);
         const float c_reb = float(c) * (s_old / s_new);
         const float val = c_reb + tick;
         const float f = floor(val);

@@ -1,0 +1,63 @@
+// C[M,N] = scales_a[row]*scales_b[col] * sum_k(A_i8[row,k] * B_q4[k,col])
+// 16x16 shared-memory tile per workgroup. A is int8, B is packed Q4_0.
+// Q4_0 packing: two consecutive N values per byte (n even = low nibble, n odd = high).
+// Verify: matmul_q8_q4_scaled_f32 reads B[k*N+col] with q4_0_load — index is (k*N+col),
+// so the nibble pair spans consecutive col values within the same row k.
+// Matches quant.cl: q4_0_load(x, k*N+col) -> byte at (k*N+col)>>1,
+//   low nibble for even col, high for odd col.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { int8_t A[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BBuf { uint8_t B[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ScaleABuf { float scales_a[]; };
+layout(std430, set = 0, binding = 3) readonly buffer ScaleBBuf { float scales_b[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer CBuf { float C[]; };
+
+layout(push_constant) uniform Push {
+    uint M;
+    uint K;
+    uint N;
+} p;
+
+shared float As[16][16];
+shared float Bs[16][17];
+
+float q4_load(uint k, uint n_val) {
+    uint idx = k * p.N + n_val;
+    uint byte_idx = idx >> 1u;
+    uint packed_byte = uint(B[byte_idx]);
+    uint code;
+    if ((idx & 1u) != 0u) {
+        code = (packed_byte >> 4u) & 15u;
+    } else {
+        code = packed_byte & 15u;
+    }
+    return float(int(code) - 8);
+}
+
+void main() {
+    const uint tx = gl_LocalInvocationID.x;
+    const uint ty = gl_LocalInvocationID.y;
+    const uint col = gl_WorkGroupID.x * 16u + tx;
+    const uint row = gl_WorkGroupID.y * 16u + ty;
+
+    float acc = 0.0;
+    const uint tiles = (p.K + 15u) / 16u;
+    for (uint t = 0u; t < tiles; ++t) {
+        const uint ak = t * 16u + tx;
+        const uint bk = t * 16u + ty;
+        As[ty][tx] = (row < p.M && ak < p.K) ? float(int(A[row * p.K + ak])) : 0.0;
+        Bs[ty][tx] = (bk < p.K && col < p.N) ? q4_load(bk, col) : 0.0;
+        barrier();
+        for (uint i = 0u; i < 16u; ++i) {
+            acc += As[ty][i] * Bs[i][tx];
+        }
+        barrier();
+    }
+    if (row < p.M && col < p.N) {
+        C[row * p.N + col] = acc * scales_a[row] * scales_b[col];
+    }
+}

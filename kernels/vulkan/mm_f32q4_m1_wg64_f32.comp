@@ -1,0 +1,77 @@
+// C[1,N] = A[1,K] * B[K,N]_q4 * col_scales[N], decode matmul for M=1.
+// One workgroup of 64 threads computes 4 output columns with parallel K reduction.
+// B is packed Q4_0: byte idx = (k*N + col)>>1, nibble from LSB (even col) / high (odd).
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { float A[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BBuf { uint8_t B[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ScaleBuf { float scales[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer CBuf { float C[]; };
+
+layout(push_constant) uniform Push {
+    uint K;
+    uint N;
+} p;
+
+shared float scratch[4][64];
+
+float q4_load(uint k, uint col) {
+    uint idx = k * p.N + col;
+    uint byte_idx = idx >> 1u;
+    uint packed_byte = uint(B[byte_idx]);
+    uint code;
+    if ((idx & 1u) != 0u) {
+        code = (packed_byte >> 4u) & 15u;
+    } else {
+        code = packed_byte & 15u;
+    }
+    return float(int(code) - 8);
+}
+
+void main() {
+    const uint group = gl_WorkGroupID.x;
+    const uint lid = gl_LocalInvocationID.x;
+    const uint col0 = group * 4u;
+    const uint c0 = col0;
+    const uint c1 = col0 + 1u;
+    const uint c2 = col0 + 2u;
+    const uint c3 = col0 + 3u;
+    float acc0 = 0.0;
+    float acc1 = 0.0;
+    float acc2 = 0.0;
+    float acc3 = 0.0;
+    const float sb0 = (c0 < p.N) ? scales[c0] : 0.0;
+    const float sb1 = (c1 < p.N) ? scales[c1] : 0.0;
+    const float sb2 = (c2 < p.N) ? scales[c2] : 0.0;
+    const float sb3 = (c3 < p.N) ? scales[c3] : 0.0;
+    for (uint k = lid; k < p.K; k += 64u) {
+        const float av = A[k];
+        if (c0 < p.N) acc0 += av * q4_load(k, c0) * sb0;
+        if (c1 < p.N) acc1 += av * q4_load(k, c1) * sb1;
+        if (c2 < p.N) acc2 += av * q4_load(k, c2) * sb2;
+        if (c3 < p.N) acc3 += av * q4_load(k, c3) * sb3;
+    }
+    scratch[0][lid] = acc0;
+    scratch[1][lid] = acc1;
+    scratch[2][lid] = acc2;
+    scratch[3][lid] = acc3;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lid < stride) {
+            scratch[0][lid] += scratch[0][lid + stride];
+            scratch[1][lid] += scratch[1][lid + stride];
+            scratch[2][lid] += scratch[2][lid + stride];
+            scratch[3][lid] += scratch[3][lid + stride];
+        }
+        barrier();
+    }
+    if (lid == 0u) {
+        if (c0 < p.N) C[c0] = scratch[0][0];
+        if (c1 < p.N) C[c1] = scratch[1][0];
+        if (c2 < p.N) C[c2] = scratch[2][0];
+        if (c3 < p.N) C[c3] = scratch[3][0];
+    }
+}

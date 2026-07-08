@@ -9,6 +9,7 @@
 #include <motifcl/core/error.hpp>
 #include <motifcl/runtime/backend.hpp>
 #include <motifcl/runtime/microkernel.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 
 namespace motifcl {
 namespace {
@@ -129,6 +130,8 @@ Tensor quantize_scaled(const Tensor& x, DType dtype, const Tensor& scales, int a
 } // namespace
 
 Tensor quantize_q8_symmetric(const Tensor& x, float scale) {
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "quantize_q8_symmetric (scalar-scale) is not ported to Vulkan yet; use quantize_q8_symmetric_rows or _cols");
     require_quant_microkernel();
     MCL_CHECK(x.dtype() == DType::F32, "quantize_q8_symmetric expects f32 input");
     MCL_CHECK(x.valid(), "quantize_q8_symmetric input is invalid");
@@ -149,10 +152,42 @@ Tensor quantize_q8_symmetric(const Tensor& x, float scale) {
 }
 
 Tensor dequantize_q8(const Tensor& x) {
-    require_quant_microkernel();
     MCL_CHECK(x.dtype() == DType::Q8_0, "dequantize_q8 expects q8_0 input");
-    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     int n = static_cast<int>(x.numel());
+    if (x.backend().is_vulkan()) {
+        auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+        if (x.has_quant_scales()) {
+            auto scales = x.quant_scales();
+            const int rows = x.ndim() >= 1 ? static_cast<int>(x.shape()[0]) : 1;
+            const int cols = x.ndim() >= 2 ? static_cast<int>(x.shape()[1]) : n;
+            const int mode = scale_mode_for_axis(x.quant_scale_axis());
+            MCL_CHECK(mode == 1 || mode == 2, "vulkan dequantize_q8 supports per-row or per-col scales only");
+            const auto result = run_vulkan_dequantize_q8_scaled(
+                x.backend().vulkan_runtime(),
+                x.storage().vulkan_buffer,
+                scales.storage().vulkan_buffer,
+                out.storage().vulkan_buffer,
+                static_cast<std::size_t>(n),
+                static_cast<std::uint32_t>(mode),
+                static_cast<std::size_t>(rows),
+                static_cast<std::size_t>(cols));
+            MCL_CHECK(result.success, std::string("vulkan dequantize_q8_scaled failed: ") + result.error);
+            autograd::record_op("dequantize_q8_0_to_f32_scaled", {x.id(), scales.id()}, {out.id()});
+            return out;
+        }
+        // scalar scale: host dequant (test path, not perf-critical)
+        auto i8 = x.to_vector<std::int8_t>();
+        float scale = x.quant_scale();
+        auto N = static_cast<std::size_t>(n);
+        std::vector<float> fdata(N);
+        for (std::size_t i = 0; i < N; ++i)
+            fdata[i] = static_cast<float>(static_cast<int>(i8[i])) * scale;
+        auto result = Tensor::from_cpu(x.backend(), x.shape(), DType::F32, fdata.data());
+        autograd::record_op("dequantize_q8_0_to_f32", {x.id()}, {result.id()});
+        return result;
+    }
+    require_quant_microkernel();
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     if (x.has_quant_scales()) {
         auto scales = x.quant_scales();
         auto k = x.backend().kernels.get("dequantize_q8_0_to_f32_scaled");
@@ -184,6 +219,8 @@ Tensor dequantize_q8(const Tensor& x) {
 }
 
 Tensor quantize_q4_symmetric(const Tensor& x, float scale) {
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "quantize_q4_symmetric (scalar-scale) is not ported to Vulkan yet; use quantize_q4_symmetric_cols");
     require_quant_microkernel();
     MCL_CHECK(x.dtype() == DType::F32, "quantize_q4_symmetric expects f32 input");
     MCL_CHECK(x.valid(), "quantize_q4_symmetric input is invalid");
@@ -205,10 +242,46 @@ Tensor quantize_q4_symmetric(const Tensor& x, float scale) {
 }
 
 Tensor dequantize_q4(const Tensor& x) {
-    require_quant_microkernel();
     MCL_CHECK(x.dtype() == DType::Q4_0, "dequantize_q4 expects q4_0 input");
-    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     int n = static_cast<int>(x.numel());
+    if (x.backend().is_vulkan()) {
+        auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+        if (x.has_quant_scales()) {
+            auto scales = x.quant_scales();
+            const int rows = x.ndim() >= 1 ? static_cast<int>(x.shape()[0]) : 1;
+            const int cols = x.ndim() >= 2 ? static_cast<int>(x.shape()[1]) : n;
+            const int mode = scale_mode_for_axis(x.quant_scale_axis());
+            MCL_CHECK(mode == 1 || mode == 2, "vulkan dequantize_q4 supports per-row or per-col scales only");
+            const auto result = run_vulkan_dequantize_q4_scaled(
+                x.backend().vulkan_runtime(),
+                x.storage().vulkan_buffer,
+                scales.storage().vulkan_buffer,
+                out.storage().vulkan_buffer,
+                static_cast<std::size_t>(n),
+                static_cast<std::uint32_t>(mode),
+                static_cast<std::size_t>(rows),
+                static_cast<std::size_t>(cols));
+            MCL_CHECK(result.success, std::string("vulkan dequantize_q4_scaled failed: ") + result.error);
+            autograd::record_op("dequantize_q4_0_to_f32_scaled", {x.id(), scales.id()}, {out.id()});
+            return out;
+        }
+        // scalar scale: host dequant (test path, not perf-critical)
+        auto packed = x.to_vector<std::uint8_t>();
+        float scale = x.quant_scale();
+        auto N = static_cast<std::size_t>(n);
+        std::vector<float> fdata(N);
+        for (std::size_t i = 0; i < N; ++i) {
+            std::uint8_t byte = packed[i >> 1];
+            std::uint8_t code = (i & 1) ? ((byte >> 4) & 15) : (byte & 15);
+            int q = static_cast<int>(code) - 8;
+            fdata[i] = static_cast<float>(q) * scale;
+        }
+        auto result = Tensor::from_cpu(x.backend(), x.shape(), DType::F32, fdata.data());
+        autograd::record_op("dequantize_q4_0_to_f32", {x.id()}, {result.id()});
+        return result;
+    }
+    require_quant_microkernel();
+    auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     if (x.has_quant_scales()) {
         auto scales = x.quant_scales();
         auto k = x.backend().kernels.get("dequantize_q4_0_to_f32_scaled");
@@ -240,17 +313,34 @@ Tensor dequantize_q4(const Tensor& x) {
 }
 
 Tensor quantize_q8_symmetric_axis(const Tensor& x, int axis) {
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "quantize_q8_symmetric_axis is not ported to Vulkan yet; direct axis quant not supported, use row/col variants");
     auto scales = make_scale_tensor(x.backend(), choose_axis_scales(x, axis, 127.0f));
     return quantize_scaled(x, DType::Q8_0, scales, axis, 0);
 }
 
 Tensor quantize_q8_symmetric_rows(const Tensor& x) {
-    require_quant_microkernel();
     MCL_CHECK(x.dtype() == DType::F32, "quantize_q8_symmetric_rows expects f32 input");
     MCL_CHECK(x.ndim() == 2, "row quantization expects rank-2 tensors");
     const auto rows = static_cast<int>(x.shape()[0]);
     const auto cols = static_cast<int>(x.shape()[1]);
     MCL_CHECK(rows > 0 && cols > 0, "row quantization expects non-empty rows and cols");
+    if (x.backend().is_vulkan()) {
+        auto out = Tensor::empty(x.backend(), x.shape(), DType::Q8_0);
+        auto scales = Tensor::empty(x.backend(), {rows}, DType::F32);
+        out._set_quant_scales(scales, 0, 0);
+        const auto result = run_vulkan_quantize_q8_rowwise(
+            x.backend().vulkan_runtime(),
+            x.storage().vulkan_buffer,
+            out.storage().vulkan_buffer,
+            scales.storage().vulkan_buffer,
+            static_cast<std::size_t>(rows),
+            static_cast<std::size_t>(cols));
+        MCL_CHECK(result.success, std::string("vulkan quantize_q8_symmetric_rows failed: ") + result.error);
+        autograd::record_op("quantize_f32_to_q8_0_rowwise_fused", {x.id()}, {out.id()});
+        return out;
+    }
+    require_quant_microkernel();
     auto scales = Tensor::empty(x.backend(), {rows}, DType::F32);
     auto out = Tensor::empty(x.backend(), x.shape(), DType::Q8_0);
     out._set_quant_scales(scales, 0, 0);
@@ -269,28 +359,93 @@ Tensor quantize_q8_symmetric_rows(const Tensor& x) {
 }
 
 Tensor quantize_q8_symmetric_cols(const Tensor& x) {
+    if (x.backend().is_vulkan()) {
+        MCL_CHECK(x.dtype() == DType::F32, "quantize_q8_symmetric_cols expects f32 input");
+        MCL_CHECK(x.ndim() == 2, "col quantization expects rank-2 tensors");
+        const auto rows = static_cast<int64_t>(x.shape()[0]);
+        const auto cols = static_cast<int64_t>(x.shape()[1]);
+        MCL_CHECK(rows > 0 && cols > 0, "col quantization expects non-empty rows and cols");
+        auto host = x.to_vector<float>();
+        std::vector<float> scales_v(static_cast<std::size_t>(cols), 1.0f);
+        for (int64_t c = 0; c < cols; ++c) {
+            float max_abs = 0.0f;
+            for (int64_t r = 0; r < rows; ++r)
+                max_abs = std::max(max_abs, std::fabs(host[static_cast<std::size_t>(r * cols + c)]));
+            scales_v[static_cast<std::size_t>(c)] = max_abs <= 0.0f ? 1.0f : max_abs / 127.0f;
+        }
+        const auto n = static_cast<std::size_t>(rows * cols);
+        std::vector<std::int8_t> qdata(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            int q = static_cast<int>(std::nearbyint(host[i] / scales_v[i % static_cast<std::size_t>(cols)]));
+            q = std::min(127, std::max(-127, q));
+            qdata[i] = static_cast<std::int8_t>(q);
+        }
+        auto out = Tensor::from_cpu(x.backend(), x.shape(), DType::Q8_0, qdata.data());
+        auto scales_t = Tensor::from_cpu(x.backend(), {cols}, DType::F32, scales_v.data());
+        out._set_quant_scales(scales_t, 1, 0);
+        autograd::record_op("quantize_f32_to_q8_0_scaled", {x.id(), scales_t.id()}, {out.id()});
+        return out;
+    }
     return quantize_q8_symmetric_axis(x, 1);
 }
 
 Tensor quantize_q8_symmetric_blocks(const Tensor& x, int64_t block_size) {
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "quantize_q8_symmetric_blocks is not ported to Vulkan yet");
     auto scales = make_scale_tensor(x.backend(), choose_block_scales(x, block_size, 127.0f));
     return quantize_scaled(x, DType::Q8_0, scales, 2, block_size);
 }
 
 Tensor quantize_q4_symmetric_axis(const Tensor& x, int axis) {
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "quantize_q4_symmetric_axis is not ported to Vulkan yet; direct axis quant not supported, use col variant");
     auto scales = make_scale_tensor(x.backend(), choose_axis_scales(x, axis, 7.0f));
     return quantize_scaled(x, DType::Q4_0, scales, axis, 0);
 }
 
 Tensor quantize_q4_symmetric_rows(const Tensor& x) {
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "quantize_q4_symmetric_rows is not ported to Vulkan yet; row-wise Q4 quant not supported");
     return quantize_q4_symmetric_axis(x, 0);
 }
 
 Tensor quantize_q4_symmetric_cols(const Tensor& x) {
+    if (x.backend().is_vulkan()) {
+        MCL_CHECK(x.dtype() == DType::F32, "quantize_q4_symmetric_cols expects f32 input");
+        MCL_CHECK(x.ndim() == 2, "col quantization expects rank-2 tensors");
+        const auto rows = static_cast<int64_t>(x.shape()[0]);
+        const auto cols = static_cast<int64_t>(x.shape()[1]);
+        MCL_CHECK(rows > 0 && cols > 0, "col quantization expects non-empty rows and cols");
+        auto host = x.to_vector<float>();
+        std::vector<float> scales_v(static_cast<std::size_t>(cols), 1.0f);
+        for (int64_t c = 0; c < cols; ++c) {
+            float max_abs = 0.0f;
+            for (int64_t r = 0; r < rows; ++r)
+                max_abs = std::max(max_abs, std::fabs(host[static_cast<std::size_t>(r * cols + c)]));
+            scales_v[static_cast<std::size_t>(c)] = max_abs <= 0.0f ? 1.0f : max_abs / 7.0f;
+        }
+        const auto n = static_cast<std::size_t>(rows * cols);
+        const auto nbytes = dtype_storage_nbytes(DType::Q4_0, n);
+        std::vector<std::uint8_t> packed(nbytes, 0);
+        for (std::size_t i = 0; i < n; ++i) {
+            int q = static_cast<int>(std::nearbyint(host[i] / scales_v[i % static_cast<std::size_t>(cols)]));
+            q = std::min(7, std::max(-7, q));
+            std::uint8_t code = static_cast<std::uint8_t>(q + 8);
+            if (i & 1) packed[i >> 1] |= (code << 4);
+            else packed[i >> 1] = code;
+        }
+        auto out = Tensor::from_cpu(x.backend(), x.shape(), DType::Q4_0, packed.data());
+        auto scales_t = Tensor::from_cpu(x.backend(), {cols}, DType::F32, scales_v.data());
+        out._set_quant_scales(scales_t, 1, 0);
+        autograd::record_op("quantize_f32_to_q4_0_scaled", {x.id(), scales_t.id()}, {out.id()});
+        return out;
+    }
     return quantize_q4_symmetric_axis(x, 1);
 }
 
 Tensor quantize_q4_symmetric_blocks(const Tensor& x, int64_t block_size) {
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "quantize_q4_symmetric_blocks is not ported to Vulkan yet");
     auto scales = make_scale_tensor(x.backend(), choose_block_scales(x, block_size, 7.0f));
     return quantize_scaled(x, DType::Q4_0, scales, 2, block_size);
 }

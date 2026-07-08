@@ -1,6 +1,7 @@
 #include <motifcl/nn/embedding.hpp>
 
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <utility>
 
@@ -23,6 +24,49 @@ Tensor embedding_weight_backward(const Tensor& indices, const Tensor& grad_out, 
     MCL_CHECK(grad_out.numel() == indices.numel() * embed_dim, "embedding_weight_backward grad_out shape mismatch");
     auto out = Tensor::empty(indices.backend(), weight_shape, DType::F32);
     if (indices.backend().is_vulkan()) {
+        const std::size_t token_count = static_cast<std::size_t>(indices.numel());
+        auto& runtime = indices.backend().vulkan_runtime();
+        if (token_count == 0) {
+            const auto zero = run_vulkan_zero_f32(runtime, out.storage().vulkan_buffer,
+                                                   static_cast<std::size_t>(vocab_size) * static_cast<std::size_t>(embed_dim));
+            MCL_CHECK(zero.success, std::string("vulkan embedding weight backward zero-fill failed: ") + zero.error);
+            autograd::record_op("embedding_weight_backward_f32_i32", {indices.id(), grad_out.id()}, {out.id()});
+            return out;
+        }
+        // Scatter fast path: O(tokens*embed) work instead of O(vocab*tokens*embed),
+        // a large win for NLP shapes (vocab=30k+, token_count=512) where the
+        // brute-force scan is ~30x more work. Two variants, same result:
+        //   * native float atomicAdd (VK_EXT_shader_atomic_float) — fastest,
+        //     used where caps.supports_atomic_float was validated by the startup
+        //     smoke check;
+        //   * compare-and-swap emulation (integer atomicCompSwap, core Vulkan 1.0)
+        //     — the portable fallback used everywhere else, notably GCN4/RX 580,
+        //     whose native float atomics are driver-broken. ~7x over brute force.
+        // Heuristic: prefer scatter when vocab_size > 2*token_count.
+        // MOTIFCL_DISABLE_EMBEDDING_SCATTER=1 forces the brute-force scan.
+        static const bool env_disable_scatter = std::getenv("MOTIFCL_DISABLE_EMBEDDING_SCATTER") != nullptr;
+        const bool prefer_scatter = static_cast<std::size_t>(vocab_size) > 2u * token_count;
+        if (prefer_scatter && !env_disable_scatter) {
+            // Zero-fill grad_weight first (the scatter accumulates). Best-effort:
+            // if zero-fill fails, fall through to the brute-force path.
+            const auto zero = run_vulkan_zero_f32(runtime, out.storage().vulkan_buffer,
+                                                   static_cast<std::size_t>(vocab_size) * static_cast<std::size_t>(embed_dim));
+            if (zero.success) {
+                const bool use_cas = !runtime.caps().supports_atomic_float;
+                const auto result = use_cas
+                    ? run_vulkan_embedding_weight_backward_scatter_cas(
+                          runtime, indices.storage().vulkan_buffer, grad_out.storage().vulkan_buffer,
+                          out.storage().vulkan_buffer, static_cast<std::size_t>(vocab_size),
+                          static_cast<std::size_t>(embed_dim), token_count)
+                    : run_vulkan_embedding_weight_backward_scatter(
+                          runtime, indices.storage().vulkan_buffer, grad_out.storage().vulkan_buffer,
+                          out.storage().vulkan_buffer, static_cast<std::size_t>(vocab_size),
+                          static_cast<std::size_t>(embed_dim), token_count);
+                MCL_CHECK(result.success, std::string("vulkan embedding weight backward scatter failed: ") + result.error);
+                autograd::record_op("embedding_weight_backward_f32_i32", {indices.id(), grad_out.id()}, {out.id()});
+                return out;
+            }
+        }
         const auto result = run_vulkan_embedding_weight_backward(
             indices.backend().vulkan_runtime(),
             indices.storage().vulkan_buffer,
@@ -30,7 +74,7 @@ Tensor embedding_weight_backward(const Tensor& indices, const Tensor& grad_out, 
             out.storage().vulkan_buffer,
             static_cast<std::size_t>(vocab_size),
             static_cast<std::size_t>(embed_dim),
-            static_cast<std::size_t>(indices.numel()));
+            token_count);
         MCL_CHECK(result.success, std::string("vulkan embedding weight backward failed: ") + result.error);
         autograd::record_op("embedding_weight_backward_f32_i32", {indices.id(), grad_out.id()}, {out.id()});
         return out;

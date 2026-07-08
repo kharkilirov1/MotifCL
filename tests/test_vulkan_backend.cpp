@@ -779,6 +779,47 @@ int main() {
                 }
             }
 
+            // Embedding weight backward via the scatter fast path (Slice K):
+            // large vocab (V=64 > 2*T=12) triggers the scatter heuristic in
+            // embedding_weight_backward. Runs on every device: where native float
+            // atomics are trusted the native kernel is used, otherwise the CAS
+            // emulation (GCN4 / RX 580). Both must match the brute-force scan.
+            {
+                const int V = 64, D = 8, T = 6;
+                std::vector<float> w(V * D);
+                for (std::size_t i = 0; i < w.size(); ++i) w[i] = 0.01f * static_cast<float>(i);
+                std::vector<std::int32_t> idx = {5, 5, 10, 5, 60, 0};  // sparse, repeated rows
+                auto VW = Tensor::from_cpu(vk_backend, {V, D}, DType::F32, w.data());
+                VW.set_requires_grad(true);
+                auto VI = Tensor::from_cpu(vk_backend, {T}, DType::I32, idx.data());
+                nn::Embedding emb(vk_backend, V, D, /*skip_weight_init=*/true);
+                emb.weight.data = VW;
+                emb.weight.trainable = true;
+                VW.set_requires_grad(true);
+                emb.weight.data.set_requires_grad(true);
+                auto VY = emb.forward(VI);
+                std::vector<float> go(T * D);
+                for (std::size_t i = 0; i < go.size(); ++i) go[i] = 0.07f * static_cast<float>(i % 5) - 0.1f;
+                auto VGO = Tensor::from_cpu(vk_backend, {T, D}, DType::F32, go.data());
+                VY.backward(VGO);
+                expect(emb.weight.data.grad() != nullptr,
+                       "Vulkan embedding scatter backward must populate weight gradient");
+                if (emb.weight.data.grad()) {
+                    const auto gw = emb.weight.data.grad()->to_vector<float>();
+                    std::vector<float> ref_gw(V * D, 0.0f);
+                    for (std::size_t t = 0; t < static_cast<std::size_t>(T); ++t) {
+                        for (std::size_t d = 0; d < static_cast<std::size_t>(D); ++d) {
+                            ref_gw[idx[t] * D + d] += go[t * D + d];
+                        }
+                    }
+                    bool bw_ok = gw.size() == static_cast<std::size_t>(V * D);
+                    for (std::size_t i = 0; i < gw.size() && bw_ok; ++i) {
+                        if (std::fabs(gw[i] - ref_gw[i]) > 1e-5f) bw_ok = false;
+                    }
+                    expect(bw_ok, "Vulkan embedding scatter backward parity mismatch vs CPU reference");
+                }
+            }
+
             // token_position_embedding forward + backward parity vs CPU reference.
             {
                 const int V = 4, S = 3, D = 3, T = 6;  // token table [V,D], pos [S,D], B=2
@@ -1279,6 +1320,258 @@ int main() {
                     expect(gv.size() == ref_dv.size() && max_err(gv, ref_dv) <= 1e-4f,
                            "Vulkan GQA backward dV parity mismatch vs CPU reference");
                 }
+            }
+
+            // === Slice Q2: quant inference (Tensor-level) ===
+
+            // 1. quantize_q8_symmetric_rows parity vs host emulation (bit-identical)
+            {
+                const std::size_t M = 3, K = 47;
+                std::vector<float> x(M * K);
+                for (std::size_t i = 0; i < x.size(); ++i)
+                    x[i] = std::sin(static_cast<float>(i) * 0.37f) * 3.0f;
+                auto X = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(M), static_cast<int64_t>(K)},
+                                          DType::F32, x.data());
+                auto Q = quantize_q8_symmetric_rows(X);
+                expect(Q.dtype() == DType::Q8_0 && Q.has_quant_scales() && Q.quant_scale_axis() == 0,
+                       "Vulkan quantize_q8_symmetric_rows must produce Q8_0 with row scales");
+
+                // Host reference
+                std::vector<std::int8_t> host_q(M * K);
+                std::vector<float> host_scales(M);
+                for (std::size_t row = 0; row < M; ++row) {
+                    float max_abs = 0.0f;
+                    for (std::size_t c = 0; c < K; ++c)
+                        max_abs = std::max(max_abs, std::fabs(x[row * K + c]));
+                    host_scales[row] = max_abs <= 0.0f ? 1.0f : max_abs / 127.0f;
+                    for (std::size_t c = 0; c < K; ++c) {
+                        int q = static_cast<int>(std::nearbyint(x[row * K + c] / host_scales[row]));
+                        q = std::min(127, std::max(-127, q));
+                        host_q[row * K + c] = static_cast<std::int8_t>(q);
+                    }
+                }
+                auto dev_q = Q.to_vector<std::int8_t>();
+                expect(dev_q == host_q, "Vulkan quantize_q8_symmetric_rows int8 output must be bit-identical to host");
+
+                auto dev_scales = Q.quant_scales().to_vector<float>();
+                bool scales_ok = dev_scales.size() == host_scales.size();
+                for (std::size_t i = 0; i < dev_scales.size() && scales_ok; ++i)
+                    if (std::fabs(dev_scales[i] - host_scales[i]) > 1e-7f) scales_ok = false;
+                expect(scales_ok, "Vulkan quantize_q8_symmetric_rows scales must match host");
+
+                // Zero row test
+                std::vector<float> zero_x(M * K, 0.0f);
+                zero_x[0] = 2.0f; // non-zero first row, zero second/third
+                auto ZX = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(M), static_cast<int64_t>(K)},
+                                           DType::F32, zero_x.data());
+                auto ZQ = quantize_q8_symmetric_rows(ZX);
+                auto zq = ZQ.to_vector<std::int8_t>();
+                auto zs = ZQ.quant_scales().to_vector<float>();
+                expect(std::fabs(zs[1] - 1.0f) <= 1e-7f && std::fabs(zs[2] - 1.0f) <= 1e-7f,
+                       "Vulkan quantize_q8_symmetric_rows zero row must produce scale=1");
+            }
+
+            // 2. matmul(q8_rows, q8/q4_cols) parity
+            for (bool q4_rhs : {false, true}) {
+                const std::size_t M = 33, K = 47, N = 65;
+                std::vector<float> a_f32(M * K), b_f32(K * N);
+                for (std::size_t i = 0; i < a_f32.size(); ++i) a_f32[i] = std::sin(static_cast<float>(i) * 0.23f) * 2.5f;
+                for (std::size_t i = 0; i < b_f32.size(); ++i) b_f32[i] = std::cos(static_cast<float>(i) * 0.17f) * 3.0f;
+
+                auto A = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(M), static_cast<int64_t>(K)},
+                                          DType::F32, a_f32.data());
+                auto B = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(K), static_cast<int64_t>(N)},
+                                          DType::F32, b_f32.data());
+
+                auto QA = quantize_q8_symmetric_rows(A);
+                Tensor QB;
+                if (q4_rhs) {
+                    QB = quantize_q4_symmetric_cols(B);
+                    expect(QB.dtype() == DType::Q4_0, "quantize_q4_symmetric_cols on Vulkan must produce Q4_0");
+                } else {
+                    QB = quantize_q8_symmetric_cols(B);
+                    expect(QB.dtype() == DType::Q8_0, "quantize_q8_symmetric_cols on Vulkan must produce Q8_0");
+                }
+                expect(QB.has_quant_scales() && QB.quant_scale_axis() == 1,
+                       q4_rhs ? "Vulkan q4 col quant must have col scales"
+                              : "Vulkan q8 col quant must have col scales");
+
+                auto C = matmul(QA, QB);
+                expect(C.dtype() == DType::F32, "Vulkan quant matmul must produce f32 output");
+                auto c = C.to_vector<float>();
+
+                // Host reference: replicate quant + dequant + matmul using original f32 data
+                // Row scales for A: per-row max|A|/127
+                std::vector<float> host_as(M);
+                for (std::size_t r = 0; r < M; ++r) {
+                    float max_abs = 0.0f;
+                    for (std::size_t k2 = 0; k2 < K; ++k2) max_abs = std::max(max_abs, std::fabs(a_f32[r * K + k2]));
+                    host_as[r] = max_abs <= 0.0f ? 1.0f : max_abs / 127.0f;
+                }
+                // Col scales for B: per-col max|B|/qmax
+                float qmax = q4_rhs ? 7.0f : 127.0f;
+                std::vector<float> host_bs(N);
+                for (std::size_t c2 = 0; c2 < N; ++c2) {
+                    float max_abs = 0.0f;
+                    for (std::size_t k2 = 0; k2 < K; ++k2) max_abs = std::max(max_abs, std::fabs(b_f32[k2 * N + c2]));
+                    host_bs[c2] = max_abs <= 0.0f ? 1.0f : max_abs / qmax;
+                }
+                // Host reference matmul
+                std::vector<float> ref(M * N, 0.0f);
+                for (std::size_t m = 0; m < M; ++m) {
+                    for (std::size_t n2 = 0; n2 < N; ++n2) {
+                        float acc = 0.0f;
+                        for (std::size_t k2 = 0; k2 < K; ++k2) {
+                            int aq_val = static_cast<int>(std::nearbyint(a_f32[m * K + k2] / host_as[m]));
+                            aq_val = std::min(127, std::max(-127, aq_val));
+                            int bq_val = static_cast<int>(std::nearbyint(b_f32[k2 * N + n2] / host_bs[n2]));
+                            if (q4_rhs) bq_val = std::min(7, std::max(-7, bq_val));
+                            else bq_val = std::min(127, std::max(-127, bq_val));
+                            acc += static_cast<float>(aq_val) * static_cast<float>(bq_val);
+                        }
+                        ref[m * N + n2] = acc * host_as[m] * host_bs[n2];
+                    }
+                }
+
+                float max_diff = 0.0f;
+                for (std::size_t i = 0; i < ref.size(); ++i)
+                    max_diff = std::max(max_diff, std::fabs(c[i] - ref[i]));
+                float tol = q4_rhs ? 0.5f : 0.35f;
+                expect(max_diff <= tol,
+                       (std::string("Vulkan quant matmul M=33,K=47,N=65 ") +
+                        (q4_rhs ? "q8xq4" : "q8xq8") + " parity mismatch, max_diff=" +
+                        std::to_string(max_diff)).c_str());
+
+                // M=1 shape (q8xq8 only)
+                if (!q4_rhs) {
+                    const std::size_t M1 = 1, K1 = 128, N1 = 96;
+                    std::vector<float> a1_f32(M1 * K1), b1_f32(K1 * N1);
+                    for (std::size_t i = 0; i < a1_f32.size(); ++i) a1_f32[i] = std::sin(static_cast<float>(i) * 0.13f) * 4.0f;
+                    for (std::size_t i = 0; i < b1_f32.size(); ++i) b1_f32[i] = std::cos(static_cast<float>(i) * 0.09f) * 2.0f;
+                    auto A1 = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(M1), static_cast<int64_t>(K1)},
+                                               DType::F32, a1_f32.data());
+                    auto B1 = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(K1), static_cast<int64_t>(N1)},
+                                               DType::F32, b1_f32.data());
+                    auto QA1 = quantize_q8_symmetric_rows(A1);
+                    auto QB1 = quantize_q8_symmetric_cols(B1);
+                    auto C1 = matmul(QA1, QB1);
+                    auto c1 = C1.to_vector<float>();
+                    // host ref
+                    std::vector<float> as1(M1), bs1(N1);
+                    for (std::size_t k2 = 0; k2 < K1; ++k2) as1[0] = std::max(as1[0], std::fabs(a1_f32[k2]));
+                    as1[0] = as1[0] <= 0.0f ? 1.0f : as1[0] / 127.0f;
+                    for (std::size_t c2 = 0; c2 < N1; ++c2) {
+                        float max_abs = 0.0f;
+                        for (std::size_t k2 = 0; k2 < K1; ++k2) max_abs = std::max(max_abs, std::fabs(b1_f32[k2 * N1 + c2]));
+                        bs1[c2] = max_abs <= 0.0f ? 1.0f : max_abs / 127.0f;
+                    }
+                    std::vector<float> ref1(N1, 0.0f);
+                    for (std::size_t n2 = 0; n2 < N1; ++n2) {
+                        float acc = 0.0f;
+                        for (std::size_t k2 = 0; k2 < K1; ++k2) {
+                            int aq = static_cast<int>(std::nearbyint(a1_f32[k2] / as1[0]));
+                            aq = std::min(127, std::max(-127, aq));
+                            int bq = static_cast<int>(std::nearbyint(b1_f32[k2 * N1 + n2] / bs1[n2]));
+                            bq = std::min(127, std::max(-127, bq));
+                            acc += static_cast<float>(aq) * static_cast<float>(bq);
+                        }
+                        ref1[n2] = acc * as1[0] * bs1[n2];
+                    }
+                    float md1 = 0.0f;
+                    for (std::size_t i = 0; i < ref1.size(); ++i)
+                        md1 = std::max(md1, std::fabs(c1[i] - ref1[i]));
+                    expect(md1 <= 0.35f,
+                           (std::string("Vulkan quant matmul M=1,K=128,N=96 parity mismatch, max_diff=") +
+                            std::to_string(md1)).c_str());
+                }
+            }
+
+            // 4. Linear end-to-end
+            {
+                const int64_t in_f = 47, out_f = 65, B = 5;
+                std::vector<float> x_data(static_cast<std::size_t>(B * in_f));
+                for (std::size_t i = 0; i < x_data.size(); ++i)
+                    x_data[i] = std::sin(static_cast<float>(i) * 0.31f) * 2.0f;
+                auto X = Tensor::from_cpu(vk_backend, {B, in_f}, DType::F32, x_data.data());
+
+                for (bool use_bias : {false}) {   // bias not Vulkan-native yet (add_bias_rows gap)
+                    nn::Linear linear(vk_backend, static_cast<int>(in_f), static_cast<int>(out_f), use_bias);
+                    auto f32_y = linear.forward(X);
+                    auto f32_vec = f32_y.to_vector<float>();
+
+                    for (DType qdtype : {DType::Q8_0, DType::Q4_0}) {
+                        linear.disable_quantized_inference();
+                        linear.enable_quantized_inference(qdtype);
+                        auto qy = linear.forward(X);
+                        auto qy_vec = qy.to_vector<float>();
+                        float max_rerr = 0.0f;
+                        for (std::size_t i = 0; i < qy_vec.size(); ++i) {
+                            float denom = std::max(std::fabs(f32_vec[i]), 1e-8f);
+                            max_rerr = std::max(max_rerr, std::fabs(qy_vec[i] - f32_vec[i]) / denom);
+                        }
+                        float abs_md = 0.0f;
+                        for (std::size_t i = 0; i < qy_vec.size(); ++i)
+                            abs_md = std::max(abs_md, std::fabs(qy_vec[i] - f32_vec[i]));
+                        // Allow up to 5% relative error from quantization
+                        expect(max_rerr <= 0.05f,
+                               (std::string("Vulkan Linear ") + (qdtype == DType::Q8_0 ? "Q8_0" : "Q4_0") +
+                                (use_bias ? " bias" : " nobias") + " end-to-end relative error, max=" +
+                                std::to_string(max_rerr) + " abs_max_diff=" + std::to_string(abs_md)).c_str());
+                    }
+                }
+            }
+
+            // 4b. M=1 decode path: Linear forward batch=1 -> Q4_0 decode kernel
+            // NOTE: autograd graph capture cannot be used for path verification
+            // because linear.cpp:32 bypasses quantized inference when autograd is
+            // enabled. Path is confirmed by shape condition (F32 x Q4_0, M=1,
+            // Vulkan backend) — the numeric result confirms the decode kernel ran
+            // correctly.
+            {
+                const int64_t in_f = 128, out_f = 96, B = 1;
+                std::vector<float> x_data(static_cast<std::size_t>(B * in_f));
+                for (std::size_t i = 0; i < x_data.size(); ++i)
+                    x_data[i] = std::sin(static_cast<float>(i) * 0.31f) * 2.0f;
+                auto X = Tensor::from_cpu(vk_backend, {B, in_f}, DType::F32, x_data.data());
+
+                nn::Linear linear(vk_backend, static_cast<int>(in_f), static_cast<int>(out_f), false);
+                auto f32_y = linear.forward(X);
+                auto f32_vec = f32_y.to_vector<float>();
+
+                linear.disable_quantized_inference();
+                linear.enable_quantized_inference(DType::Q4_0);
+                auto qy = linear.forward(X);
+                auto qy_vec = qy.to_vector<float>();
+                float max_rerr = 0.0f;
+                for (std::size_t i = 0; i < qy_vec.size(); ++i) {
+                    float denom = std::max(std::fabs(f32_vec[i]), 1e-8f);
+                    max_rerr = std::max(max_rerr, std::fabs(qy_vec[i] - f32_vec[i]) / denom);
+                }
+                float abs_md = 0.0f;
+                for (std::size_t i = 0; i < qy_vec.size(); ++i)
+                    abs_md = std::max(abs_md, std::fabs(qy_vec[i] - f32_vec[i]));
+                expect(max_rerr <= 0.05f,
+                       (std::string("Vulkan Linear Q4_0 M=1 decode relative error, max=") +
+                        std::to_string(max_rerr) + " abs_max_diff=" + std::to_string(abs_md)).c_str());
+            }
+
+            // 5. Negative: quant matmul with axis=2 scales on Vulkan -> error
+            {
+                std::vector<float> scales_data(3, 1.0f);
+                auto scales_bad = Tensor::from_cpu(vk_backend, {3}, DType::F32, scales_data.data());
+                auto A = Tensor::from_cpu(vk_backend, {2, 3}, DType::F32,
+                                          std::vector<float>(6, 1.0f).data());
+                auto QA = quantize_q8_symmetric_rows(A);
+                auto QB = Tensor::empty(vk_backend, {3, 3}, DType::Q8_0);
+                QB._set_quant_scales(scales_bad, 2, 3); // axis=2 blocked in matmul dispatch
+                bool caught = false;
+                try {
+                    auto bad = matmul(QA, QB);
+                    (void)bad;
+                } catch (const motifcl::Error&) {
+                    caught = true;
+                }
+                expect(caught, "Vulkan quant matmul with axis=2 scales must throw MCL error");
             }
         } catch (const std::exception& e) {
             std::cerr << "Vulkan-native Tensor smoke failed: " << e.what() << '\n';

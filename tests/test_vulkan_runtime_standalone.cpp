@@ -213,6 +213,82 @@ int main() {
             expect(bw_ok, "Vulkan embedding weight backward output mismatch vs CPU reference");
         }
 
+        // === Slice K: atomic-scatter embedding weight backward ===
+        // O(tokens*embed) instead of O(vocab*tokens*embed). Larger vocab than
+        // the brute-force test above so the scatter heuristic actually fires.
+        // The native-atomicAdd variant only runs where caps.supports_atomic_float
+        // survived the startup smoke check (GCN4 / RX 580 fails it — its driver's
+        // float atomics are broken — so this block is skipped there and the CAS
+        // variant below is exercised instead).
+        if (runtime.caps().supports_atomic_float) {
+            const std::size_t V = 64, D = 8, T = 6;
+            // Use sparse indices that touch only a few vocab rows to verify
+            // atomic accumulation across multiple tokens mapping to the same row.
+            const std::vector<std::int32_t> indices = {5, 5, 10, 5, 60, 0};
+            std::vector<float> go(T * D);
+            for (std::size_t i = 0; i < go.size(); ++i) go[i] = 0.1f * static_cast<float>(i % 7);
+            // Reference: grad_w[v, d] = sum_t (idx[t]==v) * go[t*D + d].
+            std::vector<float> expected(V * D, 0.0f);
+            for (std::size_t t = 0; t < T; ++t) {
+                for (std::size_t d = 0; d < D; ++d) {
+                    expected[indices[t] * D + d] += go[t * D + d];
+                }
+            }
+            auto i_buf = runtime.create_buffer(indices.size() * sizeof(std::int32_t), indices.data());
+            auto g_buf = runtime.create_buffer(go.size() * sizeof(float), go.data());
+            auto o_buf = runtime.create_buffer(V * D * sizeof(float));
+            // Zero-fill grad_weight first (atomicAdd accumulates).
+            const auto zr = run_vulkan_zero_f32(runtime, o_buf, V * D);
+            expect(zr.success, "device-resident Vulkan zero_f32 must succeed");
+            expect(zr.error.empty(), "Vulkan zero_f32 success must not carry an error");
+            const auto r = run_vulkan_embedding_weight_backward_scatter(runtime, i_buf, g_buf, o_buf,
+                                                                         V, D, T);
+            expect(r.success, "device-resident Vulkan embedding weight backward scatter must succeed");
+            expect(r.error.empty(), "Vulkan embedding scatter success must not carry an error");
+            std::vector<float> out(V * D, 0.0f);
+            o_buf.download(out.data(), out.size() * sizeof(float));
+            bool scatter_ok = out.size() == expected.size();
+            for (std::size_t i = 0; i < out.size() && scatter_ok; ++i) {
+                if (!close_enough(out[i], expected[i], 1e-6f)) scatter_ok = false;
+            }
+            expect(scatter_ok, "Vulkan embedding weight backward scatter output mismatch vs CPU reference");
+        }
+
+        // === Slice K (portable): compare-and-swap scatter ===
+        // Runs on EVERY Vulkan device (integer atomicCompSwap is core Vulkan 1.0),
+        // so this is the path that actually executes on GCN4 / RX 580. Same sparse
+        // pattern as above, including the row (5) touched by three tokens, which
+        // the native float atomicAdd corrupts on RX 580 but the CAS loop handles
+        // correctly.
+        {
+            const std::size_t V = 64, D = 8, T = 6;
+            const std::vector<std::int32_t> indices = {5, 5, 10, 5, 60, 0};
+            std::vector<float> go(T * D);
+            for (std::size_t i = 0; i < go.size(); ++i) go[i] = 0.1f * static_cast<float>(i % 7);
+            std::vector<float> expected(V * D, 0.0f);
+            for (std::size_t t = 0; t < T; ++t) {
+                for (std::size_t d = 0; d < D; ++d) {
+                    expected[indices[t] * D + d] += go[t * D + d];
+                }
+            }
+            auto i_buf = runtime.create_buffer(indices.size() * sizeof(std::int32_t), indices.data());
+            auto g_buf = runtime.create_buffer(go.size() * sizeof(float), go.data());
+            auto o_buf = runtime.create_buffer(V * D * sizeof(float));
+            const auto zr = run_vulkan_zero_f32(runtime, o_buf, V * D);
+            expect(zr.success, "device-resident Vulkan zero_f32 (cas) must succeed");
+            const auto r = run_vulkan_embedding_weight_backward_scatter_cas(runtime, i_buf, g_buf, o_buf,
+                                                                            V, D, T);
+            expect(r.success, "device-resident Vulkan embedding weight backward scatter_cas must succeed");
+            expect(r.error.empty(), "Vulkan embedding scatter_cas success must not carry an error");
+            std::vector<float> out(V * D, 0.0f);
+            o_buf.download(out.data(), out.size() * sizeof(float));
+            bool cas_ok = out.size() == expected.size();
+            for (std::size_t i = 0; i < out.size() && cas_ok; ++i) {
+                if (!close_enough(out[i], expected[i], 1e-6f)) cas_ok = false;
+            }
+            expect(cas_ok, "Vulkan embedding weight backward scatter_cas output mismatch vs CPU reference");
+        }
+
         // === Slice E1: token+position embedding forward + position backward ===
         {
             const std::size_t V = 2, S = 2, D = 2;
@@ -1101,6 +1177,340 @@ int main() {
         expect(close_enough(sgd.output[0], 0.95f) && close_enough(sgd.output[1], 2.1f) &&
                    close_enough(sgd.output[2], -3.2f),
                "standalone Vulkan SGD update output mismatch");
+    }
+
+    // === Slice Q1: quant core parity witnesses ===
+
+    // Host reference emulation
+    auto host_quantize_q8_rowwise = [](const std::vector<float>& x, std::size_t M, std::size_t K)
+        -> std::pair<std::vector<std::int8_t>, std::vector<float>> {
+        std::vector<std::int8_t> out(M * K);
+        std::vector<float> scales(M);
+        for (std::size_t row = 0; row < M; ++row) {
+            float max_abs = 0.0f;
+            for (std::size_t c = 0; c < K; ++c)
+                max_abs = std::max(max_abs, std::fabs(x[row * K + c]));
+            float scale = (max_abs <= 0.0f) ? 1.0f : (max_abs / 127.0f);
+            scales[row] = scale;
+            for (std::size_t c = 0; c < K; ++c) {
+                int q = static_cast<int>(std::nearbyint(x[row * K + c] / scale));
+                q = std::min(127, std::max(-127, q));
+                out[row * K + c] = static_cast<std::int8_t>(q);
+            }
+        }
+        return {out, scales};
+    };
+
+    auto host_dequant_q8 = [](const std::vector<std::int8_t>& x,
+                               const std::vector<float>& scales,
+                               std::uint32_t mode, std::size_t rows, std::size_t cols)
+        -> std::vector<float> {
+        (void)rows;
+        std::vector<float> out(x.size());
+        for (std::size_t i = 0; i < x.size(); ++i) {
+            float scale;
+            if (mode == 1) scale = scales[i / cols];
+            else if (mode == 2) scale = scales[i - (i / cols) * cols];
+            else scale = scales[0];
+            out[i] = static_cast<float>(static_cast<int>(x[i])) * scale;
+        }
+        return out;
+    };
+
+    auto host_dequant_q4 = [](const std::vector<std::uint8_t>& packed,
+                               const std::vector<float>& scales,
+                               std::uint32_t mode, std::size_t rows, std::size_t cols,
+                               std::size_t count)
+        -> std::vector<float> {
+        (void)rows;
+        std::vector<float> out(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            std::uint8_t byte = packed[i >> 1];
+            std::uint8_t code = (i & 1) ? ((byte >> 4) & 15) : (byte & 15);
+            int q = static_cast<int>(code) - 8;
+            float scale;
+            if (mode == 1) scale = scales[i / cols];
+            else if (mode == 2) scale = scales[i - (i / cols) * cols];
+            else scale = scales[0];
+            out[i] = static_cast<float>(q) * scale;
+        }
+        return out;
+    };
+
+    auto host_mm_q8q8 = [](const std::vector<std::int8_t>& a,
+                            const std::vector<float>& scales_a,
+                            const std::vector<std::int8_t>& b,
+                            const std::vector<float>& scales_b,
+                            std::size_t M, std::size_t K, std::size_t N)
+        -> std::vector<float> {
+        std::vector<float> c(M * N, 0.0f);
+        for (std::size_t row = 0; row < M; ++row) {
+            for (std::size_t col = 0; col < N; ++col) {
+                float acc = 0.0f;
+                for (std::size_t k = 0; k < K; ++k)
+                    acc += static_cast<float>(static_cast<int>(a[row * K + k])) *
+                           static_cast<float>(static_cast<int>(b[k * N + col]));
+                c[row * N + col] = acc * scales_a[row] * scales_b[col];
+            }
+        }
+        return c;
+    };
+
+    auto host_mm_q8q4 = [](const std::vector<std::int8_t>& a,
+                            const std::vector<float>& scales_a,
+                            const std::vector<std::uint8_t>& b_packed,
+                            const std::vector<float>& scales_b,
+                            std::size_t M, std::size_t K, std::size_t N)
+        -> std::vector<float> {
+        // Unpack b inline: index is (k*N + n), byte at idx>>1, nibble from LSB/high
+        auto q4_load = [&](std::size_t k, std::size_t n_val) -> int {
+            std::size_t idx = k * N + n_val;
+            std::uint8_t byte = b_packed[idx >> 1];
+            std::uint8_t code = (idx & 1) ? ((byte >> 4) & 15) : (byte & 15);
+            return static_cast<int>(code) - 8;
+        };
+        std::vector<float> c(M * N, 0.0f);
+        for (std::size_t row = 0; row < M; ++row) {
+            for (std::size_t col = 0; col < N; ++col) {
+                float acc = 0.0f;
+                for (std::size_t k = 0; k < K; ++k)
+                    acc += static_cast<float>(static_cast<int>(a[row * K + k])) *
+                           static_cast<float>(q4_load(k, col));
+                c[row * N + col] = acc * scales_a[row] * scales_b[col];
+            }
+        }
+        return c;
+    };
+
+    // quantize parity: bit-identical bytes and scales
+    {
+        const std::size_t M = 3, K = 47;
+        std::vector<float> x(M * K);
+        for (std::size_t i = 0; i < x.size(); ++i)
+            x[i] = std::sin(static_cast<float>(i) * 0.37f) * 3.0f;
+        auto [host_i8, host_scales] = host_quantize_q8_rowwise(x, M, K);
+        auto in_buf = runtime.create_buffer(x.size() * sizeof(float), x.data());
+        auto out_buf = runtime.create_buffer(host_i8.size() * sizeof(std::int8_t));
+        auto scale_buf = runtime.create_buffer(host_scales.size() * sizeof(float));
+        const auto qr = run_vulkan_quantize_q8_rowwise(runtime, in_buf, out_buf, scale_buf, M, K);
+        expect(qr.success, "device-resident Vulkan quantize q8 rowwise must succeed");
+        expect(qr.error.empty(), "Vulkan quantize q8 rowwise success must not carry an error");
+        std::vector<std::int8_t> dev_i8(host_i8.size());
+        out_buf.download(dev_i8.data(), dev_i8.size() * sizeof(std::int8_t));
+        std::vector<float> dev_scales(host_scales.size());
+        scale_buf.download(dev_scales.data(), dev_scales.size() * sizeof(float));
+        expect(dev_i8 == host_i8, "Vulkan quantize q8 rowwise int8 output must be bit-identical to host");
+        bool scales_ok = dev_scales.size() == host_scales.size();
+        for (std::size_t i = 0; i < dev_scales.size() && scales_ok; ++i)
+            if (!close_enough(dev_scales[i], host_scales[i], 1e-7f)) scales_ok = false;
+        expect(scales_ok, "Vulkan quantize q8 rowwise scales must match host");
+    }
+
+    // dequant q8 parity
+    {
+        constexpr std::size_t count = 53, rows = 7, cols = 10;
+        const std::uint32_t mode = 1;
+        std::vector<std::int8_t> q(count);
+        std::vector<float> scales(rows);
+        for (std::size_t i = 0; i < count; ++i) q[i] = static_cast<std::int8_t>((i % 257) - 128);
+        for (std::size_t i = 0; i < rows; ++i) scales[i] = 0.5f + 0.1f * static_cast<float>(i);
+        const auto expected = host_dequant_q8(q, scales, mode, rows, cols);
+        auto q_buf = runtime.create_buffer(q.size() * sizeof(std::int8_t), q.data());
+        auto s_buf = runtime.create_buffer(scales.size() * sizeof(float), scales.data());
+        auto o_buf = runtime.create_buffer(expected.size() * sizeof(float));
+        const auto r = run_vulkan_dequantize_q8_scaled(runtime, q_buf, s_buf, o_buf, count, mode, rows, cols);
+        expect(r.success, "device-resident Vulkan dequantize q8 must succeed");
+        std::vector<float> out(expected.size());
+        o_buf.download(out.data(), out.size() * sizeof(float));
+        bool dq_ok = out.size() == expected.size();
+        for (std::size_t i = 0; i < out.size() && dq_ok; ++i)
+            if (!close_enough(out[i], expected[i], 1e-7f)) dq_ok = false;
+        expect(dq_ok, "Vulkan dequantize q8 output mismatch vs host");
+    }
+
+    // dequant q4 parity
+    {
+        constexpr std::size_t count = 53, rows = 7, cols = 10;
+        const std::uint32_t mode = 1;
+        const std::size_t packed_bytes = (count + 1) / 2;
+        std::vector<std::uint8_t> packed(packed_bytes);
+        std::vector<float> scales(rows);
+        // Fill packed with known Q4_0 values
+        for (std::size_t i = 0; i < count; ++i) {
+            int q = static_cast<int>((i % 15) - 7); // range [-7,7]
+            std::uint8_t code = static_cast<std::uint8_t>(q + 8);
+            if (i & 1) packed[i >> 1] |= (code << 4);
+            else       packed[i >> 1] = code;
+        }
+        for (std::size_t i = 0; i < rows; ++i) scales[i] = 0.5f + 0.1f * static_cast<float>(i);
+        const auto expected = host_dequant_q4(packed, scales, mode, rows, cols, count);
+        auto p_buf = runtime.create_buffer(packed.size(), packed.data());
+        auto s_buf = runtime.create_buffer(scales.size() * sizeof(float), scales.data());
+        auto o_buf = runtime.create_buffer(expected.size() * sizeof(float));
+        const auto r = run_vulkan_dequantize_q4_scaled(runtime, p_buf, s_buf, o_buf, count, mode, rows, cols);
+        expect(r.success, "device-resident Vulkan dequantize q4 must succeed");
+        std::vector<float> out(expected.size());
+        o_buf.download(out.data(), out.size() * sizeof(float));
+        bool dq4_ok = out.size() == expected.size();
+        for (std::size_t i = 0; i < out.size() && dq4_ok; ++i)
+            if (!close_enough(out[i], expected[i], 1e-7f)) dq4_ok = false;
+        expect(dq4_ok, "Vulkan dequantize q4 output mismatch vs host");
+    }
+
+    // mm_q8q8 parity: shapes crossing tiles
+    auto test_mm_q8q8 = [&](std::size_t M, std::size_t K, std::size_t N) {
+        std::vector<std::int8_t> a(M * K);
+        std::vector<std::int8_t> b(K * N);
+        std::vector<float> scales_a(M), scales_b(N);
+        for (std::size_t i = 0; i < a.size(); ++i)
+            a[i] = static_cast<std::int8_t>((static_cast<int>(i * 7 + 3) % 257) - 128);
+        for (std::size_t i = 0; i < b.size(); ++i)
+            b[i] = static_cast<std::int8_t>((static_cast<int>(i * 11 + 5) % 257) - 128);
+        for (std::size_t i = 0; i < M; ++i) scales_a[i] = 0.3f / 127.0f * (1.0f + 0.1f * static_cast<float>(i));
+        for (std::size_t i = 0; i < N; ++i) scales_b[i] = 0.5f / 127.0f * (1.0f + 0.1f * static_cast<float>(i));
+        const auto expected = host_mm_q8q8(a, scales_a, b, scales_b, M, K, N);
+        auto a_buf = runtime.create_buffer(a.size() * sizeof(std::int8_t), a.data());
+        auto b_buf = runtime.create_buffer(b.size() * sizeof(std::int8_t), b.data());
+        auto sa_buf = runtime.create_buffer(scales_a.size() * sizeof(float), scales_a.data());
+        auto sb_buf = runtime.create_buffer(scales_b.size() * sizeof(float), scales_b.data());
+        auto c_buf = runtime.create_buffer(expected.size() * sizeof(float));
+        const auto r = run_vulkan_matmul_q8q8_scaled(runtime, a_buf, sa_buf, b_buf, sb_buf, c_buf, M, K, N);
+        expect(r.success, "device-resident Vulkan q8q8 matmul must succeed");
+        std::vector<float> out(expected.size());
+        c_buf.download(out.data(), out.size() * sizeof(float));
+        const float base_tol = 1.0e-4f;
+        bool mm_ok = out.size() == expected.size();
+        for (std::size_t i = 0; i < out.size() && mm_ok; ++i) {
+            float ref = expected[i];
+            float tol = base_tol * std::max(1.0f, std::fabs(ref));
+            if (std::fabs(out[i] - ref) > tol) mm_ok = false;
+        }
+        return mm_ok;
+    };
+    expect(test_mm_q8q8(33, 47, 65), "Vulkan q8q8 matmul (33,47,65) output mismatch vs host");
+    expect(test_mm_q8q8(1, 128, 96), "Vulkan q8q8 matmul (1,128,96) output mismatch vs host");
+
+    // mm_q8q4 parity: same shapes, odd N = 65 covers packed tail
+    auto test_mm_q8q4 = [&](std::size_t M, std::size_t K, std::size_t N) {
+        std::vector<std::int8_t> a(M * K);
+        std::vector<float> scales_a(M), scales_b(N);
+        for (std::size_t i = 0; i < a.size(); ++i)
+            a[i] = static_cast<std::int8_t>((static_cast<int>(i * 7 + 3) % 257) - 128);
+        for (std::size_t i = 0; i < M; ++i) scales_a[i] = 0.3f / 127.0f * (1.0f + 0.1f * static_cast<float>(i));
+        for (std::size_t i = 0; i < N; ++i) scales_b[i] = 0.5f / 127.0f * (1.0f + 0.1f * static_cast<float>(i));
+        // Build packed Q4_0 B
+        const auto total_b = K * N;
+        const auto packed_bytes = (total_b + 1) / 2;
+        std::vector<std::uint8_t> b_packed(packed_bytes, 0);
+        for (std::size_t idx = 0; idx < total_b; ++idx) {
+            int q = static_cast<int>((idx * 11 + 5) % 15) - 7; // range [-7,7]
+            std::uint8_t code = static_cast<std::uint8_t>(q + 8);
+            if (idx & 1) b_packed[idx >> 1] |= (code << 4);
+            else         b_packed[idx >> 1] = code;
+        }
+        const auto expected = host_mm_q8q4(a, scales_a, b_packed, scales_b, M, K, N);
+        auto a_buf = runtime.create_buffer(a.size() * sizeof(std::int8_t), a.data());
+        auto b_buf = runtime.create_buffer(b_packed.size(), b_packed.data());
+        auto sa_buf = runtime.create_buffer(scales_a.size() * sizeof(float), scales_a.data());
+        auto sb_buf = runtime.create_buffer(scales_b.size() * sizeof(float), scales_b.data());
+        auto c_buf = runtime.create_buffer(expected.size() * sizeof(float));
+        const auto r = run_vulkan_matmul_q8q4_scaled(runtime, a_buf, sa_buf, b_buf, sb_buf, c_buf, M, K, N);
+        expect(r.success, "device-resident Vulkan q8q4 matmul must succeed");
+        std::vector<float> out(expected.size());
+        c_buf.download(out.data(), out.size() * sizeof(float));
+        const float base_tol = 1.0e-4f;
+        bool mm_ok = out.size() == expected.size();
+        for (std::size_t i = 0; i < out.size() && mm_ok; ++i) {
+            float ref = expected[i];
+            float tol = base_tol * std::max(1.0f, std::fabs(ref));
+            if (std::fabs(out[i] - ref) > tol) mm_ok = false;
+        }
+        return mm_ok;
+    };
+    expect(test_mm_q8q4(33, 47, 65), "Vulkan q8q4 matmul (33,47,65) output mismatch vs host");
+    expect(test_mm_q8q4(1, 128, 96), "Vulkan q8q4 matmul (1,128,96) output mismatch vs host");
+
+    // mm_f32q4_m1 parity: F32 x Q4_0 decode, shapes cross tiles
+    auto host_mm_f32q4_m1 = [&](const std::vector<float>& a,
+                                 const std::vector<std::uint8_t>& b_packed,
+                                 const std::vector<float>& scales_b,
+                                 std::size_t K, std::size_t N)
+        -> std::vector<float> {
+        auto q4_load = [&](std::size_t k, std::size_t col) -> int {
+            std::size_t idx = k * N + col;
+            std::uint8_t byte = b_packed[idx >> 1];
+            std::uint8_t code = (idx & 1) ? ((byte >> 4) & 15) : (byte & 15);
+            return static_cast<int>(code) - 8;
+        };
+        std::vector<float> c(N, 0.0f);
+        for (std::size_t col = 0; col < N; ++col) {
+            float acc = 0.0f;
+            for (std::size_t k = 0; k < K; ++k)
+                acc += a[k] * static_cast<float>(q4_load(k, col));
+            c[col] = acc * scales_b[col];
+        }
+        return c;
+    };
+    auto test_mm_f32q4_m1 = [&](std::size_t K, std::size_t N) {
+        std::vector<float> a(K);
+        std::vector<float> scales_b(N);
+        for (std::size_t i = 0; i < K; ++i)
+            a[i] = std::sin(static_cast<float>(i) * 0.73f) * 2.0f;
+        for (std::size_t i = 0; i < N; ++i)
+            scales_b[i] = 0.5f / 7.0f * (1.0f + 0.1f * static_cast<float>(i));
+        const auto total_b = K * N;
+        const auto packed_bytes = (total_b + 1) / 2;
+        std::vector<std::uint8_t> b_packed(packed_bytes, 0);
+        for (std::size_t idx = 0; idx < total_b; ++idx) {
+            int q = static_cast<int>((idx * 11 + 5) % 15) - 7;
+            std::uint8_t code = static_cast<std::uint8_t>(q + 8);
+            if (idx & 1) b_packed[idx >> 1] |= (code << 4);
+            else         b_packed[idx >> 1] = code;
+        }
+        const auto expected = host_mm_f32q4_m1(a, b_packed, scales_b, K, N);
+        auto a_buf = runtime.create_buffer(a.size() * sizeof(float), a.data());
+        auto b_buf = runtime.create_buffer(b_packed.size(), b_packed.data());
+        auto sb_buf = runtime.create_buffer(scales_b.size() * sizeof(float), scales_b.data());
+        auto c_buf = runtime.create_buffer(expected.size() * sizeof(float));
+        const auto r = run_vulkan_matmul_f32q4_m1(runtime, a_buf, b_buf, sb_buf, c_buf, K, N);
+        expect(r.success, "device-resident Vulkan f32q4 M=1 matmul must succeed");
+        std::vector<float> out(expected.size());
+        c_buf.download(out.data(), out.size() * sizeof(float));
+        const float base_tol = 1.0e-4f;
+        bool mm_ok = out.size() == expected.size();
+        for (std::size_t i = 0; i < out.size() && mm_ok; ++i) {
+            float ref = expected[i];
+            float tol = base_tol * std::max(1.0f, std::fabs(ref));
+            if (std::fabs(out[i] - ref) > tol) mm_ok = false;
+        }
+        return mm_ok;
+    };
+    // Test shapes: odd K+N (non-multiple of 64, covers tail), K > 64 (stride loop),
+    // K large enough for multiple stride iterations (K=128), N=96 (2 workgroups).
+    expect(test_mm_f32q4_m1(47, 65), "Vulkan f32q4 M=1 matmul (47,65) output mismatch vs host");
+    expect(test_mm_f32q4_m1(128, 96), "Vulkan f32q4 M=1 matmul (128,96) output mismatch vs host");
+    expect(test_mm_f32q4_m1(1024, 256), "Vulkan f32q4 M=1 matmul (1024,256) output mismatch vs host");
+
+    // Negative tests: incorrect buffer sizes
+    {
+        auto small_buf = runtime.create_buffer(4);
+        auto ok_buf = runtime.create_buffer(256 * sizeof(float));
+        auto scale_buf = runtime.create_buffer(4 * sizeof(float));
+        const auto r1 = run_vulkan_quantize_q8_rowwise(runtime, small_buf, ok_buf, scale_buf, 4, 4);
+        expect(!r1.success, "Vulkan quantize q8 must reject too-small input buffer");
+        expect(!r1.error.empty(), "Vulkan quantize q8 validation failure must explain why");
+
+        const auto r2 = run_vulkan_dequantize_q8_scaled(runtime, small_buf, scale_buf, ok_buf, 100, 0, 1, 1);
+        expect(!r2.success, "Vulkan dequantize q8 must reject too-small int8 buffer");
+
+        const auto r3 = run_vulkan_dequantize_q4_scaled(runtime, small_buf, scale_buf, ok_buf, 100, 0, 1, 1);
+        expect(!r3.success, "Vulkan dequantize q4 must reject too-small packed buffer");
+
+        const auto r4 = run_vulkan_matmul_q8q8_scaled(runtime, small_buf, scale_buf, ok_buf, scale_buf, ok_buf, 100, 100, 100);
+        expect(!r4.success, "Vulkan q8q8 matmul must reject too-small A buffer");
+
+        const auto r5 = run_vulkan_matmul_q8q4_scaled(runtime, small_buf, scale_buf, ok_buf, scale_buf, ok_buf, 100, 100, 100);
+        expect(!r5.success, "Vulkan q8q4 matmul must reject too-small A buffer");
     }
 
     return ok ? 0 : 1;

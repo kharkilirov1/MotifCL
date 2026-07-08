@@ -1122,50 +1122,6 @@ Tensor matmul_vulkan_f32_transpose_a_device(const Tensor& a, const Tensor& b) {
     return out;
 }
 
-bool vulkan_matmul_q8_supported(const Tensor& a, const Tensor& b) {
-    return a.backend_ptr() == b.backend_ptr() &&
-           a.dtype() == DType::Q8_0 &&
-           b.dtype() == DType::Q8_0 &&
-           a.ndim() == 2 &&
-           b.ndim() == 2 &&
-           a.shape()[0] > 0 &&
-           a.shape()[1] > 0 &&
-           b.shape()[1] > 0 &&
-           a.shape()[1] == b.shape()[0] &&
-           a.shape()[1] <= 256 &&
-           a.shape()[0] <= 4096 &&
-           b.shape()[1] <= 4096 &&
-           !a.has_quant_scales() &&
-           !b.has_quant_scales() &&
-           !a.requires_grad() &&
-           !b.requires_grad();
-}
-
-Tensor matmul_vulkan_q8_device(const Tensor& a, const Tensor& b) {
-    require_matmul_q8(a, b);
-    validate_matmul_args(a, b, "vulkan q8 matmul");
-    MCL_CHECK(!a.has_quant_scales() && !b.has_quant_scales(),
-              "vulkan q8 matmul currently supports scalar quant scales only");
-    MCL_CHECK(!a.requires_grad() && !b.requires_grad(),
-              "vulkan q8 matmul does not support autograd");
-    const auto M = static_cast<std::size_t>(a.shape()[0]);
-    const auto K = static_cast<std::size_t>(a.shape()[1]);
-    const auto N = static_cast<std::size_t>(b.shape()[1]);
-    auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32);
-    const auto result = run_vulkan_i8_scaled_matmul(a.backend().vulkan_runtime(),
-                                                   a.storage().vulkan_buffer,
-                                                   b.storage().vulkan_buffer,
-                                                   out.storage().vulkan_buffer,
-                                                   M,
-                                                   K,
-                                                   N,
-                                                   a.quant_scale(),
-                                                   b.quant_scale());
-    MCL_CHECK(result.success, std::string("vulkan q8 matmul failed: ") + result.error);
-    autograd::record_op("matmul_vulkan_q8_0_f32", {a.id(), b.id()}, {out.id()});
-    return out;
-}
-
 Tensor matmul_flags(const Tensor& a, const Tensor& b, bool trans_a, bool trans_b) {
     (void)microkernel_runtime_uses_opencl(MicrokernelDomain::Matmul);
     require_matmul_f32(a, b);
@@ -1296,6 +1252,24 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
     }
     if (a.dtype() == DType::F32 && b.dtype() == DType::Q4_0 && a.ndim() == 2 && a.shape()[0] == 1) {
         MCL_CHECK(!a.requires_grad() && !b.requires_grad(), "F32/Q4_0 decode matmul does not support autograd");
+        if (a.backend().is_vulkan()) {
+            validate_matmul_args(a, b, "vulkan f32/q4 decode matmul");
+            validate_scaled_quant_matmul_tensor(b, "vulkan f32/q4 decode matmul", "rhs");
+            MCL_CHECK(b.has_quant_scales() && b.quant_scale_axis() == 1,
+                      "vulkan f32/q4 decode matmul requires col-scales (axis=1)");
+            auto out = Tensor::empty(a.backend(), {1, b.shape()[1]}, DType::F32);
+            const auto result = run_vulkan_matmul_f32q4_m1(
+                a.backend().vulkan_runtime(),
+                a.storage().vulkan_buffer,
+                b.storage().vulkan_buffer,
+                b.quant_scales().storage().vulkan_buffer,
+                out.storage().vulkan_buffer,
+                static_cast<std::size_t>(a.shape()[1]),
+                static_cast<std::size_t>(b.shape()[1]));
+            MCL_CHECK(result.success, std::string("vulkan f32/q4 decode matmul failed: ") + result.error);
+            autograd::record_op("matmul_f32_q4_0_m1_vulkan", {a.id(), b.id()}, {out.id()});
+            return out;
+        }
         if (selected_backend.kind == MicrokernelBackendKind::Native &&
             native_matmul_f32_q4_0_m1_supported(a, b)) {
             return matmul_native_f32_q4_0_m1(a, b);
@@ -1307,9 +1281,66 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
         MCL_CHECK(!a.requires_grad() && !b.requires_grad(), "quantized matmul does not support autograd");
         MCL_CHECK(a.dtype() != DType::Q4_0_COL && b.dtype() != DType::Q4_0_COL,
                   "Q4_0_COL matmul is only supported for F32 x Q4_0_COL M=1 decode");
+        if (a.backend().is_vulkan()) {
+            validate_matmul_args(a, b, "vulkan quant matmul");
+            validate_quant_tensor_args(a, "vulkan quant matmul", "lhs", false);
+            validate_quant_tensor_args(b, "vulkan quant matmul", "rhs", false);
+            // Scalar-scale fallback (no axis scales): Q8_0 x Q8_0 only
+            if (!a.has_quant_scales() && !b.has_quant_scales()) {
+                MCL_CHECK(a.dtype() == DType::Q8_0 && b.dtype() == DType::Q8_0,
+                          "vulkan scalar-scale matmul supports Q8_0 x Q8_0 only");
+                MCL_CHECK(!a.requires_grad() && !b.requires_grad(),
+                          "vulkan scalar-scale matmul does not support autograd");
+                auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32);
+                const auto result = run_vulkan_i8_scaled_matmul(a.backend().vulkan_runtime(),
+                                                               a.storage().vulkan_buffer,
+                                                               b.storage().vulkan_buffer,
+                                                               out.storage().vulkan_buffer,
+                                                               static_cast<std::size_t>(a.shape()[0]),
+                                                               static_cast<std::size_t>(a.shape()[1]),
+                                                               static_cast<std::size_t>(b.shape()[1]),
+                                                               a.quant_scale(),
+                                                               b.quant_scale());
+                MCL_CHECK(result.success, std::string("vulkan scalar-scale q8 matmul failed: ") + result.error);
+                autograd::record_op("matmul_vulkan_q8_0_f32", {a.id(), b.id()}, {out.id()});
+                return out;
+            }
+            // Row/col scaled matmul: Q8_0[rows] x Q8_0/Q4_0[cols]
+            MCL_CHECK(a.has_quant_scales() && b.has_quant_scales(),
+                      "vulkan quant matmul requires row/col scale tensors on both inputs");
+            MCL_CHECK(a.quant_scale_axis() == 0 && b.quant_scale_axis() == 1,
+                      "vulkan quant matmul requires lhs row-scales (axis=0) and rhs col-scales (axis=1)");
+            auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32);
+            VulkanOpResult result;
+            std::string op_name;
+            if (a.dtype() == DType::Q8_0 && b.dtype() == DType::Q8_0) {
+                result = run_vulkan_matmul_q8q8_scaled(
+                    a.backend().vulkan_runtime(),
+                    a.storage().vulkan_buffer, a.quant_scales().storage().vulkan_buffer,
+                    b.storage().vulkan_buffer, b.quant_scales().storage().vulkan_buffer,
+                    out.storage().vulkan_buffer,
+                    static_cast<std::size_t>(a.shape()[0]),
+                    static_cast<std::size_t>(a.shape()[1]),
+                    static_cast<std::size_t>(b.shape()[1]));
+                op_name = "matmul_q8_q8_scaled_vulkan";
+            } else if (a.dtype() == DType::Q8_0 && b.dtype() == DType::Q4_0) {
+                result = run_vulkan_matmul_q8q4_scaled(
+                    a.backend().vulkan_runtime(),
+                    a.storage().vulkan_buffer, a.quant_scales().storage().vulkan_buffer,
+                    b.storage().vulkan_buffer, b.quant_scales().storage().vulkan_buffer,
+                    out.storage().vulkan_buffer,
+                    static_cast<std::size_t>(a.shape()[0]),
+                    static_cast<std::size_t>(a.shape()[1]),
+                    static_cast<std::size_t>(b.shape()[1]));
+                op_name = "matmul_q8_q4_scaled_vulkan";
+            } else {
+                MCL_CHECK(false, "vulkan quant matmul supports Q8_0[rows]xQ8_0/Q4_0[cols] only (yet)");
+            }
+            MCL_CHECK(result.success, std::string(op_name + " failed: ") + result.error);
+            autograd::record_op(op_name, {a.id(), b.id()}, {out.id()});
+            return out;
+        }
         require_matmul_quantized(a, b);
-        if (a.backend().is_vulkan() && vulkan_matmul_q8_supported(a, b)) return matmul_vulkan_q8_device(a, b);
-        MCL_CHECK(!a.backend().is_vulkan(), "vulkan backend currently supports only scalar-scale Q8_0 x Q8_0 matmul");
         if (a.dtype() == DType::Q8_0 && is_k_quant_dtype(b.dtype())) return matmul_q8_qk(a, b);
         if (a.has_quant_scales() || b.has_quant_scales()) return matmul_quant_scaled(a, b);
         if (a.dtype() == DType::Q8_0 && b.dtype() == DType::Q8_0) return matmul_q8(a, b);

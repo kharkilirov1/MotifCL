@@ -4,6 +4,6 @@
   "opencl_device": "Ellesmere",
   "methodology": "median wall-time of 50 runs after 5 warmup; gpu_us from VK_QUERY_TYPE_TIMESTAMP; ratio = opencl_wall / vulkan_wall",
   "rows": [
-    {"shape": "block_T16_E64", "dtype": "f32", "median_us": 1605.3, "min_us": 1108.4, "p99_us": 3591.8, "gpu_median_us": 156.96, "achieved_gbs": 6.22937e-07, "opencl_baseline_us": 6753.7, "ratio": 4.20713, "target_ratio": 0.4, "result": "PASS"}
+    {"shape": "block_T16_E64", "dtype": "f32", "median_us": 1452.9, "min_us": 1341.6, "p99_us": 2020.4, "gpu_median_us": 217.6, "achieved_gbs": 6.88279e-07, "opencl_baseline_us": 5442, "ratio": 3.74561, "target_ratio": 0.4, "result": "PASS"}
   ]
 }

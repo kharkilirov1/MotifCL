@@ -1,0 +1,32 @@
+// Dequantize int8 + scales -> f32.
+// mode: 0=scalar (scales[0]), 1=per-row (scales[row]), 2=per-col (scales[col]).
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer InBuf  { int8_t in_i8[]; };
+layout(std430, set = 0, binding = 1) readonly buffer ScaleBuf { float scales[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float out_f32[]; };
+
+layout(push_constant) uniform Push {
+    uint count;  // number of elements
+    uint mode;   // 0=scalar, 1=rows, 2=cols
+    uint rows;
+    uint cols;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.count) return;
+
+    float scale;
+    if (p.mode == 1u) {
+        scale = scales[gid / p.cols];
+    } else if (p.mode == 2u) {
+        scale = scales[gid - (gid / p.cols) * p.cols];
+    } else {
+        scale = scales[0];
+    }
+    out_f32[gid] = float(int(in_i8[gid])) * scale;
+}

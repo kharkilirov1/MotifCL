@@ -119,6 +119,16 @@ struct VulkanDeviceCaps {
     // reductions (5 barriers + 5 LDS round-trips per reduction -> zero).
     bool subgroup_arithmetic_compute = false;
     std::uint32_t subgroup_size = 0;
+    // VK_EXT_shader_atomic_float: when true, the embedding_weight_backward
+    // scatter kernel (float atomicAdd) is available. GCN4 (RX 580) reports
+    // false (no hardware float atomics); newer AMD/NVIDIA/Intel GPUs report
+    // true.
+    bool supports_atomic_float = false;
+    // Whether the register-block matmul variants (mm_f32_*_rb4) are actually
+    // faster than the base 16x16 tile on this device. Decided by a one-time
+    // startup micro-benchmark rather than a subgroup-support proxy: rb4 wins on
+    // newer GPUs but LOSES ~1.5x on GCN4 (RX 580), where the base tile is best.
+    bool prefer_rb4_matmul = false;
 };
 
 // Recording of cached-path dispatches for replay. Holds shared ownership of
@@ -338,6 +348,64 @@ VulkanOpResult run_vulkan_i8_scaled_matmul(VulkanRuntime& runtime,
                                            std::size_t n,
                                            float scale_a,
                                            float scale_b);
+
+// === Quant core (Slice Q1) ===
+// Quantize f32 [M,K] -> int8 [M,K] + per-row scales f32 [M].
+// One workgroup per row: shared reduction max|x|, then quantize whole row.
+VulkanOpResult run_vulkan_quantize_q8_rowwise(VulkanRuntime& runtime,
+                                              const VulkanBuffer& in_f32,
+                                              VulkanBuffer& out_i8,
+                                              VulkanBuffer& out_scales,
+                                              std::size_t m,
+                                              std::size_t k);
+// Dequantize int8 + scales -> f32. mode: 0=scalar (scales[0]), 1=per-row, 2=per-col.
+VulkanOpResult run_vulkan_dequantize_q8_scaled(VulkanRuntime& runtime,
+                                               const VulkanBuffer& in_i8,
+                                               const VulkanBuffer& scales,
+                                               VulkanBuffer& out_f32,
+                                               std::size_t count,
+                                               std::uint32_t mode,
+                                               std::size_t rows,
+                                               std::size_t cols);
+// Dequantize packed Q4_0 + scales -> f32. count is element count (not bytes).
+VulkanOpResult run_vulkan_dequantize_q4_scaled(VulkanRuntime& runtime,
+                                               const VulkanBuffer& packed,
+                                               const VulkanBuffer& scales,
+                                               VulkanBuffer& out_f32,
+                                               std::size_t count,
+                                               std::uint32_t mode,
+                                               std::size_t rows,
+                                               std::size_t cols);
+// C[M,N] = scales_a[row]*scales_b[col] * sum_k(A_i8[row,k] * B_i8[k,col]).
+VulkanOpResult run_vulkan_matmul_q8q8_scaled(VulkanRuntime& runtime,
+                                             const VulkanBuffer& a_i8,
+                                             const VulkanBuffer& a_scales,
+                                             const VulkanBuffer& b_i8,
+                                             const VulkanBuffer& b_scales,
+                                             VulkanBuffer& c_f32,
+                                             std::size_t m,
+                                             std::size_t k,
+                                             std::size_t n);
+// C[M,N] = scales_a[row]*scales_b[col] * sum_k(A_i8[row,k] * B_q4[k,col]).
+// B is packed Q4_0: nibble pairs span consecutive N values.
+VulkanOpResult run_vulkan_matmul_q8q4_scaled(VulkanRuntime& runtime,
+                                             const VulkanBuffer& a_i8,
+                                             const VulkanBuffer& a_scales,
+                                             const VulkanBuffer& b_q4,
+                                             const VulkanBuffer& b_scales,
+                                             VulkanBuffer& c_f32,
+                                             std::size_t m,
+                                             std::size_t k,
+                                             std::size_t n);
+// C[N] = scales_b[col] * sum_k(A[k] * B_q4[k,col]) — M=1 decode path.
+// A: f32[K]; B: packed Q4_0[K*N]; scales_b: f32[N]; C: f32[N].
+VulkanOpResult run_vulkan_matmul_f32q4_m1(VulkanRuntime& runtime,
+                                          const VulkanBuffer& a_f32,
+                                          const VulkanBuffer& b_q4,
+                                          const VulkanBuffer& b_scales,
+                                          VulkanBuffer& c_f32,
+                                          std::size_t k,
+                                          std::size_t n);
 VulkanOpResult run_vulkan_softmax_rows(VulkanRuntime& runtime,
                                        const VulkanBuffer& x,
                                        VulkanBuffer& out,
@@ -507,6 +575,35 @@ VulkanOpResult run_vulkan_embedding_weight_backward(VulkanRuntime& runtime,
                                                     std::size_t vocab_size,
                                                     std::size_t embed_dim,
                                                     std::size_t token_count);
+// Atomic-scatter variant of embedding weight backward: O(tokens*embed) work
+// instead of O(vocab*tokens*embed). The grad_weight buffer MUST be zero-filled
+// by the caller (run_vulkan_zero_f32) before this dispatch — atomicAdd
+// accumulates into the existing value. Returns the scatter dispatch result.
+// Driver must support GL_EXT_shader_atomic_float (Vulkan 1.1+ with the
+// shaderAtomicFloat feature; most desktop GPUs since 2018 do).
+VulkanOpResult run_vulkan_zero_f32(VulkanRuntime& runtime,
+                                   VulkanBuffer& out,
+                                   std::size_t elements);
+VulkanOpResult run_vulkan_embedding_weight_backward_scatter(VulkanRuntime& runtime,
+                                                            const VulkanBuffer& indices,
+                                                            const VulkanBuffer& grad_out,
+                                                            VulkanBuffer& grad_weight,
+                                                            std::size_t vocab_size,
+                                                            std::size_t embed_dim,
+                                                            std::size_t token_count);
+// Portable compare-and-swap variant of the scatter: same O(tokens*embed) work
+// and identical result, but emulates the float atomicAdd with an integer
+// atomicCompSwap loop (core Vulkan 1.0) instead of VK_EXT_shader_atomic_float.
+// Correct on GPUs whose native float atomics are absent or driver-broken
+// (notably GCN4 / Radeon RX 580). The grad_weight buffer MUST be zero-filled by
+// the caller (run_vulkan_zero_f32) before this dispatch.
+VulkanOpResult run_vulkan_embedding_weight_backward_scatter_cas(VulkanRuntime& runtime,
+                                                                const VulkanBuffer& indices,
+                                                                const VulkanBuffer& grad_out,
+                                                                VulkanBuffer& grad_weight,
+                                                                std::size_t vocab_size,
+                                                                std::size_t embed_dim,
+                                                                std::size_t token_count);
 // Token + position embedding: out = token_weight[token_ids] + pos_weight[pos].
 VulkanOpResult run_vulkan_token_position_embedding(VulkanRuntime& runtime,
                                                     const VulkanBuffer& token_weight,

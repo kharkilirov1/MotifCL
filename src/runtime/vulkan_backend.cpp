@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -96,7 +97,7 @@ constexpr VkStructureType VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO = 40;
 constexpr VkStructureType VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO = 42;
 constexpr VkStructureType VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO = 1000117000;
 constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 = 1000059000;
-constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES = 1000090008;
+constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES = 1000094000;
 constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES = 1000177000;
 
 constexpr VkQueueFlags VK_QUEUE_COMPUTE_BIT = 0x00000002u;
@@ -656,10 +657,17 @@ struct VkPhysicalDeviceSubgroupProperties {
     std::uint32_t supportedOperations;   // bitmask, VK_SUBGROUP_FEATURE_ARITHMETIC_BIT = 0x00000004
     std::uint32_t quadOperationsInAllStages;
 };
+static_assert(sizeof(VkPhysicalDeviceSubgroupProperties) == 32,
+              "VkPhysicalDeviceSubgroupProperties layout must match the driver's struct");
 struct VkPhysicalDeviceProperties2 {
     std::int32_t sType;
     void* pNext;
-    void* pProperties;  // VkPhysicalDeviceProperties* (opaque prefix layout)
+    // VkPhysicalDeviceProperties is a ~1840-byte inline struct (not a pointer).
+    // We only need sType + pNext + enough storage; the driver writes the inline
+    // properties starting at offset 16. Keep a raw byte buffer here so the
+    // driver's struct layout matches ours (pNext at offset 8, inline struct at
+    // offset 16) without us having to mirror the full VkPhysicalDeviceProperties.
+    std::array<std::uint8_t, 2048> properties_storage;
 };
 using PFN_vkGetPhysicalDeviceProperties2 = void (*)(VkPhysicalDevice physicalDevice,
                                                      VkPhysicalDeviceProperties2* pProperties);
@@ -1341,7 +1349,7 @@ std::vector<std::uint32_t> f32_matmul_spirv(std::size_t k, std::size_t n) {
     return words;
 }
 
-std::vector<std::uint32_t> f32_matmul_transpose_b_spirv(std::size_t k, std::size_t n) {
+[[maybe_unused]] std::vector<std::uint32_t> f32_matmul_transpose_b_spirv(std::size_t k, std::size_t n) {
     constexpr std::uint16_t op_capability = 17;
     constexpr std::uint16_t op_memory_model = 14;
     constexpr std::uint16_t op_entry_point = 15;
@@ -3381,7 +3389,7 @@ std::vector<std::uint32_t> counter_backward_input_fused_spirv(std::size_t in_fea
     return words;
 }
 
-std::vector<std::uint32_t> counter_decode_weight_u8_spirv(std::size_t in_features,
+[[maybe_unused]] std::vector<std::uint32_t> counter_decode_weight_u8_spirv(std::size_t in_features,
                                                           std::size_t out_features,
                                                           std::size_t C) {
     constexpr std::uint16_t op_extension = 10;
@@ -3613,7 +3621,7 @@ std::vector<std::uint32_t> counter_decode_weight_u8_spirv(std::size_t in_feature
     return words;
 }
 
-std::vector<std::uint32_t> counter_backward_input_u8_spirv(std::size_t in_features,
+[[maybe_unused]] std::vector<std::uint32_t> counter_backward_input_u8_spirv(std::size_t in_features,
                                                            std::size_t out_features,
                                                            std::size_t C) {
     constexpr std::uint16_t op_extension = 10;
@@ -3966,6 +3974,101 @@ VulkanOpResult run_vulkan_embedding_weight_backward(VulkanRuntime& runtime,
     const std::size_t total = vocab_size * embed_dim;
     return runtime.dispatch_cached(vkspirv::k_embedding_weight_backward_f32_i32,
                                    vkspirv::k_embedding_weight_backward_f32_i32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_zero_f32(VulkanRuntime& runtime,
+                                   VulkanBuffer& out,
+                                   std::size_t elements) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (elements == 0) return fail("Vulkan zero_f32 requires non-zero element count");
+    const auto nbytes = elements * sizeof(float);
+    if (out.nbytes() < nbytes) return fail("Vulkan zero_f32 output buffer too small");
+    const struct {
+        std::uint32_t n;
+    } push{static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&out};
+    return runtime.dispatch_cached(vkspirv::k_zero_f32, vkspirv::k_zero_f32_words, buffers, &push,
+                                   sizeof(push), static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_embedding_weight_backward_scatter(VulkanRuntime& runtime,
+                                                            const VulkanBuffer& indices,
+                                                            const VulkanBuffer& grad_out,
+                                                            VulkanBuffer& grad_weight,
+                                                            std::size_t vocab_size,
+                                                            std::size_t embed_dim,
+                                                            std::size_t token_count) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (vocab_size == 0 || embed_dim == 0 || token_count == 0)
+        return fail("Vulkan embedding weight backward scatter requires non-zero shapes");
+    const auto idx_bytes = token_count * sizeof(std::int32_t);
+    const auto grad_bytes = token_count * embed_dim * sizeof(float);
+    const auto out_bytes = vocab_size * embed_dim * sizeof(float);
+    if (indices.nbytes() < idx_bytes) return fail("Vulkan embedding weight backward scatter indices buffer too small");
+    if (grad_out.nbytes() < grad_bytes) return fail("Vulkan embedding weight backward scatter grad buffer too small");
+    if (grad_weight.nbytes() < out_bytes) return fail("Vulkan embedding weight backward scatter output buffer too small");
+    // Caller MUST zero-fill grad_weight before calling (atomicAdd accumulates).
+    constexpr std::size_t kMaxInt32 = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (token_count > kMaxInt32 / embed_dim) return fail("Vulkan embedding weight backward scatter token_count*embed_dim overflows int32 push constant");
+    const struct {
+        std::int32_t vocab_size;
+        std::int32_t embed_dim;
+        std::int32_t token_count;
+    } push{static_cast<std::int32_t>(vocab_size),
+           static_cast<std::int32_t>(embed_dim),
+           static_cast<std::int32_t>(token_count)};
+    const std::vector<const VulkanBuffer*> buffers = {&indices, &grad_out, &grad_weight};
+    const std::size_t total = token_count * embed_dim;
+    return runtime.dispatch_cached(vkspirv::k_embedding_weight_backward_f32_i32_scatter,
+                                   vkspirv::k_embedding_weight_backward_f32_i32_scatter_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_embedding_weight_backward_scatter_cas(VulkanRuntime& runtime,
+                                                                const VulkanBuffer& indices,
+                                                                const VulkanBuffer& grad_out,
+                                                                VulkanBuffer& grad_weight,
+                                                                std::size_t vocab_size,
+                                                                std::size_t embed_dim,
+                                                                std::size_t token_count) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (vocab_size == 0 || embed_dim == 0 || token_count == 0)
+        return fail("Vulkan embedding weight backward scatter cas requires non-zero shapes");
+    const auto idx_bytes = token_count * sizeof(std::int32_t);
+    const auto grad_bytes = token_count * embed_dim * sizeof(float);
+    const auto out_bytes = vocab_size * embed_dim * sizeof(float);
+    if (indices.nbytes() < idx_bytes) return fail("Vulkan embedding weight backward scatter cas indices buffer too small");
+    if (grad_out.nbytes() < grad_bytes) return fail("Vulkan embedding weight backward scatter cas grad buffer too small");
+    if (grad_weight.nbytes() < out_bytes) return fail("Vulkan embedding weight backward scatter cas output buffer too small");
+    // Caller MUST zero-fill grad_weight before calling (the CAS accumulates).
+    constexpr std::size_t kMaxInt32 = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (token_count > kMaxInt32 / embed_dim) return fail("Vulkan embedding weight backward scatter cas token_count*embed_dim overflows int32 push constant");
+    const struct {
+        std::int32_t vocab_size;
+        std::int32_t embed_dim;
+        std::int32_t token_count;
+    } push{static_cast<std::int32_t>(vocab_size),
+           static_cast<std::int32_t>(embed_dim),
+           static_cast<std::int32_t>(token_count)};
+    const std::vector<const VulkanBuffer*> buffers = {&indices, &grad_out, &grad_weight};
+    const std::size_t total = token_count * embed_dim;
+    return runtime.dispatch_cached(vkspirv::k_embedding_weight_backward_f32_i32_scatter_cas,
+                                   vkspirv::k_embedding_weight_backward_f32_i32_scatter_cas_words,
                                    buffers, &push, sizeof(push),
                                    static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
 }
@@ -4472,6 +4575,8 @@ struct VulkanRuntime::Impl {
 
     bool ready = false;
     bool storage_buffer_i8 = false;
+    bool caps_supports_atomic_float = false;
+    bool atomic_float_smoke_pending = false;  // run smoke check lazily in VulkanRuntime::create
     std::string device_name;
     std::string error;
 
@@ -5002,7 +5107,9 @@ struct VulkanRuntime::Impl {
         if (wait_for_fences(device, 1, &fast_fence, 1, ~std::uint64_t{0}) != VK_SUCCESS) {
             return fail_submit("vkWaitForFences failed for cached dispatch");
         }
-        reset_fences(device, 1, &fast_fence);
+        if (reset_fences(device, 1, &fast_fence) != VK_SUCCESS) {
+            return fail_submit("vkResetFences failed for cached dispatch");
+        }
         last_gpu_us = -1.0;
         if (batch_timed) {
             std::uint64_t stamps[2] = {0, 0};
@@ -5274,7 +5381,10 @@ struct VulkanRuntime::Impl {
             error_out = "vkWaitForFences failed for staging transfer";
             return false;
         }
-        reset_fences(device, 1, &transfer_fence);
+        if (reset_fences(device, 1, &transfer_fence) != VK_SUCCESS) {
+            error_out = "vkResetFences failed for staging transfer";
+            return false;
+        }
         return true;
     }
 
@@ -5389,6 +5499,13 @@ struct VulkanRuntime::Impl {
         auto get_physical_device_properties2 =
             load_instance_function<PFN_vkGetPhysicalDeviceProperties2>(
                 get_proc, instance, "vkGetPhysicalDeviceProperties2");
+        if (!get_physical_device_properties2) {
+            // On Vulkan 1.0 instances the function is exposed as a KHR
+            // extension entry point; try the suffixed name too.
+            get_physical_device_properties2 =
+                load_instance_function<PFN_vkGetPhysicalDeviceProperties2>(
+                    get_proc, instance, "vkGetPhysicalDeviceProperties2KHR");
+        }
         auto create_device = load_instance_function<PFN_vkCreateDevice>(get_proc, instance, "vkCreateDevice");
         get_device_proc = load_instance_function<PFN_vkGetDeviceProcAddr>(get_proc, instance, "vkGetDeviceProcAddr");
         if (!enumerate_physical_devices || !get_queue_family_properties || !get_memory_properties ||
@@ -5467,27 +5584,27 @@ struct VulkanRuntime::Impl {
         // may use subgroupAdd / subgroupBroadcast instead of the manual
         // shared-memory tree reduction.
         if (get_physical_device_properties2) {
+            if (std::getenv("MOTIFCL_VULKAN_DEBUG_SUBGROUP")) {
+                std::fprintf(stderr, "get_physical_device_properties2 loaded, querying subgroup\n");
+            }
             VkPhysicalDeviceSubgroupProperties subgroup{
                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
                 nullptr,
                 0, 0, 0, 0,
             };
-            // VkPhysicalDeviceProperties2 layout = {sType, pNext,
-            // VkPhysicalDeviceProperties properties[inline]}. The full struct
-            // is ~1840 bytes; use a 4096-byte aligned buffer so the driver can
-            // safely fill in the inline properties without heap corruption.
-            // Only sType + pNext are written by us; the driver writes the rest.
-            struct alignas(8) Properties2Storage {
-                std::int32_t sType;
-                void* pNext;
-                std::array<std::uint8_t, 4080> tail;
-            };
-            Properties2Storage storage{};
+            // VkPhysicalDeviceProperties2 with the real inline-struct layout
+            // (sType + pNext + ~2KB inline VkPhysicalDeviceProperties). The
+            // driver writes both the inline properties and any chained ext
+            // structs (subgroup here) in one call.
+            VkPhysicalDeviceProperties2 props2{};
             constexpr std::int32_t VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 = 1000059000;
-            storage.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-            storage.pNext = &subgroup;
-            get_physical_device_properties2(physical_device,
-                                             reinterpret_cast<VkPhysicalDeviceProperties2*>(&storage));
+            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            props2.pNext = &subgroup;
+            get_physical_device_properties2(physical_device, &props2);
+            if (std::getenv("MOTIFCL_VULKAN_DEBUG_SUBGROUP")) {
+                std::fprintf(stderr, "subgroup: size=%u stages=0x%x ops=0x%x\n",
+                             subgroup.subgroupSize, subgroup.supportedStages, subgroup.supportedOperations);
+            }
             // VK_SHADER_STAGE_COMPUTE_BIT = 0x10, VK_SUBGROUP_FEATURE_ARITHMETIC_BIT = 0x4.
             if ((subgroup.supportedStages & 0x10u) && (subgroup.supportedOperations & 0x4u) &&
                 subgroup.subgroupSize > 0) {
@@ -5499,6 +5616,7 @@ struct VulkanRuntime::Impl {
         get_memory_properties(physical_device, &memory_properties);
 
         bool has_i8_storage_extension = false;
+        bool has_atomic_float_extension = false;
         if (enumerate_device_extension_properties) {
             std::uint32_t extension_count = 0;
             if (enumerate_device_extension_properties(physical_device, nullptr, &extension_count, nullptr) ==
@@ -5510,7 +5628,9 @@ struct VulkanRuntime::Impl {
                     for (const auto& extension : extensions) {
                         if (std::strcmp(extension.extensionName, "VK_KHR_8bit_storage") == 0) {
                             has_i8_storage_extension = true;
-                            break;
+                        }
+                        if (std::strcmp(extension.extensionName, "VK_EXT_shader_atomic_float") == 0) {
+                            has_atomic_float_extension = true;
                         }
                     }
                 }
@@ -5542,6 +5662,16 @@ struct VulkanRuntime::Impl {
         const bool enable_i8_storage =
             has_i8_storage_extension && enabled_i8_features.uniformAndStorageBuffer8BitAccess != 0;
         const char* i8_storage_extension = "VK_KHR_8bit_storage";
+        const char* atomic_float_extension = "VK_EXT_shader_atomic_float";
+        // Enable VK_EXT_shader_atomic_float when present so the
+        // embedding_weight_backward scatter kernel can use float atomicAdd.
+        // GCN4 (RX 580) does NOT expose this extension (no hardware float
+        // atomics); the scatter path stays dormant and the brute-force
+        // embedding weight backward is used instead.
+        const bool enable_atomic_float = has_atomic_float_extension;
+        std::vector<const char*> enabled_device_extensions;
+        if (enable_i8_storage) enabled_device_extensions.push_back(i8_storage_extension);
+        if (enable_atomic_float) enabled_device_extensions.push_back(atomic_float_extension);
 
         const float priority = 1.0f;
         const VkDeviceQueueCreateInfo queue_create_info{
@@ -5560,8 +5690,8 @@ struct VulkanRuntime::Impl {
             &queue_create_info,
             0,
             nullptr,
-            enable_i8_storage ? 1u : 0u,
-            enable_i8_storage ? &i8_storage_extension : nullptr,
+            static_cast<std::uint32_t>(enabled_device_extensions.size()),
+            enabled_device_extensions.empty() ? nullptr : enabled_device_extensions.data(),
             nullptr,
         };
         if (create_device(physical_device, &device_create_info, nullptr, &device) != VK_SUCCESS || !device) {
@@ -5569,6 +5699,13 @@ struct VulkanRuntime::Impl {
             return false;
         }
         storage_buffer_i8 = enable_i8_storage;
+        // Surface atomic-float capability through VulkanDeviceCaps so callers
+        // can pick the scatter path only where it actually works. The smoke
+        // validation runs later (VulkanRuntime::create) once the buffer/
+        // dispatch machinery is fully wired up.
+        caps_supports_atomic_float = enable_atomic_float;
+        caps.supports_atomic_float = enable_atomic_float;
+        atomic_float_smoke_pending = enable_atomic_float;
 
         auto load_device = [&](auto tag, const char* name) {
             using Fn = decltype(tag);
@@ -5991,7 +6128,92 @@ VulkanRuntime::VulkanRuntime(std::shared_ptr<Impl> impl) : impl_(std::move(impl)
 VulkanRuntime VulkanRuntime::create() {
     auto impl = std::make_shared<Impl>();
     impl->initialize();
-    return VulkanRuntime(std::move(impl));
+    VulkanRuntime rt(std::move(impl));
+    // Run the atomic-float smoke check now that the buffer/dispatch machinery
+    // is fully wired up. Some drivers (GCN4 / RX 580 proprietary Windows)
+    // report VK_EXT_shader_atomic_float but float atomicAdd silently produces
+    // wrong results; detect that here and clear the capability so callers
+    // fall back to the brute-force path.
+    if (rt.impl_ && rt.impl_->atomic_float_smoke_pending) {
+        // Multi-address parity smoke. The probe MUST scatter into several
+        // distinct output rows (not a single address): on GCN4 (Radeon RX 580)
+        // the proprietary Windows driver exposes VK_EXT_shader_atomic_float but
+        // its float atomicAdd is catastrophically broken — every scattered add
+        // collapses onto one address while all other rows stay zero. A
+        // single-address probe (all indices == 0) passes spuriously because the
+        // collapse target coincides with the sole real address; distinct rows
+        // expose the corruption and clear the capability so callers fall back to
+        // the correct brute-force path. Mixed indices exercise both contended
+        // (row 0, twice) and single-write (rows 2, 3) accumulation.
+        constexpr std::size_t kV = 4, kD = 2, kT = 4;
+        const std::vector<std::int32_t> idx = {0, 2, 0, 3};
+        std::vector<float> grad(kT * kD);
+        for (std::size_t i = 0; i < grad.size(); ++i) grad[i] = static_cast<float>(i + 1);
+        std::vector<float> expected(kV * kD, 0.0f);
+        for (std::size_t t = 0; t < kT; ++t)
+            for (std::size_t d = 0; d < kD; ++d)
+                expected[static_cast<std::size_t>(idx[t]) * kD + d] += grad[t * kD + d];
+        auto acc_buf = rt.create_buffer(kV * kD * sizeof(float));
+        auto grad_buf = rt.create_buffer(grad.size() * sizeof(float), grad.data());
+        auto idx_buf = rt.create_buffer(idx.size() * sizeof(std::int32_t), idx.data());
+        const auto zr = run_vulkan_zero_f32(rt, acc_buf, kV * kD);
+        const auto sr = zr.success
+            ? run_vulkan_embedding_weight_backward_scatter(rt, idx_buf, grad_buf, acc_buf,
+                                                            /*vocab=*/kV, /*embed=*/kD, /*tokens=*/kT)
+            : zr;
+        bool ok = sr.success;
+        if (ok) {
+            std::vector<float> got(kV * kD, 0.0f);
+            acc_buf.download(got.data(), got.size() * sizeof(float));
+            for (std::size_t i = 0; i < got.size(); ++i) {
+                if (std::fabs(got[i] - expected[i]) > 1e-3f) { ok = false; break; }
+            }
+        }
+        if (!ok) {
+            rt.impl_->caps.supports_atomic_float = false;
+            rt.impl_->caps_supports_atomic_float = false;
+        }
+        rt.impl_->atomic_float_smoke_pending = false;
+    }
+    // One-time matmul micro-benchmark: decide whether the register-block variant
+    // (mm_f32_nn_rb4) actually beats the base 16x16 tile on this device. rb4 wins
+    // on newer GPUs but loses ~1.5x on GCN4 (RX 580) where the base tile is best;
+    // timing it here replaces the previous (incorrect) subgroup-support proxy so
+    // matmul always runs the faster kernel per device.
+    if (rt.impl_ && rt.impl_->ready) {
+        constexpr std::size_t kMB = 256;
+        const std::vector<float> hb(kMB * kMB, 0.01f);
+        auto ba = rt.create_buffer(kMB * kMB * sizeof(float), hb.data());
+        auto bb = rt.create_buffer(kMB * kMB * sizeof(float), hb.data());
+        auto bc = rt.create_buffer(kMB * kMB * sizeof(float));
+        const struct { std::uint32_t m, k, n; } mpush{static_cast<std::uint32_t>(kMB),
+                                                       static_cast<std::uint32_t>(kMB),
+                                                       static_cast<std::uint32_t>(kMB)};
+        const std::vector<const VulkanBuffer*> mbufs = {&ba, &bb, &bc};
+        const std::uint32_t g16 = static_cast<std::uint32_t>((kMB + 15) / 16);
+        const std::uint32_t g32 = static_cast<std::uint32_t>((kMB + 31) / 32);
+        auto run_base = [&]() {
+            return rt.dispatch_cached(vkspirv::k_mm_f32_nn, vkspirv::k_mm_f32_nn_words, mbufs, &mpush,
+                                      sizeof(mpush), g16, g16, 1).success;
+        };
+        auto run_rb4 = [&]() {
+            return rt.dispatch_cached(vkspirv::k_mm_f32_nn_rb4, vkspirv::k_mm_f32_nn_rb4_words, mbufs, &mpush,
+                                      sizeof(mpush), g32, g32, 1).success;
+        };
+        const bool ok = run_base() && run_rb4();  // warmup + validity (pipeline compile)
+        if (ok) {
+            constexpr int kIters = 8;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < kIters; ++i) run_base();
+            const auto t1 = std::chrono::steady_clock::now();
+            for (int i = 0; i < kIters; ++i) run_rb4();
+            const auto t2 = std::chrono::steady_clock::now();
+            const double base_ns = std::chrono::duration<double, std::nano>(t1 - t0).count();
+            const double rb4_ns = std::chrono::duration<double, std::nano>(t2 - t1).count();
+            rt.impl_->caps.prefer_rb4_matmul = rb4_ns < base_ns;
+        }
+    }
+    return rt;
 }
 
 bool VulkanRuntime::available() const {
@@ -6103,6 +6325,15 @@ void VulkanBuffer::upload(const void* data, std::size_t bytes, std::size_t offse
         throw std::runtime_error("Vulkan buffer upload exceeds allocation size");
     }
     if (bytes == 0) return;
+    if (impl_->runtime->batch_open) {
+        for (const auto& kept : impl_->runtime->batch_keepalive) {
+            if (kept.get() == impl_.get()) {
+                throw std::runtime_error(
+                    "Vulkan buffer upload forbidden while an open batch is writing to this buffer — "
+                    "upload executes immediately, but the batch dispatches are deferred to batch_end");
+            }
+        }
+    }
     if (!impl_->host_visible) {
         std::string error;
         if (!impl_->runtime->staging_write(impl_->buffer, data, bytes, offset, error)) {
@@ -6127,6 +6358,15 @@ void VulkanBuffer::download(void* data, std::size_t bytes, std::size_t offset) c
         throw std::runtime_error("Vulkan buffer download exceeds allocation size");
     }
     if (bytes == 0) return;
+    if (impl_->runtime->batch_open) {
+        for (const auto& kept : impl_->runtime->batch_keepalive) {
+            if (kept.get() == impl_.get()) {
+                throw std::runtime_error(
+                    "Vulkan buffer download forbidden while an open batch is writing to this buffer — "
+                    "download reads immediately, but the batch dispatches are deferred to batch_end");
+            }
+        }
+    }
     if (!impl_->host_visible) {
         std::string error;
         if (!impl_->runtime->staging_read(impl_->buffer, data, bytes, offset, error)) {
@@ -6747,7 +6987,7 @@ VulkanOpResult run_vulkan_f32_matmul(VulkanRuntime& runtime,
         std::uint32_t k;
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
-    const bool use_rb4 = runtime.caps().subgroup_arithmetic_compute;
+    const bool use_rb4 = runtime.caps().prefer_rb4_matmul;
     if (use_rb4) {
         // Register-block 32x32 tile, 8x8 lanes (one wave64), 16 outputs/lane.
         const std::uint32_t groups_x = static_cast<std::uint32_t>((n + 31) / 32);
@@ -6798,7 +7038,7 @@ VulkanOpResult run_vulkan_f32_matmul_transpose_b(VulkanRuntime& runtime,
         std::uint32_t k;
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
-    if (runtime.caps().subgroup_arithmetic_compute) {
+    if (runtime.caps().prefer_rb4_matmul) {
         return runtime.dispatch_cached(vkspirv::k_mm_f32_nt_rb4, vkspirv::k_mm_f32_nt_rb4_words, buffers, &push,
                                        sizeof(push), static_cast<std::uint32_t>((n + 31) / 32),
                                        static_cast<std::uint32_t>((m + 31) / 32), 1);
@@ -6835,7 +7075,7 @@ VulkanOpResult run_vulkan_f32_matmul_transpose_a(VulkanRuntime& runtime,
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
     const std::vector<const VulkanBuffer*> buffers = {&a, &b, &c};
-    if (runtime.caps().subgroup_arithmetic_compute) {
+    if (runtime.caps().prefer_rb4_matmul) {
         return runtime.dispatch_cached(vkspirv::k_mm_f32_tn_rb4, vkspirv::k_mm_f32_tn_rb4_words, buffers, &push,
                                        sizeof(push), static_cast<std::uint32_t>((n + 31) / 32),
                                        static_cast<std::uint32_t>((m + 31) / 32), 1);
@@ -6900,6 +7140,226 @@ VulkanOpResult run_vulkan_i8_scaled_matmul(VulkanRuntime& runtime,
     result.device_name = run.device_name;
     result.error = run.error;
     return result;
+}
+
+// === Quant core (Slice Q1) dispatchers ===
+
+VulkanOpResult run_vulkan_quantize_q8_rowwise(VulkanRuntime& runtime,
+                                              const VulkanBuffer& in_f32,
+                                              VulkanBuffer& out_i8,
+                                              VulkanBuffer& out_scales,
+                                              std::size_t m,
+                                              std::size_t k) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (m == 0 || k == 0) return fail("Vulkan quantize q8 rowwise requires non-zero M and K");
+    if (m > std::numeric_limits<std::size_t>::max() / k)
+        return fail("Vulkan quantize q8 rowwise M*K overflows size_t");
+    const auto nbytes_in = m * k * sizeof(float);
+    const auto nbytes_out = m * k * sizeof(std::int8_t);
+    const auto nbytes_scale = m * sizeof(float);
+    if (in_f32.nbytes() < nbytes_in) return fail("Vulkan quantize q8 rowwise input buffer is too small");
+    if (out_i8.nbytes() < nbytes_out) return fail("Vulkan quantize q8 rowwise int8 buffer is too small");
+    if (out_scales.nbytes() < nbytes_scale) return fail("Vulkan quantize q8 rowwise scales buffer is too small");
+    constexpr std::size_t kMaxInt32 = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (k > kMaxInt32) return fail("Vulkan quantize q8 rowwise K overflows int32 push constant");
+    const struct {
+        std::uint32_t M;
+        std::uint32_t K;
+        std::uint32_t N;
+    } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k),
+           static_cast<std::uint32_t>(m * k)};
+    const std::vector<const VulkanBuffer*> buffers = {&in_f32, &out_i8, &out_scales};
+    return runtime.dispatch_cached(vkspirv::k_quantize_q8_rowwise_f32,
+                                   vkspirv::k_quantize_q8_rowwise_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>(m), 1, 1);
+}
+
+VulkanOpResult run_vulkan_dequantize_q8_scaled(VulkanRuntime& runtime,
+                                               const VulkanBuffer& in_i8,
+                                               const VulkanBuffer& scales,
+                                               VulkanBuffer& out_f32,
+                                               std::size_t count,
+                                               std::uint32_t mode,
+                                               std::size_t rows,
+                                               std::size_t cols) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (count == 0) return fail("Vulkan dequantize q8 requires non-zero count");
+    if (in_i8.nbytes() < count * sizeof(std::int8_t)) return fail("Vulkan dequantize q8 int8 buffer is too small");
+    if (out_f32.nbytes() < count * sizeof(float)) return fail("Vulkan dequantize q8 output buffer is too small");
+    const std::size_t min_scales = (mode == 0) ? 1 : (mode == 1) ? rows : cols;
+    if (scales.nbytes() < min_scales * sizeof(float)) return fail("Vulkan dequantize q8 scales buffer is too small");
+    constexpr std::size_t kMaxInt32 = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (count > kMaxInt32) return fail("Vulkan dequantize q8 count overflows int32 push constant");
+    const struct {
+        std::uint32_t count;
+        std::uint32_t mode;
+        std::uint32_t rows;
+        std::uint32_t cols;
+    } push{static_cast<std::uint32_t>(count), mode,
+           static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
+    const std::vector<const VulkanBuffer*> buffers = {&in_i8, &scales, &out_f32};
+    return runtime.dispatch_cached(vkspirv::k_dequantize_q8_scaled_f32,
+                                   vkspirv::k_dequantize_q8_scaled_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((count + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_dequantize_q4_scaled(VulkanRuntime& runtime,
+                                               const VulkanBuffer& packed,
+                                               const VulkanBuffer& scales,
+                                               VulkanBuffer& out_f32,
+                                               std::size_t count,
+                                               std::uint32_t mode,
+                                               std::size_t rows,
+                                               std::size_t cols) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (count == 0) return fail("Vulkan dequantize q4 requires non-zero count");
+    const auto packed_bytes = (count + 1) / 2;
+    if (packed.nbytes() < packed_bytes) return fail("Vulkan dequantize q4 packed buffer is too small");
+    if (out_f32.nbytes() < count * sizeof(float)) return fail("Vulkan dequantize q4 output buffer is too small");
+    const std::size_t min_scales = (mode == 0) ? 1 : (mode == 1) ? rows : cols;
+    if (scales.nbytes() < min_scales * sizeof(float)) return fail("Vulkan dequantize q4 scales buffer is too small");
+    constexpr std::size_t kMaxInt32 = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (count > kMaxInt32) return fail("Vulkan dequantize q4 count overflows int32 push constant");
+    const struct {
+        std::uint32_t count;
+        std::uint32_t mode;
+        std::uint32_t rows;
+        std::uint32_t cols;
+    } push{static_cast<std::uint32_t>(count), mode,
+           static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
+    const std::vector<const VulkanBuffer*> buffers = {&packed, &scales, &out_f32};
+    return runtime.dispatch_cached(vkspirv::k_dequantize_q4_scaled_f32,
+                                   vkspirv::k_dequantize_q4_scaled_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((count + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_matmul_q8q8_scaled(VulkanRuntime& runtime,
+                                             const VulkanBuffer& a_i8,
+                                             const VulkanBuffer& a_scales,
+                                             const VulkanBuffer& b_i8,
+                                             const VulkanBuffer& b_scales,
+                                             VulkanBuffer& c_f32,
+                                             std::size_t m,
+                                             std::size_t k,
+                                             std::size_t n) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (m == 0 || k == 0 || n == 0) return fail("Vulkan q8q8 matmul requires non-zero M, K, and N");
+    constexpr std::size_t kMaxDim = 1u << 24;
+    if (m > kMaxDim || n > kMaxDim || k > kMaxDim) {
+        return fail("Vulkan q8q8 matmul dimensions exceed supported range");
+    }
+    if (a_i8.nbytes() < m * k * sizeof(std::int8_t)) return fail("Vulkan q8q8 matmul A buffer is too small");
+    if (b_i8.nbytes() < k * n * sizeof(std::int8_t)) return fail("Vulkan q8q8 matmul B buffer is too small");
+    if (a_scales.nbytes() < m * sizeof(float)) return fail("Vulkan q8q8 matmul A scales buffer is too small");
+    if (b_scales.nbytes() < n * sizeof(float)) return fail("Vulkan q8q8 matmul B scales buffer is too small");
+    if (c_f32.nbytes() < m * n * sizeof(float)) return fail("Vulkan q8q8 matmul C buffer is too small");
+    constexpr std::size_t kMaxInt32 = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (m > kMaxInt32 || k > kMaxInt32 || n > kMaxInt32)
+        return fail("Vulkan q8q8 matmul dimensions overflow push constants");
+    const struct {
+        std::uint32_t M;
+        std::uint32_t K;
+        std::uint32_t N;
+    } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k),
+           static_cast<std::uint32_t>(n)};
+    const std::vector<const VulkanBuffer*> buffers = {&a_i8, &b_i8, &a_scales, &b_scales, &c_f32};
+    const std::uint32_t groups_x = static_cast<std::uint32_t>((n + 15) / 16);
+    const std::uint32_t groups_y = static_cast<std::uint32_t>((m + 15) / 16);
+    return runtime.dispatch_cached(vkspirv::k_mm_q8q8_scaled_f32, vkspirv::k_mm_q8q8_scaled_f32_words,
+                                   buffers, &push, sizeof(push), groups_x, groups_y, 1);
+}
+
+VulkanOpResult run_vulkan_matmul_q8q4_scaled(VulkanRuntime& runtime,
+                                             const VulkanBuffer& a_i8,
+                                             const VulkanBuffer& a_scales,
+                                             const VulkanBuffer& b_q4,
+                                             const VulkanBuffer& b_scales,
+                                             VulkanBuffer& c_f32,
+                                             std::size_t m,
+                                             std::size_t k,
+                                             std::size_t n) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (m == 0 || k == 0 || n == 0) return fail("Vulkan q8q4 matmul requires non-zero M, K, and N");
+    constexpr std::size_t kMaxDim = 1u << 24;
+    if (m > kMaxDim || n > kMaxDim || k > kMaxDim) {
+        return fail("Vulkan q8q4 matmul dimensions exceed supported range");
+    }
+    if (a_i8.nbytes() < m * k * sizeof(std::int8_t)) return fail("Vulkan q8q4 matmul A buffer is too small");
+    const auto b_packed_bytes = ((k * n) + 1) / 2;
+    if (b_q4.nbytes() < b_packed_bytes) return fail("Vulkan q8q4 matmul B (q4) buffer is too small");
+    if (a_scales.nbytes() < m * sizeof(float)) return fail("Vulkan q8q4 matmul A scales buffer is too small");
+    if (b_scales.nbytes() < n * sizeof(float)) return fail("Vulkan q8q4 matmul B scales buffer is too small");
+    if (c_f32.nbytes() < m * n * sizeof(float)) return fail("Vulkan q8q4 matmul C buffer is too small");
+    constexpr std::size_t kMaxInt32 = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (m > kMaxInt32 || k > kMaxInt32 || n > kMaxInt32)
+        return fail("Vulkan q8q4 matmul dimensions overflow push constants");
+    const struct {
+        std::uint32_t M;
+        std::uint32_t K;
+        std::uint32_t N;
+    } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k),
+           static_cast<std::uint32_t>(n)};
+    const std::vector<const VulkanBuffer*> buffers = {&a_i8, &b_q4, &a_scales, &b_scales, &c_f32};
+    const std::uint32_t groups_x = static_cast<std::uint32_t>((n + 15) / 16);
+    const std::uint32_t groups_y = static_cast<std::uint32_t>((m + 15) / 16);
+    return runtime.dispatch_cached(vkspirv::k_mm_q8q4_scaled_f32, vkspirv::k_mm_q8q4_scaled_f32_words,
+                                   buffers, &push, sizeof(push), groups_x, groups_y, 1);
+}
+
+VulkanOpResult run_vulkan_matmul_f32q4_m1(VulkanRuntime& runtime,
+                                          const VulkanBuffer& a_f32,
+                                          const VulkanBuffer& b_q4,
+                                          const VulkanBuffer& b_scales,
+                                          VulkanBuffer& c_f32,
+                                          std::size_t k,
+                                          std::size_t n) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (k == 0 || n == 0) return fail("Vulkan f32q4 M=1 matmul requires non-zero K and N");
+    constexpr std::size_t kMaxDim = 1u << 24;
+    if (k > kMaxDim || n > kMaxDim) return fail("Vulkan f32q4 M=1 matmul dimensions exceed supported range");
+    if (a_f32.nbytes() < k * sizeof(float)) return fail("Vulkan f32q4 M=1 matmul A buffer is too small");
+    const auto b_packed_bytes = ((k * n) + 1) / 2;
+    if (b_q4.nbytes() < b_packed_bytes) return fail("Vulkan f32q4 M=1 matmul B (q4) buffer is too small");
+    if (b_scales.nbytes() < n * sizeof(float)) return fail("Vulkan f32q4 M=1 matmul scales buffer is too small");
+    if (c_f32.nbytes() < n * sizeof(float)) return fail("Vulkan f32q4 M=1 matmul C buffer is too small");
+    constexpr std::size_t kMaxInt32 = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (k > kMaxInt32 || n > kMaxInt32)
+        return fail("Vulkan f32q4 M=1 matmul dimensions overflow push constants");
+    const struct {
+        std::uint32_t K;
+        std::uint32_t N;
+    } push{static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
+    const std::vector<const VulkanBuffer*> buffers = {&a_f32, &b_q4, &b_scales, &c_f32};
+    const std::uint32_t groups = static_cast<std::uint32_t>((n + 3) / 4);
+    return runtime.dispatch_cached(vkspirv::k_mm_f32q4_m1_wg64_f32, vkspirv::k_mm_f32q4_m1_wg64_f32_words,
+                                   buffers, &push, sizeof(push), groups, 1, 1);
 }
 
 VulkanOpResult run_vulkan_softmax_rows(VulkanRuntime& runtime,
@@ -7616,10 +8076,12 @@ VulkanOpResult run_vulkan_compact_counter_backward_input_u8(VulkanRuntime& runti
     } push{static_cast<std::int32_t>(C), static_cast<std::int32_t>(in_features),
            static_cast<std::int32_t>(out_features), static_cast<std::int32_t>(batch)};
     const std::vector<const VulkanBuffer*> buffers = {&grad_out, &state, &scale, &grad_x};
+    // One invocation per (row, group-of-4): batch * (in_features / 4) groups.
+    const std::size_t dispatch_groups = batch * (in_features / 4);
     const auto run = runtime.dispatch_cached(vkspirv::k_counter_backward_input_f32,
                                              vkspirv::k_counter_backward_input_f32_words, buffers, &push,
                                              sizeof(push),
-                                             static_cast<std::uint32_t>((grad_x_elements + 63) / 64), 1, 1);
+                                             static_cast<std::uint32_t>((dispatch_groups + 63) / 64), 1, 1);
     result.success = run.success;
     result.device_name = run.device_name;
     result.error = run.error;

@@ -1,6 +1,10 @@
 // RMSNorm backward w.r.t. weight, stage 2:
 //   dw[c] = sum_r dy[r,c] * x[r,c] * row_inv[r]
-// One invocation per column; reads are coalesced across the wave.
+// One invocation per column; reads are coalesced across the wave. The row loop
+// is unrolled with four independent accumulators to break the serial dependency
+// chain (the previous single-accumulator reduction was latency-bound over
+// hundreds of rows). Grouping the partial sums changes the summation order, so
+// dw stays within the reduction's float tolerance rather than bit-identical.
 #version 450
 
 layout(local_size_x = 64) in;
@@ -18,8 +22,20 @@ layout(push_constant) uniform Push {
 void main() {
     const uint col = gl_GlobalInvocationID.x;
     if (col >= p.cols) return;
-    float acc = 0.0;
-    for (uint r = 0u; r < p.rows; ++r) {
+    float a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+    uint r = 0u;
+    for (; r + 4u <= p.rows; r += 4u) {
+        const uint i0 = r * p.cols + col;
+        const uint i1 = i0 + p.cols;
+        const uint i2 = i1 + p.cols;
+        const uint i3 = i2 + p.cols;
+        a0 += dy[i0] * x[i0] * row_inv[r];
+        a1 += dy[i1] * x[i1] * row_inv[r + 1u];
+        a2 += dy[i2] * x[i2] * row_inv[r + 2u];
+        a3 += dy[i3] * x[i3] * row_inv[r + 3u];
+    }
+    float acc = (a0 + a1) + (a2 + a3);
+    for (; r < p.rows; ++r) {
         const uint idx = r * p.cols + col;
         acc += dy[idx] * x[idx] * row_inv[r];
     }
