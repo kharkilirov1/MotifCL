@@ -1,0 +1,16 @@
+{
+ "model": "tiny-testvec",
+ "C": 11,
+ "format": {
+  "C": 11,
+  "model": "tiny-testvec"
+ },
+ "layers": {
+  "proj": {
+   "out": 24,
+   "in": 32,
+   "group": 8,
+   "salient": 24
+  }
+ }
+}
