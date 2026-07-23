@@ -1,0 +1,83 @@
+// Portable shared-memory reduction for row-scaled Q8_0/Q4_0 cache append.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer NewKBuf { float new_k[]; };
+layout(std430, set = 0, binding = 1) readonly buffer NewVBuf { float new_v[]; };
+layout(std430, set = 0, binding = 2) buffer CacheKBuf { uint8_t cache_k[]; };
+layout(std430, set = 0, binding = 3) buffer CacheVBuf { uint8_t cache_v[]; };
+layout(std430, set = 0, binding = 4) buffer KSBuf { float k_scales[]; };
+layout(std430, set = 0, binding = 5) buffer VSBuf { float v_scales[]; };
+
+layout(push_constant) uniform Push {
+    uint batch;
+    uint new_tokens;
+    uint max_tokens;
+    uint kv_channels;
+    uint start_pos;
+    uint kv_dtype; // 1=q8_0, 2=q4_0
+} p;
+
+shared float k_red[64];
+shared float v_red[64];
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    const uint rows = p.batch * p.new_tokens;
+    if (row >= rows) return;
+    const uint t = row % p.new_tokens;
+    const uint b = row / p.new_tokens;
+    const uint src_base = row * p.kv_channels;
+    const uint dst_row = b * p.max_tokens + p.start_pos + t;
+
+    float km = 0.0;
+    float vm = 0.0;
+    for (uint c = lane; c < p.kv_channels; c += 64u) {
+        km = max(km, abs(new_k[src_base + c]));
+        vm = max(vm, abs(new_v[src_base + c]));
+    }
+    k_red[lane] = km;
+    v_red[lane] = vm;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            k_red[lane] = max(k_red[lane], k_red[lane + stride]);
+            v_red[lane] = max(v_red[lane], v_red[lane + stride]);
+        }
+        barrier();
+    }
+    const float denom = p.kv_dtype == 1u ? 127.0 : 7.0;
+    const float ks = k_red[0] <= 0.0 ? 1.0 : k_red[0] / denom;
+    const float vs = v_red[0] <= 0.0 ? 1.0 : v_red[0] / denom;
+    if (lane == 0u) {
+        k_scales[dst_row] = ks;
+        v_scales[dst_row] = vs;
+    }
+    barrier();
+
+    if (p.kv_dtype == 1u) {
+        const uint dst_base = dst_row * p.kv_channels;
+        for (uint c = lane; c < p.kv_channels; c += 64u) {
+            const int qk = clamp(int(roundEven(new_k[src_base + c] / ks)), -127, 127);
+            const int qv = clamp(int(roundEven(new_v[src_base + c] / vs)), -127, 127);
+            cache_k[dst_base + c] = uint8_t(uint(qk) & 0xffu);
+            cache_v[dst_base + c] = uint8_t(uint(qv) & 0xffu);
+        }
+    } else {
+        const uint packed_cols = p.kv_channels >> 1u;
+        const uint dst_base = (dst_row * p.kv_channels) >> 1u;
+        for (uint pc = lane; pc < packed_cols; pc += 64u) {
+            const uint c0 = pc << 1u;
+            const uint c1 = c0 + 1u;
+            const int qk0 = clamp(int(roundEven(new_k[src_base + c0] / ks)), -7, 7);
+            const int qk1 = clamp(int(roundEven(new_k[src_base + c1] / ks)), -7, 7);
+            const int qv0 = clamp(int(roundEven(new_v[src_base + c0] / vs)), -7, 7);
+            const int qv1 = clamp(int(roundEven(new_v[src_base + c1] / vs)), -7, 7);
+            cache_k[dst_base + pc] = uint8_t(uint((qk0 + 8) | ((qk1 + 8) << 4)));
+            cache_v[dst_base + pc] = uint8_t(uint((qv0 + 8) | ((qv1 + 8) << 4)));
+        }
+    }
+}

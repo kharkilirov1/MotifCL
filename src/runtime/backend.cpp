@@ -337,6 +337,10 @@ DeviceInfo Backend::device_info() const {
         info.device_name = vulkan_runtime().device_name();
         info.device_vendor = "Vulkan";
         info.device_version = "Vulkan";
+        const auto& caps = vulkan_runtime().caps();
+        info.local_mem_size = static_cast<cl_ulong>(caps.max_shared_memory_bytes);
+        info.max_work_group_size =
+            static_cast<std::size_t>(caps.max_workgroup_invocations);
         return info;
     }
     return ctx.info();

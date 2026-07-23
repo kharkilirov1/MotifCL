@@ -31,6 +31,10 @@ set(MOTIFCL_TESTS
     test_f16_matmul_autograd
     test_reversible_attn
     test_vulkan_backend
+    test_vulkan_gqa_p0
+    test_vulkan_kv_decode_p0
+    test_vulkan_q4_fused_p0
+    test_vulkan_row_bias_p0
     test_artifact_fuzz
     test_split_qkv_train_repro
     test_vulkan_train_step

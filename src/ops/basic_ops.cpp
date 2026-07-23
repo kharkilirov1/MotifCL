@@ -558,13 +558,23 @@ Tensor add_bias_rows(const Tensor& x, const Tensor& bias) {
     MCL_CHECK(x.ndim() == 2 && bias.ndim() == 1, "add_bias_rows expects x [rows, cols] and bias [cols]");
     MCL_CHECK(x.shape()[1] == bias.shape()[0], "bias dimension mismatch");
     MCL_CHECK(x.backend_ptr() == bias.backend_ptr(), "add_bias_rows requires tensors on same backend");
-    // OpenCL-only kernel; nn::Linear with use_bias=true on Vulkan requires a
-    // Vulkan device kernel (Slice gap; see VULKAN_PORT_PROTOCOL.md). Refuse
-    // Vulkan explicitly so the failure is loud and points at the right fix.
-    MCL_CHECK(!x.backend().is_vulkan(),
-              "add_bias_rows is not Vulkan-native yet (nn::Linear bias on Vulkan needs a "
-              "device kernel; use use_bias=false or OpenCL backend)");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    if (x.backend().is_vulkan()) {
+        const auto result = run_vulkan_add_bias_rows(
+            x.backend().vulkan_runtime(),
+            x.storage().vulkan_buffer,
+            bias.storage().vulkan_buffer,
+            out.storage().vulkan_buffer,
+            static_cast<std::size_t>(x.shape()[0]),
+            static_cast<std::size_t>(x.shape()[1]));
+        MCL_CHECK(result.success, std::string("vulkan add_bias_rows failed: ") + result.error);
+        autograd::record_op("add_bias_rows_vulkan_f32", {x.id(), bias.id()}, {out.id()});
+        if (autograd::is_enabled() && (x.requires_grad() || bias.requires_grad())) {
+            out.set_requires_grad(true);
+            out._set_grad_fn(std::make_shared<AddBiasRowsBackward>(x, bias));
+        }
+        return out;
+    }
     auto k = x.backend().kernels.get("add_bias_rows_f32");
     int rows = static_cast<int>(x.shape()[0]);
     int cols = static_cast<int>(x.shape()[1]);

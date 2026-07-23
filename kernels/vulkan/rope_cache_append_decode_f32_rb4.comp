@@ -1,0 +1,75 @@
+// Fused RoPE(Q/K) + F32 KV append, four flattened outputs per invocation.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KBuf { float k[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VBuf { float v[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer QOutBuf { float qout[]; };
+layout(std430, set = 0, binding = 4) buffer CacheKBuf { float cache_k[]; };
+layout(std430, set = 0, binding = 5) buffer CacheVBuf { float cache_v[]; };
+
+layout(push_constant) uniform Push {
+    uint batch;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    uint rotary_dim;
+    uint token_offset;
+    uint max_tokens;
+    uint total;
+    float theta;
+} p;
+
+float rotate_value(const float even, const float odd, uint d, uint pair_d) {
+    const float angle = float(p.token_offset) /
+        pow(p.theta, float(pair_d) / float(p.head_dim));
+    const float cs = cos(angle);
+    const float sn = sin(angle);
+    return d == pair_d ? even * cs - odd * sn : even * sn + odd * cs;
+}
+
+void process(uint idx) {
+    if (idx >= p.total) return;
+    const uint q_channels = p.n_head * p.head_dim;
+    const uint kv_channels = p.n_kv_head * p.head_dim;
+    const uint span = q_channels + 2u * kv_channels;
+    const uint b = idx / span;
+    const uint r = idx - b * span;
+    if (b >= p.batch) return;
+    const uint rd = min(p.rotary_dim, p.head_dim) & ~1u;
+
+    if (r < q_channels) {
+        const uint d = r % p.head_dim;
+        const uint head_base = b * q_channels + (r / p.head_dim) * p.head_dim;
+        if (d >= rd) qout[head_base + d] = q[head_base + d];
+        else {
+            const uint pair_d = d & ~1u;
+            qout[head_base + d] =
+                rotate_value(q[head_base + pair_d], q[head_base + pair_d + 1u], d, pair_d);
+        }
+        return;
+    }
+    if (r < q_channels + kv_channels) {
+        const uint c = r - q_channels;
+        const uint d = c % p.head_dim;
+        const uint src_base = b * kv_channels + (c / p.head_dim) * p.head_dim;
+        const uint dst_base =
+            (b * p.max_tokens + p.token_offset) * kv_channels + (c / p.head_dim) * p.head_dim;
+        cache_k[dst_base + d] = d >= rd
+            ? k[src_base + d]
+            : rotate_value(k[src_base + (d & ~1u)], k[src_base + (d & ~1u) + 1u], d, d & ~1u);
+        return;
+    }
+    const uint c = r - q_channels - kv_channels;
+    cache_v[(b * p.max_tokens + p.token_offset) * kv_channels + c] = v[b * kv_channels + c];
+}
+
+void main() {
+    const uint base = gl_GlobalInvocationID.x * 4u;
+    process(base);
+    process(base + 1u);
+    process(base + 2u);
+    process(base + 3u);
+}

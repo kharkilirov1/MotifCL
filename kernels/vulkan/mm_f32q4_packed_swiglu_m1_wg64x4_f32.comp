@@ -1,0 +1,62 @@
+// Fused M=1 Q4_0 dequant+matmul+SwiGLU product, four outputs/workgroup.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { float A[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BBuf { uint8_t B[]; };
+layout(std430, set = 0, binding = 2) readonly buffer SBuf { float S[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer CBuf { float C[]; };
+
+layout(push_constant) uniform Push {
+    uint hidden;
+    uint in_dim;
+} p;
+
+shared float scratch[8][64];
+
+float q4_load(uint idx) {
+    const uint packed = uint(B[idx >> 1u]);
+    const uint code = (idx & 1u) == 0u ? (packed & 15u) : ((packed >> 4u) & 15u);
+    return float(int(code) - 8);
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint col0 = gl_WorkGroupID.x * 4u;
+    const uint total = p.hidden * 2u;
+    float gate[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    float up[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (uint kidx = lane; kidx < p.in_dim; kidx += 64u) {
+        const float av = A[kidx];
+        for (uint j = 0u; j < 4u; ++j) {
+            const uint col = col0 + j;
+            if (col < p.hidden) {
+                const uint up_col = p.hidden + col;
+                gate[j] += av * q4_load(kidx * total + col) * S[col];
+                up[j] += av * q4_load(kidx * total + up_col) * S[up_col];
+            }
+        }
+    }
+    for (uint j = 0u; j < 4u; ++j) {
+        scratch[j][lane] = gate[j];
+        scratch[j + 4u][lane] = up[j];
+    }
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            for (uint j = 0u; j < 8u; ++j) scratch[j][lane] += scratch[j][lane + stride];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        for (uint j = 0u; j < 4u; ++j) {
+            const uint col = col0 + j;
+            if (col < p.hidden) {
+                const float g = scratch[j][0];
+                C[col] = (g / (1.0 + exp(-g))) * scratch[j + 4u][0];
+            }
+        }
+    }
+}

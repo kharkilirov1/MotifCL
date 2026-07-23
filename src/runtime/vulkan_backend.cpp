@@ -7362,6 +7362,343 @@ VulkanOpResult run_vulkan_matmul_f32q4_m1(VulkanRuntime& runtime,
                                    buffers, &push, sizeof(push), groups, 1, 1);
 }
 
+VulkanOpResult run_vulkan_matmul_f32q4_packed_qkv_m1(
+    VulkanRuntime& runtime,
+    const VulkanBuffer& a_f32,
+    const VulkanBuffer& b_q4,
+    const VulkanBuffer& b_scales,
+    VulkanBuffer& q_out,
+    VulkanBuffer& k_out,
+    VulkanBuffer& v_out,
+    std::size_t in_dim,
+    std::size_t q_dim,
+    std::size_t kv_dim) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (in_dim == 0 || q_dim == 0 || kv_dim == 0) {
+        return fail("Vulkan packed QKV Q4_0 matmul requires non-zero dimensions");
+    }
+    constexpr std::size_t kMaxU32 = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (kv_dim > kMaxU32 / 2 || q_dim > kMaxU32 - 2 * kv_dim || in_dim > kMaxU32) {
+        return fail("Vulkan packed QKV Q4_0 matmul dimensions overflow push constants");
+    }
+    const std::size_t total = q_dim + 2 * kv_dim;
+    if (in_dim > std::numeric_limits<std::size_t>::max() / total) {
+        return fail("Vulkan packed QKV Q4_0 matmul shape product overflows");
+    }
+    if (a_f32.nbytes() < in_dim * sizeof(float)) return fail("Vulkan packed QKV input buffer is too small");
+    if (b_q4.nbytes() < (in_dim * total + 1) / 2) return fail("Vulkan packed QKV weight buffer is too small");
+    if (b_scales.nbytes() < total * sizeof(float)) return fail("Vulkan packed QKV scale buffer is too small");
+    if (q_out.nbytes() < q_dim * sizeof(float) || k_out.nbytes() < kv_dim * sizeof(float) ||
+        v_out.nbytes() < kv_dim * sizeof(float)) {
+        return fail("Vulkan packed QKV output buffer is too small");
+    }
+    const struct {
+        std::uint32_t q_dim;
+        std::uint32_t kv_dim;
+        std::uint32_t in_dim;
+    } push{static_cast<std::uint32_t>(q_dim), static_cast<std::uint32_t>(kv_dim),
+           static_cast<std::uint32_t>(in_dim)};
+    const std::vector<const VulkanBuffer*> buffers = {&a_f32, &b_q4, &b_scales, &q_out, &k_out, &v_out};
+    const bool use_subgroup = runtime.caps().subgroup_arithmetic_compute && runtime.caps().subgroup_size == 64;
+    const auto* spirv = use_subgroup ? vkspirv::k_mm_f32q4_packed_qkv_m1_wg64x4_f32_subgroup
+                                     : vkspirv::k_mm_f32q4_packed_qkv_m1_wg64x4_f32;
+    const auto words = use_subgroup ? vkspirv::k_mm_f32q4_packed_qkv_m1_wg64x4_f32_subgroup_words
+                                    : vkspirv::k_mm_f32q4_packed_qkv_m1_wg64x4_f32_words;
+    return runtime.dispatch_cached(spirv, words, buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 3) / 4), 1, 1);
+}
+
+VulkanOpResult run_vulkan_matmul_f32q4_packed_swiglu_m1(
+    VulkanRuntime& runtime,
+    const VulkanBuffer& a_f32,
+    const VulkanBuffer& b_q4,
+    const VulkanBuffer& b_scales,
+    VulkanBuffer& out,
+    std::size_t in_dim,
+    std::size_t hidden) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (in_dim == 0 || hidden == 0) return fail("Vulkan packed SwiGLU Q4_0 matmul requires non-zero dimensions");
+    constexpr std::size_t kMaxU32 = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (in_dim > kMaxU32 || hidden > kMaxU32 / 2) {
+        return fail("Vulkan packed SwiGLU Q4_0 matmul dimensions overflow push constants");
+    }
+    const std::size_t total = hidden * 2;
+    if (in_dim > std::numeric_limits<std::size_t>::max() / total) {
+        return fail("Vulkan packed SwiGLU Q4_0 matmul shape product overflows");
+    }
+    if (a_f32.nbytes() < in_dim * sizeof(float)) return fail("Vulkan packed SwiGLU input buffer is too small");
+    if (b_q4.nbytes() < (in_dim * total + 1) / 2) return fail("Vulkan packed SwiGLU weight buffer is too small");
+    if (b_scales.nbytes() < total * sizeof(float)) return fail("Vulkan packed SwiGLU scale buffer is too small");
+    if (out.nbytes() < hidden * sizeof(float)) return fail("Vulkan packed SwiGLU output buffer is too small");
+    const struct {
+        std::uint32_t hidden;
+        std::uint32_t in_dim;
+    } push{static_cast<std::uint32_t>(hidden), static_cast<std::uint32_t>(in_dim)};
+    const std::vector<const VulkanBuffer*> buffers = {&a_f32, &b_q4, &b_scales, &out};
+    const bool use_subgroup = runtime.caps().subgroup_arithmetic_compute && runtime.caps().subgroup_size == 64;
+    const auto* spirv = use_subgroup ? vkspirv::k_mm_f32q4_packed_swiglu_m1_wg64x4_f32_subgroup
+                                     : vkspirv::k_mm_f32q4_packed_swiglu_m1_wg64x4_f32;
+    const auto words = use_subgroup ? vkspirv::k_mm_f32q4_packed_swiglu_m1_wg64x4_f32_subgroup_words
+                                    : vkspirv::k_mm_f32q4_packed_swiglu_m1_wg64x4_f32_words;
+    return runtime.dispatch_cached(spirv, words, buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((hidden + 3) / 4), 1, 1);
+}
+
+VulkanOpResult run_vulkan_add_bias_rows(VulkanRuntime& runtime,
+                                        const VulkanBuffer& x,
+                                        const VulkanBuffer& bias,
+                                        VulkanBuffer& out,
+                                        std::size_t rows,
+                                        std::size_t cols) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (rows == 0 || cols == 0) return fail("Vulkan row bias add requires non-zero rows and cols");
+    constexpr std::size_t kMaxU32 = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (rows > kMaxU32 / cols) return fail("Vulkan row bias add element count overflows push constants");
+    const std::size_t count = rows * cols;
+    if (x.nbytes() < count * sizeof(float) || out.nbytes() < count * sizeof(float)) {
+        return fail("Vulkan row bias add x/output buffer is too small");
+    }
+    if (bias.nbytes() < cols * sizeof(float)) return fail("Vulkan row bias add bias buffer is too small");
+    const struct {
+        std::uint32_t count;
+        std::uint32_t cols;
+    } push{static_cast<std::uint32_t>(count), static_cast<std::uint32_t>(cols)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &bias, &out};
+    return runtime.dispatch_cached(vkspirv::k_add_bias_rows_f32_rb4,
+                                   vkspirv::k_add_bias_rows_f32_rb4_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((count + 255) / 256), 1, 1);
+}
+
+VulkanOpResult run_vulkan_qk_norm_rope_decode(
+    VulkanRuntime& runtime,
+    const VulkanBuffer& q,
+    const VulkanBuffer& k,
+    const VulkanBuffer& q_weight,
+    const VulkanBuffer& k_weight,
+    VulkanBuffer& q_out,
+    VulkanBuffer& k_out,
+    std::size_t batch,
+    std::size_t n_head,
+    std::size_t n_kv_head,
+    std::size_t head_dim,
+    std::size_t rotary_dim,
+    std::size_t token_offset,
+    float theta,
+    float q_eps,
+    float k_eps) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || n_head == 0 || n_kv_head == 0 || head_dim == 0 ||
+        rotary_dim > head_dim || (rotary_dim & 1u) != 0 || !std::isfinite(theta) || theta <= 0.0f ||
+        !std::isfinite(q_eps) || !std::isfinite(k_eps)) {
+        return fail("Vulkan fused QK norm+RoPE received invalid parameters");
+    }
+    constexpr std::size_t kMaxU32 = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (batch > kMaxU32 || n_head > kMaxU32 || n_kv_head > kMaxU32 ||
+        head_dim > kMaxU32 || rotary_dim > kMaxU32 || token_offset > kMaxU32) {
+        return fail("Vulkan fused QK norm+RoPE dimensions overflow push constants");
+    }
+    const std::size_t q_count = batch * n_head * head_dim;
+    const std::size_t k_count = batch * n_kv_head * head_dim;
+    if (q.nbytes() < q_count * sizeof(float) || q_out.nbytes() < q_count * sizeof(float) ||
+        k.nbytes() < k_count * sizeof(float) || k_out.nbytes() < k_count * sizeof(float)) {
+        return fail("Vulkan fused QK norm+RoPE q/k buffer is too small");
+    }
+    if (q_weight.nbytes() < head_dim * sizeof(float) || k_weight.nbytes() < head_dim * sizeof(float)) {
+        return fail("Vulkan fused QK norm+RoPE weight buffer is too small");
+    }
+    const struct {
+        std::uint32_t batch;
+        std::uint32_t n_head;
+        std::uint32_t n_kv_head;
+        std::uint32_t head_dim;
+        std::uint32_t rotary_dim;
+        std::uint32_t token_offset;
+        float theta;
+        float q_eps;
+        float k_eps;
+    } push{static_cast<std::uint32_t>(batch),
+           static_cast<std::uint32_t>(n_head),
+           static_cast<std::uint32_t>(n_kv_head),
+           static_cast<std::uint32_t>(head_dim),
+           static_cast<std::uint32_t>(rotary_dim),
+           static_cast<std::uint32_t>(token_offset),
+           theta,
+           q_eps,
+           k_eps};
+    const std::vector<const VulkanBuffer*> buffers = {&q, &k, &q_weight, &k_weight, &q_out, &k_out};
+    const bool use_subgroup = runtime.caps().subgroup_arithmetic_compute && runtime.caps().subgroup_size == 64;
+    const auto* spirv = use_subgroup ? vkspirv::k_qk_norm_rope_decode_f32_subgroup
+                                     : vkspirv::k_qk_norm_rope_decode_f32;
+    const auto words = use_subgroup ? vkspirv::k_qk_norm_rope_decode_f32_subgroup_words
+                                    : vkspirv::k_qk_norm_rope_decode_f32_words;
+    return runtime.dispatch_cached(spirv, words, buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>(batch * (n_head + n_kv_head)), 1, 1);
+}
+
+VulkanOpResult run_vulkan_qk_norm_rope_cache_append_decode(
+    VulkanRuntime& runtime,
+    const VulkanBuffer& q,
+    const VulkanBuffer& k,
+    const VulkanBuffer& v,
+    const VulkanBuffer& q_weight,
+    const VulkanBuffer& k_weight,
+    VulkanBuffer& q_out,
+    VulkanBuffer& cache_k,
+    VulkanBuffer& cache_v,
+    std::size_t batch,
+    std::size_t n_head,
+    std::size_t n_kv_head,
+    std::size_t head_dim,
+    std::size_t rotary_dim,
+    std::size_t token_offset,
+    std::size_t max_tokens,
+    float theta,
+    float q_eps,
+    float k_eps) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || n_head == 0 || n_kv_head == 0 || head_dim == 0 ||
+        max_tokens == 0 || token_offset >= max_tokens || rotary_dim > head_dim ||
+        (rotary_dim & 1u) != 0 || !std::isfinite(theta) || theta <= 0.0f ||
+        !std::isfinite(q_eps) || !std::isfinite(k_eps)) {
+        return fail("Vulkan fused QK norm+RoPE+cache append received invalid parameters");
+    }
+    constexpr std::size_t kMaxU32 = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (batch > kMaxU32 || n_head > kMaxU32 || n_kv_head > kMaxU32 || head_dim > kMaxU32 ||
+        rotary_dim > kMaxU32 || token_offset > kMaxU32 || max_tokens > kMaxU32) {
+        return fail("Vulkan fused QK norm+RoPE+cache append dimensions overflow push constants");
+    }
+    const std::size_t q_count = batch * n_head * head_dim;
+    const std::size_t kv_count = batch * n_kv_head * head_dim;
+    const std::size_t cache_count = batch * max_tokens * n_kv_head * head_dim;
+    if (q.nbytes() < q_count * sizeof(float) || q_out.nbytes() < q_count * sizeof(float) ||
+        k.nbytes() < kv_count * sizeof(float) || v.nbytes() < kv_count * sizeof(float) ||
+        cache_k.nbytes() < cache_count * sizeof(float) || cache_v.nbytes() < cache_count * sizeof(float)) {
+        return fail("Vulkan fused QK norm+RoPE+cache append data buffer is too small");
+    }
+    if (q_weight.nbytes() < head_dim * sizeof(float) || k_weight.nbytes() < head_dim * sizeof(float)) {
+        return fail("Vulkan fused QK norm+RoPE+cache append weight buffer is too small");
+    }
+    const struct {
+        std::uint32_t batch;
+        std::uint32_t n_head;
+        std::uint32_t n_kv_head;
+        std::uint32_t head_dim;
+        std::uint32_t rotary_dim;
+        std::uint32_t token_offset;
+        std::uint32_t max_tokens;
+        float theta;
+        float q_eps;
+        float k_eps;
+    } push{static_cast<std::uint32_t>(batch),
+           static_cast<std::uint32_t>(n_head),
+           static_cast<std::uint32_t>(n_kv_head),
+           static_cast<std::uint32_t>(head_dim),
+           static_cast<std::uint32_t>(rotary_dim),
+           static_cast<std::uint32_t>(token_offset),
+           static_cast<std::uint32_t>(max_tokens),
+           theta,
+           q_eps,
+           k_eps};
+    const std::vector<const VulkanBuffer*> buffers = {
+        &q, &k, &v, &q_weight, &k_weight, &q_out, &cache_k, &cache_v};
+    const bool use_subgroup = runtime.caps().subgroup_arithmetic_compute && runtime.caps().subgroup_size == 64;
+    const auto* spirv = use_subgroup ? vkspirv::k_qk_norm_rope_cache_append_decode_f32_subgroup
+                                     : vkspirv::k_qk_norm_rope_cache_append_decode_f32;
+    const auto words = use_subgroup ? vkspirv::k_qk_norm_rope_cache_append_decode_f32_subgroup_words
+                                    : vkspirv::k_qk_norm_rope_cache_append_decode_f32_words;
+    return runtime.dispatch_cached(spirv, words, buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>(batch * (n_head + 2 * n_kv_head)), 1, 1);
+}
+
+VulkanOpResult run_vulkan_rope_cache_append_decode(
+    VulkanRuntime& runtime,
+    const VulkanBuffer& q,
+    const VulkanBuffer& k,
+    const VulkanBuffer& v,
+    VulkanBuffer& q_out,
+    VulkanBuffer& cache_k,
+    VulkanBuffer& cache_v,
+    std::size_t batch,
+    std::size_t n_head,
+    std::size_t n_kv_head,
+    std::size_t head_dim,
+    std::size_t rotary_dim,
+    std::size_t token_offset,
+    std::size_t max_tokens,
+    float theta) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || n_head == 0 || n_kv_head == 0 || head_dim == 0 ||
+        max_tokens == 0 || token_offset >= max_tokens || rotary_dim > head_dim ||
+        (rotary_dim & 1u) != 0 || !std::isfinite(theta) || theta <= 0.0f) {
+        return fail("Vulkan fused RoPE+cache append received invalid parameters");
+    }
+    constexpr std::size_t kMaxU32 = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (batch > kMaxU32 || n_head > kMaxU32 || n_kv_head > kMaxU32 || head_dim > kMaxU32 ||
+        rotary_dim > kMaxU32 || token_offset > kMaxU32 || max_tokens > kMaxU32) {
+        return fail("Vulkan fused RoPE+cache append dimensions overflow push constants");
+    }
+    const std::size_t q_channels = n_head * head_dim;
+    const std::size_t kv_channels = n_kv_head * head_dim;
+    const std::size_t total = batch * (q_channels + 2 * kv_channels);
+    const std::size_t q_count = batch * q_channels;
+    const std::size_t kv_count = batch * kv_channels;
+    const std::size_t cache_count = batch * max_tokens * kv_channels;
+    if (total > kMaxU32 || q.nbytes() < q_count * sizeof(float) || q_out.nbytes() < q_count * sizeof(float) ||
+        k.nbytes() < kv_count * sizeof(float) || v.nbytes() < kv_count * sizeof(float) ||
+        cache_k.nbytes() < cache_count * sizeof(float) || cache_v.nbytes() < cache_count * sizeof(float)) {
+        return fail("Vulkan fused RoPE+cache append buffer is too small or dispatch range overflowed");
+    }
+    const struct {
+        std::uint32_t batch;
+        std::uint32_t n_head;
+        std::uint32_t n_kv_head;
+        std::uint32_t head_dim;
+        std::uint32_t rotary_dim;
+        std::uint32_t token_offset;
+        std::uint32_t max_tokens;
+        std::uint32_t total;
+        float theta;
+    } push{static_cast<std::uint32_t>(batch),
+           static_cast<std::uint32_t>(n_head),
+           static_cast<std::uint32_t>(n_kv_head),
+           static_cast<std::uint32_t>(head_dim),
+           static_cast<std::uint32_t>(rotary_dim),
+           static_cast<std::uint32_t>(token_offset),
+           static_cast<std::uint32_t>(max_tokens),
+           static_cast<std::uint32_t>(total),
+           theta};
+    const std::vector<const VulkanBuffer*> buffers = {&q, &k, &v, &q_out, &cache_k, &cache_v};
+    return runtime.dispatch_cached(vkspirv::k_rope_cache_append_decode_f32_rb4,
+                                   vkspirv::k_rope_cache_append_decode_f32_rb4_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((total + 255) / 256), 1, 1);
+}
+
 VulkanOpResult run_vulkan_softmax_rows(VulkanRuntime& runtime,
                                        const VulkanBuffer& x,
                                        VulkanBuffer& out,
@@ -8423,8 +8760,8 @@ VulkanF32TensorResult run_vulkan_i8_scaled_matmul(const std::vector<std::int8_t>
 }
 
 VulkanOpResult run_vulkan_grouped_query_attention(VulkanRuntime& runtime,
-                                                  const VulkanBuffer& q,
-                                                  const VulkanBuffer& k,
+                                                   const VulkanBuffer& q,
+                                                   const VulkanBuffer& k,
                                                   const VulkanBuffer& v,
                                                   VulkanBuffer& out,
                                                   std::size_t query_tokens,
@@ -8468,6 +8805,320 @@ VulkanOpResult run_vulkan_grouped_query_attention(VulkanRuntime& runtime,
     return runtime.dispatch_cached(gqa_spirv, gqa_words, buffers, &push,
                                    sizeof(push), static_cast<std::uint32_t>(query_tokens),
                                    static_cast<std::uint32_t>(n_head), 1);
+}
+
+VulkanOpResult run_vulkan_grouped_query_attention_general(
+    VulkanRuntime& runtime,
+    const VulkanBuffer& q,
+    const VulkanBuffer& k,
+    const VulkanBuffer& v,
+    const VulkanBuffer* k_scales,
+    const VulkanBuffer* v_scales,
+    const VulkanBuffer* mask,
+    VulkanBuffer& out,
+    std::size_t batch,
+    std::size_t query_tokens,
+    std::size_t key_tokens,
+    std::size_t key_stride,
+    std::size_t n_head,
+    std::size_t n_kv_head,
+    std::size_t head_dim,
+    std::size_t v_head_dim,
+    bool causal,
+    std::size_t query_offset,
+    std::size_t sliding_window,
+    std::uint32_t mask_layout,
+    std::uint32_t mask_mode,
+    std::uint32_t mask_dtype,
+    std::uint32_t kv_dtype,
+    float scale) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || query_tokens == 0 || key_tokens == 0 || key_stride < key_tokens ||
+        n_head == 0 || n_kv_head == 0 || head_dim == 0 || v_head_dim == 0) {
+        return fail("Vulkan general GQA requires non-zero valid dimensions");
+    }
+    if (n_head % n_kv_head != 0) return fail("Vulkan general GQA requires n_head % n_kv_head == 0");
+    if (kv_dtype > 2) return fail("Vulkan general GQA kv_dtype must be f32, q8_0, or q4_0");
+    if (mask_dtype > 3 || mask_layout > 5 || mask_mode > 1) {
+        return fail("Vulkan general GQA received an invalid mask descriptor");
+    }
+    if (mask_dtype == 0 && mask != nullptr) return fail("Vulkan general GQA mask pointer/dtype mismatch");
+    if (mask_dtype != 0 && mask == nullptr) return fail("Vulkan general GQA mask buffer is missing");
+    if ((mask_dtype == 0 && (mask_layout != 0 || mask_mode != 0)) ||
+        (mask_dtype != 0 && mask_layout == 0)) {
+        return fail("Vulkan general GQA mask layout/dtype mismatch");
+    }
+    if (mask_mode != 0 && mask_dtype != 1) return fail("Vulkan general GQA additive masks must be f32");
+    if (!std::isfinite(scale)) return fail("Vulkan general GQA requires a finite scale");
+    constexpr std::size_t kMaxU32 = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    const std::array<std::size_t, 10> dims = {batch, query_tokens, key_tokens, key_stride, n_head,
+                                              n_kv_head, head_dim, v_head_dim, query_offset, sliding_window};
+    if (std::any_of(dims.begin(), dims.end(), [](std::size_t x) { return x > kMaxU32; })) {
+        return fail("Vulkan general GQA dimensions overflow push constants");
+    }
+    if (batch > kMaxU32 / query_tokens || n_head > kMaxU32 / head_dim ||
+        n_kv_head > kMaxU32 / head_dim || n_kv_head > kMaxU32 / v_head_dim) {
+        return fail("Vulkan general GQA shape product overflows");
+    }
+    const std::size_t q_channels = n_head * head_dim;
+    const std::size_t k_channels = n_kv_head * head_dim;
+    const std::size_t v_channels = n_kv_head * v_head_dim;
+    const std::size_t out_channels = n_head * v_head_dim;
+    if (batch > std::numeric_limits<std::size_t>::max() / key_stride ||
+        batch * key_stride > std::numeric_limits<std::size_t>::max() / std::max(k_channels, v_channels) ||
+        batch * query_tokens > std::numeric_limits<std::size_t>::max() / std::max(q_channels, out_channels)) {
+        return fail("Vulkan general GQA buffer size overflows");
+    }
+    const std::size_t q_count = batch * query_tokens * q_channels;
+    const std::size_t k_count = batch * key_stride * k_channels;
+    const std::size_t v_count = batch * key_stride * v_channels;
+    const std::size_t out_count = batch * query_tokens * out_channels;
+    if (q.nbytes() < q_count * sizeof(float)) return fail("Vulkan general GQA q buffer is too small");
+    if (out.nbytes() < out_count * sizeof(float)) return fail("Vulkan general GQA output buffer is too small");
+    if (kv_dtype == 0) {
+        if (k.nbytes() < k_count * sizeof(float) || v.nbytes() < v_count * sizeof(float)) {
+            return fail("Vulkan general GQA f32 k/v buffer is too small");
+        }
+    } else {
+        const std::size_t k_bytes = kv_dtype == 1 ? k_count : (k_count + 1) / 2;
+        const std::size_t v_bytes = kv_dtype == 1 ? v_count : (v_count + 1) / 2;
+        if (k.nbytes() < k_bytes || v.nbytes() < v_bytes) {
+            return fail("Vulkan general GQA quantized k/v buffer is too small");
+        }
+        const std::size_t scale_bytes = batch * key_stride * sizeof(float);
+        if (!k_scales || !v_scales || k_scales->nbytes() < scale_bytes || v_scales->nbytes() < scale_bytes) {
+            return fail("Vulkan general GQA quantized scale buffer is too small");
+        }
+    }
+    if (mask_dtype != 0) {
+        std::size_t mask_elements = 0;
+        if (mask_layout == 1 || mask_layout == 5) mask_elements = query_tokens * key_tokens;
+        else if (mask_layout == 2 || mask_layout == 4) mask_elements = batch * key_tokens;
+        else mask_elements = batch * query_tokens * key_tokens;
+        const std::size_t element_bytes = mask_dtype == 3 ? 1 : sizeof(std::uint32_t);
+        if (mask->nbytes() < mask_elements * element_bytes) return fail("Vulkan general GQA mask buffer is too small");
+    }
+
+    const bool use_subgroup = runtime.caps().subgroup_arithmetic_compute && runtime.caps().subgroup_size == 64;
+    if (kv_dtype == 0) {
+        const struct {
+            std::uint32_t batch;
+            std::uint32_t query_tokens;
+            std::uint32_t key_tokens;
+            std::uint32_t key_stride;
+            std::uint32_t n_head;
+            std::uint32_t n_kv_head;
+            std::uint32_t head_dim;
+            std::uint32_t v_head_dim;
+            std::uint32_t causal;
+            std::uint32_t query_offset;
+            std::uint32_t sliding_window;
+            std::uint32_t mask_layout;
+            std::uint32_t mask_mode;
+            std::uint32_t mask_dtype;
+            float scale;
+        } push{static_cast<std::uint32_t>(batch),
+               static_cast<std::uint32_t>(query_tokens),
+               static_cast<std::uint32_t>(key_tokens),
+               static_cast<std::uint32_t>(key_stride),
+               static_cast<std::uint32_t>(n_head),
+               static_cast<std::uint32_t>(n_kv_head),
+               static_cast<std::uint32_t>(head_dim),
+               static_cast<std::uint32_t>(v_head_dim),
+               causal ? 1u : 0u,
+               static_cast<std::uint32_t>(query_offset),
+               static_cast<std::uint32_t>(sliding_window),
+               mask_layout,
+               mask_mode,
+               mask_dtype,
+               scale};
+        const VulkanBuffer& mask_buffer = mask ? *mask : q;
+        const std::vector<const VulkanBuffer*> buffers = {&q, &k, &v, &mask_buffer, &out};
+        const bool use_streaming = key_tokens > 1024;
+        const auto* spirv = use_streaming
+            ? vkspirv::k_gqa_fwd_general_long_f32
+            : (use_subgroup ? vkspirv::k_gqa_fwd_general_f32_subgroup
+                            : vkspirv::k_gqa_fwd_general_f32);
+        const auto words = use_streaming
+            ? vkspirv::k_gqa_fwd_general_long_f32_words
+            : (use_subgroup ? vkspirv::k_gqa_fwd_general_f32_subgroup_words
+                            : vkspirv::k_gqa_fwd_general_f32_words);
+        return runtime.dispatch_cached(spirv, words, buffers, &push, sizeof(push),
+                                       static_cast<std::uint32_t>(query_tokens),
+                                       static_cast<std::uint32_t>(n_head),
+                                       static_cast<std::uint32_t>(batch));
+    }
+
+    const struct {
+        std::uint32_t batch;
+        std::uint32_t query_tokens;
+        std::uint32_t key_tokens;
+        std::uint32_t key_stride;
+        std::uint32_t n_head;
+        std::uint32_t n_kv_head;
+        std::uint32_t head_dim;
+        std::uint32_t v_head_dim;
+        std::uint32_t causal;
+        std::uint32_t query_offset;
+        std::uint32_t sliding_window;
+        std::uint32_t mask_layout;
+        std::uint32_t mask_mode;
+        std::uint32_t mask_dtype;
+        std::uint32_t kv_dtype;
+        float scale;
+    } push{static_cast<std::uint32_t>(batch),
+           static_cast<std::uint32_t>(query_tokens),
+           static_cast<std::uint32_t>(key_tokens),
+           static_cast<std::uint32_t>(key_stride),
+           static_cast<std::uint32_t>(n_head),
+           static_cast<std::uint32_t>(n_kv_head),
+           static_cast<std::uint32_t>(head_dim),
+           static_cast<std::uint32_t>(v_head_dim),
+           causal ? 1u : 0u,
+           static_cast<std::uint32_t>(query_offset),
+           static_cast<std::uint32_t>(sliding_window),
+           mask_layout,
+           mask_mode,
+           mask_dtype,
+           kv_dtype,
+           scale};
+    const VulkanBuffer& mask_buffer = mask ? *mask : q;
+    const std::vector<const VulkanBuffer*> buffers = {&q, &k, &v, k_scales, v_scales, &mask_buffer, &out};
+    const bool use_streaming = key_tokens > 1024;
+    const auto* spirv = use_streaming
+        ? vkspirv::k_gqa_fwd_general_long_quant_f32
+        : (use_subgroup ? vkspirv::k_gqa_fwd_general_quant_f32_subgroup
+                        : vkspirv::k_gqa_fwd_general_quant_f32);
+    const auto words = use_streaming
+        ? vkspirv::k_gqa_fwd_general_long_quant_f32_words
+        : (use_subgroup ? vkspirv::k_gqa_fwd_general_quant_f32_subgroup_words
+                        : vkspirv::k_gqa_fwd_general_quant_f32_words);
+    return runtime.dispatch_cached(spirv, words, buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>(query_tokens),
+                                   static_cast<std::uint32_t>(n_head),
+                                   static_cast<std::uint32_t>(batch));
+}
+
+VulkanOpResult run_vulkan_kv_cache_append_f32(VulkanRuntime& runtime,
+                                              const VulkanBuffer& new_k,
+                                              const VulkanBuffer& new_v,
+                                              VulkanBuffer& cache_k,
+                                              VulkanBuffer& cache_v,
+                                              std::size_t batch,
+                                              std::size_t new_tokens,
+                                              std::size_t max_tokens,
+                                              std::size_t kv_channels,
+                                              std::size_t start_pos) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || new_tokens == 0 || max_tokens == 0 || kv_channels == 0 ||
+        start_pos > max_tokens || new_tokens > max_tokens - start_pos) {
+        return fail("Vulkan F32 KV append received invalid dimensions");
+    }
+    constexpr std::size_t kMaxU32 = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (batch > kMaxU32 || new_tokens > kMaxU32 || max_tokens > kMaxU32 ||
+        kv_channels > kMaxU32 || start_pos > kMaxU32 ||
+        batch > kMaxU32 / new_tokens || batch * new_tokens > kMaxU32 / kv_channels) {
+        return fail("Vulkan F32 KV append dimensions overflow push constants");
+    }
+    const std::size_t count = batch * new_tokens * kv_channels;
+    const std::size_t cache_count = batch * max_tokens * kv_channels;
+    if (new_k.nbytes() < count * sizeof(float) || new_v.nbytes() < count * sizeof(float)) {
+        return fail("Vulkan F32 KV append input buffer is too small");
+    }
+    if (cache_k.nbytes() < cache_count * sizeof(float) || cache_v.nbytes() < cache_count * sizeof(float)) {
+        return fail("Vulkan F32 KV append cache buffer is too small");
+    }
+    const struct {
+        std::uint32_t batch;
+        std::uint32_t new_tokens;
+        std::uint32_t max_tokens;
+        std::uint32_t kv_channels;
+        std::uint32_t start_pos;
+        std::uint32_t count;
+    } push{static_cast<std::uint32_t>(batch),
+           static_cast<std::uint32_t>(new_tokens),
+           static_cast<std::uint32_t>(max_tokens),
+           static_cast<std::uint32_t>(kv_channels),
+           static_cast<std::uint32_t>(start_pos),
+           static_cast<std::uint32_t>(count)};
+    const std::vector<const VulkanBuffer*> buffers = {&new_k, &new_v, &cache_k, &cache_v};
+    return runtime.dispatch_cached(vkspirv::k_kv_cache_append_f32_rb4,
+                                   vkspirv::k_kv_cache_append_f32_rb4_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((count + 255) / 256), 1, 1);
+}
+
+VulkanOpResult run_vulkan_kv_cache_append_quantized(VulkanRuntime& runtime,
+                                                    const VulkanBuffer& new_k,
+                                                    const VulkanBuffer& new_v,
+                                                    VulkanBuffer& cache_k,
+                                                    VulkanBuffer& cache_v,
+                                                    VulkanBuffer& k_scales,
+                                                    VulkanBuffer& v_scales,
+                                                    std::size_t batch,
+                                                    std::size_t new_tokens,
+                                                    std::size_t max_tokens,
+                                                    std::size_t kv_channels,
+                                                    std::size_t start_pos,
+                                                    std::uint32_t kv_dtype) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if ((kv_dtype != 1 && kv_dtype != 2) || batch == 0 || new_tokens == 0 ||
+        max_tokens == 0 || kv_channels == 0 || start_pos > max_tokens ||
+        new_tokens > max_tokens - start_pos || (kv_dtype == 2 && (kv_channels & 1u) != 0)) {
+        return fail("Vulkan quantized KV append received invalid dimensions or dtype");
+    }
+    constexpr std::size_t kMaxU32 = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (batch > kMaxU32 || new_tokens > kMaxU32 || max_tokens > kMaxU32 ||
+        kv_channels > kMaxU32 || start_pos > kMaxU32 ||
+        batch > kMaxU32 / new_tokens || batch * new_tokens > kMaxU32 / kv_channels) {
+        return fail("Vulkan quantized KV append dimensions overflow push constants");
+    }
+    const std::size_t input_count = batch * new_tokens * kv_channels;
+    const std::size_t cache_count = batch * max_tokens * kv_channels;
+    const std::size_t cache_bytes = kv_dtype == 1 ? cache_count : (cache_count + 1) / 2;
+    if (new_k.nbytes() < input_count * sizeof(float) || new_v.nbytes() < input_count * sizeof(float)) {
+        return fail("Vulkan quantized KV append input buffer is too small");
+    }
+    if (cache_k.nbytes() < cache_bytes || cache_v.nbytes() < cache_bytes) {
+        return fail("Vulkan quantized KV append cache buffer is too small");
+    }
+    const std::size_t scale_bytes = batch * max_tokens * sizeof(float);
+    if (k_scales.nbytes() < scale_bytes || v_scales.nbytes() < scale_bytes) {
+        return fail("Vulkan quantized KV append scale buffer is too small");
+    }
+    const struct {
+        std::uint32_t batch;
+        std::uint32_t new_tokens;
+        std::uint32_t max_tokens;
+        std::uint32_t kv_channels;
+        std::uint32_t start_pos;
+        std::uint32_t kv_dtype;
+    } push{static_cast<std::uint32_t>(batch),
+           static_cast<std::uint32_t>(new_tokens),
+           static_cast<std::uint32_t>(max_tokens),
+           static_cast<std::uint32_t>(kv_channels),
+           static_cast<std::uint32_t>(start_pos),
+           kv_dtype};
+    const std::vector<const VulkanBuffer*> buffers = {&new_k, &new_v, &cache_k, &cache_v, &k_scales, &v_scales};
+    const bool use_subgroup = runtime.caps().subgroup_arithmetic_compute && runtime.caps().subgroup_size == 64;
+    const auto* spirv = use_subgroup ? vkspirv::k_kv_cache_append_quant_f32_subgroup
+                                     : vkspirv::k_kv_cache_append_quant_f32;
+    const auto words = use_subgroup ? vkspirv::k_kv_cache_append_quant_f32_subgroup_words
+                                    : vkspirv::k_kv_cache_append_quant_f32_words;
+    return runtime.dispatch_cached(spirv, words, buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>(batch * new_tokens), 1, 1);
 }
 
 VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtime,

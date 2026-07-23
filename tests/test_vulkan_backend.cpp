@@ -1159,7 +1159,6 @@ int main() {
                 auto VX = Tensor::from_cpu(vk_backend, {2, 3}, DType::F32, std::vector<float>{1, 2, 3, 4, 5, 6}.data());
                 auto VB = Tensor::from_cpu(vk_backend, {3}, DType::F32, std::vector<float>{0.1f, 0.2f, 0.3f}.data());
                 auto VY = Tensor::from_cpu(vk_backend, {2, 3}, DType::F32, std::vector<float>{1, 2, 3, 4, 5, 6}.data());
-                expect_vulkan_guard("add_bias_rows", [&] { add_bias_rows(VX, VB); });
                 expect_vulkan_guard("mul (binary)", [&] { mul(VX, VY); });
                 expect_vulkan_guard("div (binary)", [&] { div(VX, VY); });
                 expect_vulkan_guard("mul_rows", [&] { mul_rows(VX, VB); });
@@ -1494,7 +1493,7 @@ int main() {
                     x_data[i] = std::sin(static_cast<float>(i) * 0.31f) * 2.0f;
                 auto X = Tensor::from_cpu(vk_backend, {B, in_f}, DType::F32, x_data.data());
 
-                for (bool use_bias : {false}) {   // bias not Vulkan-native yet (add_bias_rows gap)
+                for (bool use_bias : {false, true}) {
                     nn::Linear linear(vk_backend, static_cast<int>(in_f), static_cast<int>(out_f), use_bias);
                     auto f32_y = linear.forward(X);
                     auto f32_vec = f32_y.to_vector<float>();

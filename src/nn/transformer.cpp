@@ -23,6 +23,7 @@
 #include <motifcl/ops/matmul.hpp>
 #include <motifcl/ops/quant.hpp>
 #include <motifcl/runtime/backend.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 
 namespace motifcl::nn {
 
@@ -568,9 +569,6 @@ bool can_use_fused_packed_qkv_q4_0_decode(const Tensor& x,
         autograd::is_enabled()) {
         return false;
     }
-    // Q4_0 fused decode kernels are OpenCL-only; refuse Vulkan tensors
-    // (quant-layout Vulkan port is a separate gap; see VULKAN_PORT_PROTOCOL.md).
-    if (x.valid() && x.backend().is_vulkan()) return false;
     const Tensor& qweight = decode_quantized_weight(qkv);
     return x.valid() &&
            x.dtype() == DType::F32 &&
@@ -605,6 +603,24 @@ QKV fused_packed_qkv_q4_0_decode(const Tensor& x,
         Tensor::empty(x.backend(), {1, kv_dim}, DType::F32)};
     const Tensor& qweight = decode_quantized_weight(qkv);
     auto scales = qweight.quant_scales();
+    if (x.backend().is_vulkan()) {
+        const auto result = run_vulkan_matmul_f32q4_packed_qkv_m1(
+            x.backend().vulkan_runtime(),
+            x.storage().vulkan_buffer,
+            qweight.storage().vulkan_buffer,
+            scales.storage().vulkan_buffer,
+            out.q.storage().vulkan_buffer,
+            out.k.storage().vulkan_buffer,
+            out.v.storage().vulkan_buffer,
+            static_cast<std::size_t>(x.shape()[1]),
+            static_cast<std::size_t>(q_dim),
+            static_cast<std::size_t>(kv_dim));
+        MCL_CHECK(result.success, std::string("vulkan fused packed QKV Q4_0 decode failed: ") + result.error);
+        autograd::record_op("matmul_f32_q4_0_packed_qkv_vulkan_f32",
+                            {x.id(), qweight.id(), scales.id()},
+                            {out.q.id(), out.k.id(), out.v.id()});
+        return out;
+    }
     auto kernel = x.backend().kernels.get("matmul_f32_q4_0_packed_qkv_m1_wg64x4_f32");
     constexpr std::size_t kLocal = 64;
     kernel.set_arg(0, x.buffer());
@@ -636,8 +652,6 @@ bool can_use_fused_packed_swiglu_q4_0_decode(const Tensor& x,
         autograd::is_enabled()) {
         return false;
     }
-    // Q4_0 fused decode kernels are OpenCL-only; refuse Vulkan tensors.
-    if (x.valid() && x.backend().is_vulkan()) return false;
     const Tensor& qweight = decode_quantized_weight(gate_up);
     return use_swiglu &&
            dropout_p == 0.0f &&
@@ -670,6 +684,20 @@ Tensor fused_packed_swiglu_q4_0_decode(const Tensor& x,
     auto out = Tensor::empty(x.backend(), {1, hidden}, DType::F32);
     const Tensor& qweight = decode_quantized_weight(gate_up);
     auto scales = qweight.quant_scales();
+    if (x.backend().is_vulkan()) {
+        const auto result = run_vulkan_matmul_f32q4_packed_swiglu_m1(
+            x.backend().vulkan_runtime(),
+            x.storage().vulkan_buffer,
+            qweight.storage().vulkan_buffer,
+            scales.storage().vulkan_buffer,
+            out.storage().vulkan_buffer,
+            static_cast<std::size_t>(x.shape()[1]),
+            static_cast<std::size_t>(hidden));
+        MCL_CHECK(result.success, std::string("vulkan fused packed SwiGLU Q4_0 decode failed: ") + result.error);
+        autograd::record_op("matmul_swiglu_f32_q4_0_packed_vulkan_f32",
+                            {x.id(), qweight.id(), scales.id()}, {out.id()});
+        return out;
+    }
     const bool use_wg64x2 = env_enabled("MOTIFCL_PACKED_SWIGLU_Q4_0_ENABLE_WG64X2") &&
                             !env_enabled("MOTIFCL_PACKED_SWIGLU_Q4_0_FORCE_WG64X4");
     const char* kernel_name = use_wg64x2
@@ -1785,10 +1813,6 @@ bool can_use_fused_qk_norm_rope_decode(const Tensor& q,
                                        bool use_rope,
                                        int rotary_dim) {
     if (env_enabled("MOTIFCL_DISABLE_FUSED_QK_NORM_ROPE_DECODE") || autograd::is_enabled()) return false;
-    // Fused decode kernels are OpenCL-only; explicitly refuse Vulkan tensors so
-    // inference on a Vulkan backend falls through to the decomposed path instead
-    // of crashing on a null OpenCL context (Slice E gap, see VULKAN_PORT_PROTOCOL.md).
-    if (q.valid() && q.backend().is_vulkan()) return false;
     if (!use_rope || !q.valid() || !k.valid() || !q_norm.weight.data.valid() || !k_norm.weight.data.valid()) return false;
     if (q.dtype() != DType::F32 || k.dtype() != DType::F32 ||
         q_norm.weight.data.dtype() != DType::F32 || k_norm.weight.data.dtype() != DType::F32) {
@@ -1833,9 +1857,33 @@ std::pair<Tensor, Tensor> fused_qk_norm_rope_decode(const Tensor& q,
               "fused_qk_norm_rope_decode expects compatible one-token q/k projections");
     auto q_out = Tensor::empty(q.backend(), q.shape(), DType::F32);
     auto k_out = Tensor::empty(q.backend(), k.shape(), DType::F32);
+    int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
+    if (q.backend().is_vulkan()) {
+        const auto result = run_vulkan_qk_norm_rope_decode(
+            q.backend().vulkan_runtime(),
+            q.storage().vulkan_buffer,
+            k.storage().vulkan_buffer,
+            q_norm.weight.data.storage().vulkan_buffer,
+            k_norm.weight.data.storage().vulkan_buffer,
+            q_out.storage().vulkan_buffer,
+            k_out.storage().vulkan_buffer,
+            static_cast<std::size_t>(batch_size),
+            static_cast<std::size_t>(n_head),
+            static_cast<std::size_t>(n_kv_head),
+            static_cast<std::size_t>(head_dim),
+            static_cast<std::size_t>(rd),
+            static_cast<std::size_t>(token_offset),
+            theta,
+            q_norm.eps,
+            k_norm.eps);
+        MCL_CHECK(result.success, std::string("vulkan fused QK norm+RoPE decode failed: ") + result.error);
+        autograd::record_op("qk_norm_rope_decode_vulkan_f32",
+                            {q.id(), k.id(), q_norm.weight.data.id(), k_norm.weight.data.id()},
+                            {q_out.id(), k_out.id()});
+        return {q_out, k_out};
+    }
     auto kernel = q.backend().kernels.get("qk_norm_rope_decode_f32");
     constexpr std::size_t kLocal = 256;
-    int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
     kernel.set_arg(0, q.buffer());
     kernel.set_arg(1, k.buffer());
     kernel.set_arg(2, q_norm.weight.data.buffer());
@@ -1921,9 +1969,36 @@ Tensor fused_qk_norm_rope_cache_append_decode(const Tensor& q,
                                                             max_seq_len, token_offset, true, rotary_dim),
               "fused_qk_norm_rope_cache_append_decode expects compatible one-token q/k/v projections and KV cache");
     auto q_out = Tensor::empty(q.backend(), q.shape(), DType::F32);
+    int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
+    if (q.backend().is_vulkan()) {
+        const auto result = run_vulkan_qk_norm_rope_cache_append_decode(
+            q.backend().vulkan_runtime(),
+            q.storage().vulkan_buffer,
+            k.storage().vulkan_buffer,
+            v.storage().vulkan_buffer,
+            q_norm.weight.data.storage().vulkan_buffer,
+            k_norm.weight.data.storage().vulkan_buffer,
+            q_out.storage().vulkan_buffer,
+            cache_k.storage().vulkan_buffer,
+            cache_v.storage().vulkan_buffer,
+            static_cast<std::size_t>(batch_size),
+            static_cast<std::size_t>(n_head),
+            static_cast<std::size_t>(n_kv_head),
+            static_cast<std::size_t>(head_dim),
+            static_cast<std::size_t>(rd),
+            static_cast<std::size_t>(token_offset),
+            static_cast<std::size_t>(max_seq_len),
+            theta,
+            q_norm.eps,
+            k_norm.eps);
+        MCL_CHECK(result.success, std::string("vulkan fused QK norm+RoPE+cache append failed: ") + result.error);
+        autograd::record_op("qk_norm_rope_cache_append_decode_vulkan_f32",
+                            {q.id(), k.id(), v.id(), q_norm.weight.data.id(), k_norm.weight.data.id()},
+                            {q_out.id(), cache_k.id(), cache_v.id()});
+        return q_out;
+    }
     auto kernel = q.backend().kernels.get("qk_norm_rope_cache_append_decode_f32");
     constexpr std::size_t kLocal = 256;
-    int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
     kernel.set_arg(0, q.buffer());
     kernel.set_arg(1, k.buffer());
     kernel.set_arg(2, v.buffer());
@@ -1967,9 +2042,6 @@ bool can_use_fused_rope_cache_append_decode(const Tensor& q,
                                             bool use_rope,
                                             int rotary_dim) {
     if (env_enabled("MOTIFCL_DISABLE_FUSED_ROPE_CACHE_APPEND_DECODE") || autograd::is_enabled()) return false;
-    // Fused decode kernels are OpenCL-only; explicitly refuse Vulkan tensors
-    // (Slice E gap; see VULKAN_PORT_PROTOCOL.md).
-    if (q.valid() && q.backend().is_vulkan()) return false;
     if (!use_rope || !q.valid() || !k.valid() || !v.valid() || !cache_k.valid() || !cache_v.valid()) return false;
     if (q.dtype() != DType::F32 || k.dtype() != DType::F32 || v.dtype() != DType::F32 ||
         cache_k.dtype() != DType::F32 || cache_v.dtype() != DType::F32) {
@@ -2020,11 +2092,33 @@ Tensor fused_rope_cache_append_decode(const Tensor& q,
                                                      batch_size, 1, max_seq_len, token_offset, true, rotary_dim),
               "fused_rope_cache_append_decode expects compatible one-token q/k/v projections and KV cache");
     auto q_out = Tensor::empty(q.backend(), q.shape(), DType::F32);
-    auto kernel = q.backend().kernels.get("rope_cache_append_decode_f32");
     const int q_channels = n_head * head_dim;
     const int kv_channels = n_kv_head * head_dim;
     const int total = static_cast<int>(batch_size) * (q_channels + 2 * kv_channels);
     int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
+    if (q.backend().is_vulkan()) {
+        const auto result = run_vulkan_rope_cache_append_decode(
+            q.backend().vulkan_runtime(),
+            q.storage().vulkan_buffer,
+            k.storage().vulkan_buffer,
+            v.storage().vulkan_buffer,
+            q_out.storage().vulkan_buffer,
+            cache_k.storage().vulkan_buffer,
+            cache_v.storage().vulkan_buffer,
+            static_cast<std::size_t>(batch_size),
+            static_cast<std::size_t>(n_head),
+            static_cast<std::size_t>(n_kv_head),
+            static_cast<std::size_t>(head_dim),
+            static_cast<std::size_t>(rd),
+            static_cast<std::size_t>(token_offset),
+            static_cast<std::size_t>(max_seq_len),
+            theta);
+        MCL_CHECK(result.success, std::string("vulkan fused RoPE+cache append failed: ") + result.error);
+        autograd::record_op("rope_cache_append_decode_vulkan_f32",
+                            {q.id(), k.id(), v.id()}, {q_out.id(), cache_k.id(), cache_v.id()});
+        return q_out;
+    }
+    auto kernel = q.backend().kernels.get("rope_cache_append_decode_f32");
     kernel.set_arg(0, q.buffer());
     kernel.set_arg(1, k.buffer());
     kernel.set_arg(2, v.buffer());
