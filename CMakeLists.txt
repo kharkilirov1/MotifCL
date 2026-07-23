@@ -131,6 +131,7 @@ set(MOTIFCL_SOURCES
     src/nn/linear.cpp
     src/nn/compact_counter.cpp
     src/nn/group_counter_import.cpp
+    src/solver/ternary_solver.cpp
     src/nn/reversible.cpp
     src/nn/embedding.cpp
     src/nn/rmsnorm.cpp

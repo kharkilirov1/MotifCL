@@ -26,6 +26,7 @@ set(MOTIFCL_TESTS
     test_native_matmul
     test_counter_state
     test_group_counter_import
+    test_ternary_solver
     test_memory_truth_gate
     test_f16_matmul_autograd
     test_reversible_attn
