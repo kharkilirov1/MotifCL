@@ -6,6 +6,9 @@ build*/
 cmake-build-*/
 out/
 
+# Local model weights (GGUF etc.)
+models/
+
 # Local review/build artifacts
 build_review*/
 motifcl_tuning.json
