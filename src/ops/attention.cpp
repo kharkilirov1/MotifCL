@@ -1209,7 +1209,12 @@ Tensor grouped_query_attention(const Tensor& q, const Tensor& k, const Tensor& v
                   "vulkan quantized grouped_query_attention requires v_head_dim == head_dim");
         const bool use_fast_noncausal = k.dtype() == DType::F32 && !causal && !split_value_dim &&
                                         s.batch == 1 && s.key_stride == s.key_tokens && query_offset == 0;
-        MCL_CHECK(!needs_grad || use_fast_noncausal,
+        // EXPERIMENTAL: the general forward pairs with the same shared
+        // GroupedQueryAttentionBackwardNode (which already takes causal/batch);
+        // MOTIFCL_GQA_GENERAL_AUTOGRAD=1 opts in while parity is being pinned.
+        const char* general_ag = std::getenv("MOTIFCL_GQA_GENERAL_AUTOGRAD");
+        const bool allow_general_autograd = general_ag && *general_ag && *general_ag != '0';
+        MCL_CHECK(!needs_grad || use_fast_noncausal || allow_general_autograd,
                   "vulkan general grouped_query_attention forward does not support autograd yet");
         auto out = use_fast_noncausal
             ? grouped_query_attention_vulkan_f32_device(q, k, v, s, n_head, n_kv_head, scale_value)

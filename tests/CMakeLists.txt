@@ -79,3 +79,10 @@ if(TARGET motifcl_vulkan_runtime)
     motifcl_apply_compiler_options(test_vulkan_runtime_standalone)
     motifcl_register_test(test_vulkan_runtime_standalone)
 endif()
+
+# Throughput bench (not a ctest): stories15M-shaped counter train step.
+if(TARGET motifcl)
+    add_executable(bench_ternary15m bench_ternary15m.cpp)
+    target_link_libraries(bench_ternary15m PRIVATE motifcl)
+    motifcl_apply_compiler_options(bench_ternary15m)
+endif()
