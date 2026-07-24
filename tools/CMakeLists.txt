@@ -5,6 +5,7 @@ set(MOTIFCL_TOOLS
     kernel_tuner
     generate_transformer
     warm_decode_bench
+    train_ternary15m
 )
 
 foreach(tool ${MOTIFCL_TOOLS})

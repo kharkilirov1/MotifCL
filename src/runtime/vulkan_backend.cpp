@@ -8074,6 +8074,43 @@ VulkanOpResult run_vulkan_sgd_update(VulkanRuntime& runtime,
                                    sizeof(push), static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
 }
 
+VulkanOpResult run_vulkan_adam_update_fast(VulkanRuntime& runtime,
+                                           const VulkanBuffer& param,
+                                           const VulkanBuffer& grad,
+                                           VulkanBuffer& m,
+                                           VulkanBuffer& v,
+                                           std::size_t elements,
+                                           float lr, float beta1, float beta2,
+                                           float eps, float weight_decay,
+                                           float c1, float c2) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (elements == 0) return fail("Vulkan Adam update requires non-zero element count");
+    const auto nbytes = elements * sizeof(float);
+    if (param.nbytes() < nbytes || grad.nbytes() < nbytes || m.nbytes() < nbytes || v.nbytes() < nbytes)
+        return fail("Vulkan Adam update buffer is too small");
+    if (!std::isfinite(lr) || !std::isfinite(c1) || !std::isfinite(c2))
+        return fail("Vulkan Adam update requires finite lr and bias corrections");
+
+    const struct {
+        std::uint32_t n;
+        float lr;
+        float beta1;
+        float beta2;
+        float eps;
+        float weight_decay;
+        float c1;
+        float c2;
+    } push{static_cast<std::uint32_t>(elements), lr, beta1, beta2, eps, weight_decay, c1, c2};
+    const std::vector<const VulkanBuffer*> buffers = {&param, &grad, &m, &v};
+    return runtime.dispatch_cached(vkspirv::k_adam_update_fast_f32, vkspirv::k_adam_update_fast_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
 VulkanOpResult run_vulkan_gelu(VulkanRuntime& runtime,
                                const VulkanBuffer& x,
                                VulkanBuffer& out,

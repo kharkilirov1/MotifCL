@@ -35,6 +35,8 @@ public:
 
     void set_training(bool t) { training_ = t; }   // when false, forward attaches no update node
     bool training() const { return training_; }
+    void set_lr(float lr) { lr_ = lr; }            // schedule hook (pretrain runner)
+    float lr() const { return lr_; }
 
     int in_features() const { return in_; }
     int out_features() const { return out_; }

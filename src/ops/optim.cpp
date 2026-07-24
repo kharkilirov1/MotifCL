@@ -48,6 +48,20 @@ void adam_update_fast(Tensor& param, const Tensor& grad, Tensor& m, Tensor& v,
                       float lr, float beta1, float beta2, float eps, int step, float weight_decay) {
     MCL_CHECK(param.dtype() == DType::F32 && grad.dtype() == DType::F32 && m.dtype() == DType::F32 && v.dtype() == DType::F32, "adam_update supports f32 only");
     MCL_CHECK(param.shape() == grad.shape() && param.shape() == m.shape() && param.shape() == v.shape(), "adam_update shape mismatch");
+    if (param.backend().is_vulkan()) {
+        const float c1 = 1.0f / (1.0f - std::pow(beta1, (float)step));
+        const float c2 = 1.0f / (1.0f - std::pow(beta2, (float)step));
+        const auto result = run_vulkan_adam_update_fast(param.backend().vulkan_runtime(),
+                                                        param.storage().vulkan_buffer,
+                                                        grad.storage().vulkan_buffer,
+                                                        m.storage().vulkan_buffer,
+                                                        v.storage().vulkan_buffer,
+                                                        static_cast<std::size_t>(param.numel()),
+                                                        lr, beta1, beta2, eps, weight_decay, c1, c2);
+        MCL_CHECK(result.success, std::string("vulkan adam_update failed: ") + result.error);
+        autograd::record_op("adam_update_fast_vulkan_f32", {param.id(), grad.id()}, {param.id()});
+        return;
+    }
     MCL_CHECK(step > 0, "adam_update step must be positive");
     auto k = param.backend().kernels.get("adam_update_f32_fast");
     int n = static_cast<int>(param.numel());
