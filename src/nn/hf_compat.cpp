@@ -87,6 +87,42 @@ std::int64_t json_integer_or(const std::string& text, const std::string& key, st
     return std::stoll(m[1].str());
 }
 
+double json_float_or(const std::string& text, const std::string& key, double fallback) {
+    const std::regex re("\"" + key + "\"\\s*:\\s*(-?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?)");
+    std::smatch m;
+    if (!std::regex_search(text, m, re)) return fallback;
+    return std::stod(m[1].str());
+}
+
+bool json_bool_or(const std::string& text, const std::string& key, bool fallback);
+
+std::int64_t json_integer_alias_or(const std::string& text,
+                                   const std::vector<std::string>& keys,
+                                   std::int64_t fallback) {
+    for (const auto& key : keys) {
+        if (json_has_key(text, key)) return json_integer_or(text, key, fallback);
+    }
+    return fallback;
+}
+
+double json_float_alias_or(const std::string& text,
+                           const std::vector<std::string>& keys,
+                           double fallback) {
+    for (const auto& key : keys) {
+        if (json_has_key(text, key)) return json_float_or(text, key, fallback);
+    }
+    return fallback;
+}
+
+bool json_bool_alias_or(const std::string& text,
+                        const std::vector<std::string>& keys,
+                        bool fallback) {
+    for (const auto& key : keys) {
+        if (json_has_key(text, key)) return json_bool_or(text, key, fallback);
+    }
+    return fallback;
+}
+
 bool json_bool_or(const std::string& text, const std::string& key, bool fallback) {
     const std::regex re("\"" + key + "\"\\s*:\\s*(true|false|1|0)");
     std::smatch m;
@@ -209,8 +245,16 @@ bool architecture_uses_llama_like_weights(HFArchitecture architecture) {
            architecture == HFArchitecture::Gemma3 ||
            architecture == HFArchitecture::Gemma4 ||
            architecture == HFArchitecture::Llama ||
+           architecture == HFArchitecture::Llama4 ||
            architecture == HFArchitecture::Mistral ||
-           architecture == HFArchitecture::Qwen2;
+           architecture == HFArchitecture::Ministral ||
+           architecture == HFArchitecture::Qwen2 ||
+           architecture == HFArchitecture::Qwen3 ||
+           architecture == HFArchitecture::Phi3 ||
+           architecture == HFArchitecture::Phi4 ||
+           architecture == HFArchitecture::DeepSeek ||
+           architecture == HFArchitecture::GLM4 ||
+           architecture == HFArchitecture::SmolLM;
 }
 
 bool architecture_is_gemma_family(HFArchitecture architecture, const std::string& architecture_name = {}) {
@@ -240,6 +284,10 @@ void configure_mlp_activation(TransformerConfig& cfg,
         use_swiglu = false;
     }
     cfg.use_swiglu = use_swiglu;
+    cfg.activation = use_swiglu
+        ? TransformerActivation::SiLU
+        : (act.find("tanh") != std::string::npos ? TransformerActivation::GELUTanh
+                                                  : TransformerActivation::GELU);
     if (!use_swiglu) cfg.split_mlp_projections = true;
 }
 
@@ -255,6 +303,103 @@ void configure_gemma4_attention_semantics(TransformerConfig& cfg,
     // logits without the standard 1/sqrt(head_dim) factor.
     cfg.use_v_norm = true;
     cfg.attention_scale = 1.0f;
+}
+
+void configure_dense_family_adapter(HFTransformerConfig& cfg, const std::string& text) {
+    cfg.fused_qkv_weights = json_bool_alias_or(text, {"fused_qkv", "qkv_fused"}, false);
+    cfg.fused_mlp_weights = json_bool_alias_or(text, {"fused_mlp", "gate_up_fused"}, false);
+
+    switch (cfg.architecture) {
+    case HFArchitecture::Llama:
+    case HFArchitecture::Mistral:
+    case HFArchitecture::Ministral:
+    case HFArchitecture::Qwen2:
+    case HFArchitecture::DeepSeek:
+    case HFArchitecture::SmolLM:
+        cfg.transformer.rope_split_half = true;
+        break;
+    case HFArchitecture::Llama4:
+        cfg.transformer.rope_split_half = true;
+        cfg.transformer.use_qk_norm = json_bool_alias_or(text, {"use_qk_norm", "qk_norm"}, true);
+        break;
+    case HFArchitecture::Qwen3:
+        cfg.transformer.rope_split_half = true;
+        cfg.transformer.use_qk_norm = true;
+        break;
+    case HFArchitecture::Phi3:
+    case HFArchitecture::Phi4:
+        cfg.transformer.rope_split_half = true;
+        cfg.fused_qkv_weights = true;
+        cfg.fused_mlp_weights = true;
+        break;
+    case HFArchitecture::GLM4:
+        cfg.fused_qkv_weights = true;
+        cfg.fused_mlp_weights = true;
+        cfg.transformer.rope_split_half = false;
+        break;
+    default:
+        break;
+    }
+}
+
+void configure_rope_scaling(HFTransformerConfig& cfg, const std::string& text) {
+    const auto scaling = extract_json_object_for_key(text, "rope_scaling");
+    if (scaling.empty()) return;
+    auto type = lower_ascii(json_string_or(scaling, "rope_type", json_string_or(scaling, "type", "none")));
+    if (type == "default") type = "none";
+    cfg.rope_scaling_type = type;
+    cfg.transformer.rope_scaling_factor =
+        static_cast<float>(json_float_or(scaling, "factor", cfg.transformer.rope_scaling_factor));
+    cfg.transformer.rope_original_context = static_cast<int>(json_integer_alias_or(
+        scaling, {"original_max_position_embeddings", "original_context_length"},
+        cfg.transformer.block_size));
+    cfg.transformer.rope_low_freq_factor =
+        static_cast<float>(json_float_or(scaling, "low_freq_factor", cfg.transformer.rope_low_freq_factor));
+    cfg.transformer.rope_high_freq_factor =
+        static_cast<float>(json_float_or(scaling, "high_freq_factor", cfg.transformer.rope_high_freq_factor));
+    cfg.transformer.rope_beta_fast =
+        static_cast<float>(json_float_or(scaling, "beta_fast", cfg.transformer.rope_beta_fast));
+    cfg.transformer.rope_beta_slow =
+        static_cast<float>(json_float_or(scaling, "beta_slow", cfg.transformer.rope_beta_slow));
+
+    if (type == "linear") {
+        cfg.transformer.rope_scaling_type = RopeScalingType::Linear;
+    } else if (type == "dynamic" || type == "dynamic_ntk") {
+        cfg.transformer.rope_scaling_type = RopeScalingType::Dynamic;
+    } else if (type == "yarn") {
+        cfg.transformer.rope_scaling_type = RopeScalingType::YaRN;
+        float attention_factor = 1.0f;
+        if (json_has_key(scaling, "attention_factor")) {
+            attention_factor =
+                static_cast<float>(json_float_or(scaling, "attention_factor", 1.0));
+        } else if (json_has_key(scaling, "mscale") ||
+                   json_has_key(scaling, "mscale_all_dim")) {
+            const float factor = cfg.transformer.rope_scaling_factor;
+            auto yarn_mscale = [factor](float multiplier) {
+                return factor <= 1.0f
+                    ? 1.0f
+                    : 0.1f * multiplier * std::log(factor) + 1.0f;
+            };
+            const float mscale =
+                static_cast<float>(json_float_or(scaling, "mscale", 1.0));
+            const float mscale_all =
+                static_cast<float>(json_float_or(scaling, "mscale_all_dim", 0.0));
+            const float ratio = yarn_mscale(mscale) / yarn_mscale(mscale_all);
+            attention_factor = ratio * ratio;
+        } else if (cfg.transformer.rope_scaling_factor > 1.0f) {
+            attention_factor =
+                0.1f * std::log(cfg.transformer.rope_scaling_factor) + 1.0f;
+        }
+        if (cfg.transformer.head_dim > 0) {
+            cfg.transformer.attention_scale =
+                attention_factor / std::sqrt(static_cast<float>(cfg.transformer.head_dim));
+        }
+    } else if (type == "llama3") {
+        cfg.transformer.rope_scaling_type = RopeScalingType::Llama3;
+    } else {
+        cfg.transformer.rope_scaling_type = RopeScalingType::None;
+        cfg.rope_scaling_type = "none";
+    }
 }
 
 void configure_kv_shared_sources(TransformerConfig& cfg,
@@ -326,6 +471,110 @@ HFWeightName map_qwen35_weight_name(const std::string& hf_name) {
     }
     if (suffix == "mlp.up_proj.weight") return {hf_name, base + "mlp.up_proj.weight", "up_proj", layer};
     if (suffix == "mlp.down_proj.weight") return {hf_name, base + "mlp.down_proj.weight", "down_proj", layer};
+    return {hf_name, hf_name, "unknown", layer};
+}
+
+HFWeightName map_dense_decoder_weight_name(const std::string& hf_name) {
+    std::string name = hf_name;
+    const std::string language_prefix = "model.language_model.";
+    if (name.rfind(language_prefix, 0) == 0) {
+        const auto rest = name.substr(language_prefix.size());
+        name = rest == "lm_head.weight" ? rest : "model." + rest;
+    }
+    if (name == "model.embed_tokens.weight" ||
+        name == "model.tok_embeddings.weight" ||
+        name == "transformer.embedding.word_embeddings.weight" ||
+        name == "transformer.word_embeddings.weight") {
+        return {hf_name, "token_embedding.weight", "token_embedding", -1};
+    }
+    if (name == "lm_head.weight" ||
+        name == "model.lm_head.weight" ||
+        name == "transformer.output_layer.weight" ||
+        name == "output_layer.weight") {
+        return {hf_name, "lm_head.weight", "lm_head", -1};
+    }
+    if (name == "model.norm.weight" ||
+        name == "model.final_layernorm.weight" ||
+        name == "transformer.encoder.final_layernorm.weight" ||
+        name == "transformer.final_layernorm.weight") {
+        return {hf_name, "final_norm.weight", "final_norm", -1};
+    }
+    if (name == "model.norm.bias" ||
+        name == "model.final_layernorm.bias" ||
+        name == "transformer.encoder.final_layernorm.bias" ||
+        name == "transformer.final_layernorm.bias") {
+        return {hf_name, "final_norm.bias", "final_norm_bias", -1};
+    }
+
+    std::smatch m;
+    std::regex layer_re(R"(^model\.layers\.(\d+)\.(.+)$)");
+    bool glm = false;
+    if (!std::regex_match(name, m, layer_re)) {
+        const std::regex glm_re(R"(^transformer\.encoder\.layers\.(\d+)\.(.+)$)");
+        if (!std::regex_match(name, m, glm_re)) return {hf_name, hf_name, "unknown", -1};
+        glm = true;
+    }
+    const int layer = std::stoi(m[1].str());
+    const std::string suffix = m[2].str();
+    const std::string base = "blocks." + std::to_string(layer) + ".";
+    if (suffix == "input_layernorm.weight" || suffix == "input_layer_norm.weight") {
+        return {hf_name, base + "norm1.weight", "input_layernorm", layer};
+    }
+    if (suffix == "input_layernorm.bias" || suffix == "input_layer_norm.bias") {
+        return {hf_name, base + "norm1.bias", "input_layernorm_bias", layer};
+    }
+    if (suffix == "post_attention_layernorm.weight" ||
+        suffix == "post_attention_layer_norm.weight" ||
+        suffix == "pre_feedforward_layernorm.weight") {
+        return {hf_name, base + "norm2.weight", "post_attention_layernorm", layer};
+    }
+    if (suffix == "post_attention_layernorm.bias" ||
+        suffix == "post_attention_layer_norm.bias" ||
+        suffix == "pre_feedforward_layernorm.bias") {
+        return {hf_name, base + "norm2.bias", "post_attention_layernorm_bias", layer};
+    }
+    if (suffix == "self_attn.q_proj.weight") return {hf_name, base + "attention.q_proj.weight", "q_proj", layer};
+    if (suffix == "self_attn.k_proj.weight") return {hf_name, base + "attention.k_proj.weight", "k_proj", layer};
+    if (suffix == "self_attn.v_proj.weight") return {hf_name, base + "attention.v_proj.weight", "v_proj", layer};
+    if (suffix == "self_attn.o_proj.weight" || suffix == "self_attn.out_proj.weight" ||
+        (glm && suffix == "self_attention.dense.weight")) {
+        return {hf_name, base + "attention.o_proj.weight", "o_proj", layer};
+    }
+    if (suffix == "self_attn.qkv_proj.weight" ||
+        suffix == "self_attn.query_key_value.weight" ||
+        suffix == "attention.wqkv.weight" ||
+        (glm && suffix == "self_attention.query_key_value.weight")) {
+        return {hf_name, base + "attention.qkv_proj.weight", "qkv_proj", layer};
+    }
+    if (suffix == "self_attn.q_norm.weight" || suffix == "self_attn.q_layernorm.weight") {
+        return {hf_name, base + "attention.q_norm.weight", "q_norm", layer};
+    }
+    if (suffix == "self_attn.k_norm.weight" || suffix == "self_attn.k_layernorm.weight") {
+        return {hf_name, base + "attention.k_norm.weight", "k_norm", layer};
+    }
+    if (suffix == "mlp.gate_proj.weight") return {hf_name, base + "mlp.gate_proj.weight", "gate_proj", layer};
+    if (suffix == "mlp.up_proj.weight") return {hf_name, base + "mlp.up_proj.weight", "up_proj", layer};
+    if (suffix == "mlp.down_proj.weight" || (glm && suffix == "mlp.dense_4h_to_h.weight")) {
+        return {hf_name, base + "mlp.down_proj.weight", "down_proj", layer};
+    }
+    if (suffix == "mlp.gate_up_proj.weight" || suffix == "mlp.gate_up.weight" ||
+        (glm && suffix == "mlp.dense_h_to_4h.weight")) {
+        return {hf_name, base + "mlp.gate_up_proj.weight", "gate_up_proj", layer};
+    }
+    if (suffix.find(".bias") != std::string::npos) {
+        auto weight_name = name;
+        weight_name.replace(weight_name.size() - 4, 4, "weight");
+        auto mapped = map_dense_decoder_weight_name(weight_name);
+        if (mapped.kind != "unknown") {
+            mapped.hf_name = hf_name;
+            if (mapped.internal_name.size() >= 6 &&
+                mapped.internal_name.compare(mapped.internal_name.size() - 6, 6, "weight") == 0) {
+                mapped.internal_name.replace(mapped.internal_name.size() - 6, 6, "bias");
+            }
+            mapped.kind += "_bias";
+            return mapped;
+        }
+    }
     return {hf_name, hf_name, "unknown", layer};
 }
 
@@ -1366,7 +1615,9 @@ std::string hf_architecture_name(HFArchitecture architecture) {
     case HFArchitecture::Gemma3: return "gemma3";
     case HFArchitecture::Gemma4: return "gemma4";
     case HFArchitecture::Llama: return "llama";
+    case HFArchitecture::Llama4: return "llama4";
     case HFArchitecture::Mistral: return "mistral";
+    case HFArchitecture::Ministral: return "ministral";
     case HFArchitecture::Qwen2: return "qwen2";
     case HFArchitecture::Qwen3: return "qwen3";
     case HFArchitecture::Qwen35: return "qwen3.5";
@@ -1374,6 +1625,8 @@ std::string hf_architecture_name(HFArchitecture architecture) {
     case HFArchitecture::Phi4: return "phi4";
     case HFArchitecture::Mixtral: return "mixtral";
     case HFArchitecture::DeepSeek: return "deepseek";
+    case HFArchitecture::GLM4: return "glm4";
+    case HFArchitecture::SmolLM: return "smollm";
     case HFArchitecture::Falcon: return "falcon";
     case HFArchitecture::GPTNeoX: return "gpt_neox";
     case HFArchitecture::Mamba: return "mamba";
@@ -1393,13 +1646,21 @@ HFArchitecture parse_hf_architecture(const std::string& value) {
     if (v.find("gemma3") != std::string::npos || v.find("gemma-3") != std::string::npos) return HFArchitecture::Gemma3;
     if (v.find("gemma2") != std::string::npos || v.find("gemma-2") != std::string::npos) return HFArchitecture::Gemma2;
     if (v.find("phi4") != std::string::npos || v.find("phi-4") != std::string::npos) return HFArchitecture::Phi4;
-    if (v.find("phi3") != std::string::npos || v.find("phi-3") != std::string::npos) return HFArchitecture::Phi3;
+    // Phi-4 checkpoints intentionally retain Transformers' Phi3ForCausalLM /
+    // model_type="phi3" schema and fused tensor layout. Route that public
+    // config signature through the implemented Phi-4-compatible adapter.
+    if (v.find("phi3") != std::string::npos || v.find("phi-3") != std::string::npos) return HFArchitecture::Phi4;
     if (v.find("mixtral") != std::string::npos) return HFArchitecture::Mixtral;
     if (v.find("deepseek") != std::string::npos) return HFArchitecture::DeepSeek;
+    if (v.find("glm4") != std::string::npos || v.find("glm-4") != std::string::npos ||
+        v.find("chatglm") != std::string::npos) return HFArchitecture::GLM4;
+    if (v.find("smollm") != std::string::npos || v.find("smol-lm") != std::string::npos) return HFArchitecture::SmolLM;
     if (v.find("falcon") != std::string::npos) return HFArchitecture::Falcon;
     if (v.find("gpt_neox") != std::string::npos || v.find("gpt-neox") != std::string::npos) return HFArchitecture::GPTNeoX;
     if (v.find("mamba") != std::string::npos) return HFArchitecture::Mamba;
     if (v.find("gemma") != std::string::npos) return HFArchitecture::Gemma;
+    if (v.find("llama4") != std::string::npos || v.find("llama-4") != std::string::npos) return HFArchitecture::Llama4;
+    if (v.find("ministral") != std::string::npos) return HFArchitecture::Ministral;
     if (v.find("mistral") != std::string::npos) return HFArchitecture::Mistral;
     if (v.find("qwen2") != std::string::npos || v.find("qwen") != std::string::npos) return HFArchitecture::Qwen2;
     if (v.find("llama") != std::string::npos || v.find("llm") != std::string::npos) return HFArchitecture::Llama;
@@ -1411,18 +1672,22 @@ std::vector<HFArchitectureInfo> hf_architecture_registry() {
     return {
         {HFArchitecture::GenericDecoder, "generic_decoder", {"generic", "decoder"}, true, true, true, true, {}, "generic common decoder-only LLaMA-like path"},
         {HFArchitecture::Llama, "llama", {"llama2", "llama3", "llama3.1", "llama3.2", "llama3.3"}, true, true, true, true, {}, "common LLaMA-style decoder-only layout"},
+        {HFArchitecture::Llama4, "llama4", {"llama-4", "llama4_text"}, true, true, false, true, {}, "dense Llama 4 text decoder adapter with head_dim and QK-norm plumbing"},
         {HFArchitecture::Mistral, "mistral", {"mistral-nemo", "ministral"}, true, true, true, true, {}, "common Mistral decoder-only layout when tensors match LLaMA-style names"},
+        {HFArchitecture::Ministral, "ministral", {"ministral3", "ministral-3"}, true, true, false, true, {}, "Ministral dense decoder adapter with GQA/MQA and sliding-window config"},
         {HFArchitecture::Qwen2, "qwen2", {"qwen", "qwen2.5"}, true, true, true, true, {}, "Qwen2/Qwen2.5 common decoder-only layout"},
         {HFArchitecture::Gemma, "gemma", {"gemma1"}, true, true, true, true, {}, "original Gemma common decoder-only layout"},
         {HFArchitecture::Gemma2, "gemma2", {"gemma-2"}, true, false, false, true, {"Gemma2 soft-capping/sliding-attention details are not fully validated"}, "detected but not treated as numerically supported yet"},
         {HFArchitecture::Gemma3, "gemma3", {"gemma-3"}, true, false, false, true, {"Gemma3 text/VLM variants need dedicated validation"}, "detected for probe/UX only"},
         {HFArchitecture::Gemma4, "gemma4", {"gemma-4"}, true, true, true, true, {}, "Gemma4 dense text-core path; multimodal/MoE variants are blocked by model spec"},
-        {HFArchitecture::Qwen3, "qwen3", {"qwen-3"}, true, false, false, true, {"Qwen3 variants need dedicated mapper and model-family validation"}, "detected for probe/UX only"},
+        {HFArchitecture::Qwen3, "qwen3", {"qwen-3"}, true, true, false, true, {}, "Qwen3 dense decoder adapter with Q/K normalization"},
         {HFArchitecture::Qwen35, "qwen3.5", {"qwen35", "qwen-3.5"}, true, true, false, true, {}, "HF safetensors text-core path uses HybridGPTModel for DeltaNet/Gated-Attention/MoE layers"},
         {HFArchitecture::Phi3, "phi3", {"phi-3"}, true, false, false, true, {"Phi rotary/config and tensor layout adapter is not implemented"}, "detected for probe/UX only"},
-        {HFArchitecture::Phi4, "phi4", {"phi-4"}, true, false, false, true, {"Phi4 tensor layout and any multimodal variants need a dedicated adapter"}, "detected for probe/UX only"},
-        {HFArchitecture::Mixtral, "mixtral", {"mixtral-moe"}, true, true, false, true, {}, "HF safetensors MoE text-core path uses HybridGPTModel router/expert execution"},
-        {HFArchitecture::DeepSeek, "deepseek", {"deepseek-v2", "deepseek-v3", "deepseek-r1"}, true, false, false, true, {"DeepSeek MoE/MLA-style model details are not implemented"}, "requires dedicated attention/MoE adapters"},
+        {HFArchitecture::Phi4, "phi4", {"phi-4"}, true, true, false, true, {}, "Phi-4 dense decoder adapter with fused QKV/gate-up and partial rotary"},
+        {HFArchitecture::Mixtral, "mixtral", {"mixtral-moe"}, true, false, false, true, {"unsupported MoE model family: Mixtral requires router/expert execution"}, "MoE is intentionally outside the dense loader"},
+        {HFArchitecture::DeepSeek, "deepseek", {"deepseek-llm", "deepseek-v2", "deepseek-v2-lite"}, true, true, false, true, {}, "DeepSeek dense decoder adapter; MoE configs are rejected"},
+        {HFArchitecture::GLM4, "glm4", {"glm-4", "chatglm4"}, true, true, false, true, {}, "GLM-4 dense decoder adapter with fused query_key_value and MQA aliases"},
+        {HFArchitecture::SmolLM, "smollm", {"smollm2", "smol-lm"}, true, true, false, true, {}, "SmolLM/SmolLM2 dense LLaMA-style decoder adapter"},
         {HFArchitecture::Falcon, "falcon", {}, true, false, false, true, {"Falcon parallel-attention/tensor layout adapter is not implemented"}, "detected for probe/UX only"},
         {HFArchitecture::GPTNeoX, "gpt_neox", {"gpt-neox", "pythia"}, true, false, false, true, {"GPT-NeoX tensor layout adapter is not implemented"}, "detected for probe/UX only"},
         {HFArchitecture::Mamba, "mamba", {"mamba2"}, false, false, false, false, {"State-space/Mamba blocks are not transformer decoder blocks"}, "outside current transformer runner"},
@@ -1748,8 +2013,11 @@ HFChatTemplateKind infer_hf_chat_template_kind(HFArchitecture architecture,
     case HFArchitecture::Qwen35:
         return HFChatTemplateKind::ChatML;
     case HFArchitecture::Llama:
+    case HFArchitecture::Llama4:
+    case HFArchitecture::SmolLM:
         return HFChatTemplateKind::Llama3;
     case HFArchitecture::Mistral:
+    case HFArchitecture::Ministral:
         return HFChatTemplateKind::Mistral;
     case HFArchitecture::Gemma:
     case HFArchitecture::Gemma2:
@@ -1998,19 +2266,103 @@ HFTransformerConfig load_hf_transformer_config_json(const std::string& path, HFA
     out.architecture = architecture == HFArchitecture::Auto ? parse_hf_architecture(first_architecture_name(text)) : architecture;
     if (out.architecture == HFArchitecture::Auto) out.architecture = HFArchitecture::GenericDecoder;
     out.architecture_name = hf_architecture_name(out.architecture);
-    const bool text_core_wrapper = (out.architecture == HFArchitecture::Gemma4 ||
-                                    out.architecture == HFArchitecture::Qwen35) &&
-                                   !text_config.empty();
+    const bool text_core_wrapper = !text_config.empty() &&
+                                   (out.architecture == HFArchitecture::Gemma4 ||
+                                    out.architecture == HFArchitecture::Llama4 ||
+                                    out.architecture == HFArchitecture::Qwen35 ||
+                                    json_has_key(text, "vision_config") ||
+                                    json_has_key(text, "audio_config"));
     const auto& model_text = text_core_wrapper ? text_config : text;
 
-    const auto gemma_like = load_gemma_config_json(path);
-    out.transformer = to_transformer_config(gemma_like);
+    out.transformer.vocab_size = static_cast<int>(json_integer_alias_or(
+        model_text, {"vocab_size", "padded_vocab_size", "n_vocab"}, 0));
+    out.transformer.block_size = static_cast<int>(json_integer_alias_or(
+        model_text,
+        {"max_position_embeddings", "block_size", "seq_length", "max_seq_len",
+         "max_sequence_length", "context_length"},
+        0));
+    out.transformer.n_embd = static_cast<int>(json_integer_alias_or(
+        model_text, {"hidden_size", "n_embd", "d_model"}, 0));
+    out.transformer.mlp_hidden = static_cast<int>(json_integer_alias_or(
+        model_text, {"intermediate_size", "mlp_hidden", "ffn_hidden_size"}, 0));
+    out.transformer.n_layer = static_cast<int>(json_integer_alias_or(
+        model_text, {"num_hidden_layers", "n_layer", "num_layers", "n_layers"}, 0));
+    out.transformer.n_head = static_cast<int>(json_integer_alias_or(
+        model_text, {"num_attention_heads", "n_head", "num_heads", "n_heads"}, 0));
+    out.transformer.n_kv_head = static_cast<int>(json_integer_alias_or(
+        model_text,
+        {"num_key_value_heads", "n_kv_head", "num_kv_heads", "n_kv_heads", "kv_heads",
+         "multi_query_group_num"},
+        out.transformer.n_head));
+    out.transformer.head_dim = static_cast<int>(json_integer_alias_or(
+        model_text, {"head_dim", "kv_channels"},
+        out.transformer.n_head > 0 ? out.transformer.n_embd / out.transformer.n_head : 0));
+    out.transformer.v_head_dim = static_cast<int>(json_integer_or(
+        model_text, "v_head_dim", out.transformer.head_dim));
+    out.transformer.rope_theta = static_cast<float>(json_float_alias_or(
+        model_text, {"rope_theta", "rope_base"}, 10000.0));
+    out.transformer.dropout = static_cast<float>(json_float_alias_or(
+        model_text, {"attention_dropout", "dropout", "attention_dropout_prob"}, 0.0));
+    out.transformer.use_rope = !json_bool_or(model_text, "learned_position_embeddings", false);
+    out.transformer.causal = json_bool_alias_or(model_text, {"causal", "is_causal"}, true);
+    out.transformer.learned_position_embeddings = !out.transformer.use_rope;
+    out.transformer.skip_weight_init = true;
+
+    const float partial_rotary = static_cast<float>(json_float_alias_or(
+        model_text, {"partial_rotary_factor", "rotary_pct"}, 1.0));
+    out.transformer.rotary_dim = static_cast<int>(json_integer_or(model_text, "rotary_dim", 0));
+    if (out.transformer.rotary_dim <= 0) {
+        out.transformer.rotary_dim =
+            static_cast<int>(std::floor(static_cast<float>(out.transformer.head_dim) * partial_rotary));
+        out.transformer.rotary_dim -= out.transformer.rotary_dim % 2;
+        if (out.transformer.rotary_dim <= 0 && out.transformer.head_dim > 0) {
+            out.transformer.rotary_dim = std::min(2, out.transformer.head_dim);
+        }
+    }
+
+    const auto norm_name = lower_ascii(json_string_or(
+        model_text, "norm_type",
+        json_string_or(model_text, "normalization", json_string_or(model_text, "norm_kind", ""))));
+    const bool explicit_rms = json_bool_alias_or(model_text, {"rmsnorm", "use_rms_norm"}, false);
+    out.layer_norm = !explicit_rms && !norm_name.empty() &&
+                     norm_name.find("rms") == std::string::npos &&
+                     norm_name.find("layer") != std::string::npos;
+    out.rms_norm_eps = static_cast<float>(json_float_alias_or(
+        model_text, {"rms_norm_eps", "layer_norm_eps", "layernorm_epsilon"}, 1e-6));
+    out.transformer.rms_norm_eps = out.rms_norm_eps;
+    out.transformer.use_layer_norm = out.layer_norm;
+    out.norm_first = json_bool_alias_or(model_text, {"norm_first", "pre_norm", "pre_layer_norm"}, true);
+    out.transformer.norm_first = out.norm_first;
+    out.transformer.use_post_attention_norm = json_bool_alias_or(
+        model_text, {"use_post_attention_norm", "post_attention_norm"}, false);
+    out.transformer.use_post_ffw_norm = json_bool_alias_or(
+        model_text, {"use_post_ffw_norm", "post_feedforward_norm", "post_ffn_norm"}, false);
+
+    out.attention_bias = json_bool_alias_or(
+        model_text, {"qkv_bias", "attention_bias", "use_qkv_bias", "add_qkv_bias"}, false);
+    out.attention_output_bias = json_bool_alias_or(
+        model_text, {"attention_output_bias", "o_proj_bias"},
+        json_bool_or(model_text, "attention_bias", false));
+    out.mlp_bias = json_bool_alias_or(model_text, {"mlp_bias", "ffn_bias"}, false);
+    out.transformer.use_qkv_bias = out.attention_bias;
+    out.transformer.use_attention_output_bias = out.attention_output_bias;
+    out.transformer.use_mlp_bias = out.mlp_bias;
+    out.transformer.use_qk_norm = json_bool_alias_or(
+        model_text, {"use_qk_norm", "qk_norm", "query_key_layer_scaling"}, false);
+    out.transformer.attention_softcap = static_cast<float>(json_float_alias_or(
+        model_text, {"attn_logit_softcapping", "attention_softcap", "attn_softcap"}, 0.0));
+    out.transformer.final_logit_softcap = static_cast<float>(json_float_alias_or(
+        model_text, {"final_logit_softcapping", "final_logit_softcap"}, 0.0));
+
     const auto hidden_activation = json_string_or(
         model_text, "hidden_activation",
         json_string_or(model_text, "hidden_act",
                        json_string_or(text, "hidden_activation",
                                       json_string_or(text, "hidden_act", ""))));
+    out.hidden_activation = hidden_activation.empty() ? "silu" : lower_ascii(hidden_activation);
     configure_mlp_activation(out.transformer, hidden_activation, out.architecture, out.architecture_name);
+    configure_dense_family_adapter(out, model_text);
+    configure_rope_scaling(out, model_text);
     configure_gemma4_attention_semantics(out.transformer, out.architecture, out.architecture_name);
     if (out.architecture == HFArchitecture::Gemma4) {
         out.transformer.rope_split_half = true;
@@ -2022,16 +2374,18 @@ HFTransformerConfig load_hf_transformer_config_json(const std::string& path, HFA
     out.transformer.embedding_scale = gemma_scaled_embeddings
         ? std::sqrt(static_cast<float>(out.transformer.n_embd))
         : 1.0f;
-    out.rms_norm_eps = gemma_like.rms_norm_eps;
-    out.transformer.rms_norm_eps = out.rms_norm_eps;
-    out.tie_word_embeddings = gemma_like.tie_word_embeddings;
-    out.attention_bias = gemma_like.attention_bias;
-    out.attention_k_eq_v = gemma_like.attention_k_eq_v;
-    out.bos_token_id = gemma_like.bos_token_id;
-    out.eos_token_id = gemma_like.eos_token_id;
-    out.pad_token_id = gemma_like.pad_token_id;
-    out.sliding_window = gemma_like.sliding_window;
-    out.transformer.sliding_window = gemma_like.sliding_window;
+    out.tie_word_embeddings = json_bool_or(model_text, "tie_word_embeddings", false);
+    out.attention_k_eq_v = json_bool_alias_or(
+        model_text, {"attention_k_eq_v", "k_eq_v", "key_equals_value"}, false);
+    out.bos_token_id = static_cast<int>(json_integer_or(
+        model_text, "bos_token_id", json_integer_or(text, "bos_token_id", 1)));
+    out.eos_token_id = static_cast<int>(json_integer_or(
+        model_text, "eos_token_id", json_integer_or(text, "eos_token_id", 2)));
+    out.pad_token_id = static_cast<int>(json_integer_or(
+        model_text, "pad_token_id", json_integer_or(text, "pad_token_id", 0)));
+    out.sliding_window = static_cast<int>(json_integer_alias_or(
+        model_text, {"sliding_window", "sliding_window_size"}, 0));
+    out.transformer.sliding_window = std::max(0, out.sliding_window);
     out.layer_types = json_string_array_or_empty(model_text, {"layer_types", "layer_type", "attention_types", "block_types"});
     out.local_attention_layers = json_int_array_or_empty(model_text, {"local_attention_layers", "sliding_window_layers"});
     out.global_attention_layers = json_int_array_or_empty(model_text, {"global_attention_layers", "full_attention_layers"});
@@ -2057,11 +2411,25 @@ HFTransformerConfig load_hf_transformer_config_json(const std::string& path, HFA
     const auto lower = lower_ascii(model_text);
     const auto raw_lower = lower_ascii(text);
     out.has_moe = out.num_experts > 0 ||
+                  out.architecture == HFArchitecture::Mixtral ||
                   lower.find("\"moe") != std::string::npos ||
                   lower.find("sparse_moe") != std::string::npos ||
                   lower.find("block_sparse_moe") != std::string::npos ||
                   lower.find("num_local_experts") != std::string::npos;
-    if (out.has_moe && (out.num_experts <= 0 || out.experts_per_token <= 0)) out.has_moe = false;
+    if (out.has_moe && out.architecture != HFArchitecture::Qwen35) {
+        MCL_CHECK(false,
+                  "unsupported MoE model family (" + out.architecture_name +
+                      "): router/expert execution is outside the dense HF decoder loader");
+    }
+    if (out.architecture == HFArchitecture::DeepSeek &&
+        (json_has_key(model_text, "kv_lora_rank") ||
+         json_has_key(model_text, "q_lora_rank") ||
+         json_has_key(model_text, "qk_nope_head_dim") ||
+         json_has_key(model_text, "qk_rope_head_dim"))) {
+        MCL_CHECK(false,
+                  "unsupported DeepSeek MLA attention: q_a/kv_a/kv_b low-rank projections "
+                  "cannot be represented by the dense Q/K/V attention loader");
+    }
     out.has_vision_projector = !text_core_wrapper &&
                                (json_has_key(text, "vision_config") ||
                                 json_has_key(text, "vision_projector") ||
@@ -2104,6 +2472,16 @@ HFTransformerConfig load_hf_transformer_config_json(const std::string& path, HFA
                               lower.find("linear_attention") != std::string::npos;
     out.has_gated_attention = lower.find("gated_attention") != std::string::npos ||
                               lower.find("gated-attention") != std::string::npos;
+    MCL_CHECK(out.transformer.vocab_size > 0, "HF config missing vocab_size");
+    MCL_CHECK(out.transformer.block_size > 0, "HF config missing max_position_embeddings/context_length");
+    MCL_CHECK(out.transformer.n_embd > 0, "HF config missing hidden_size");
+    MCL_CHECK(out.transformer.n_layer > 0, "HF config missing num_hidden_layers");
+    MCL_CHECK(out.transformer.n_head > 0, "HF config missing num_attention_heads");
+    MCL_CHECK(out.transformer.n_kv_head > 0, "HF config missing num_key_value_heads");
+    MCL_CHECK(out.transformer.n_head % out.transformer.n_kv_head == 0,
+              "HF config num_attention_heads must be divisible by num_key_value_heads");
+    MCL_CHECK(out.transformer.head_dim > 0, "HF config missing/invalid head_dim");
+    MCL_CHECK(out.transformer.mlp_hidden > 0, "HF config missing intermediate_size");
     return out;
 }
 
@@ -2184,9 +2562,10 @@ HFTransformerConfig load_hf_transformer_config_gguf(const std::string& path, HFA
             : 1.0f;
     out.attention_bias = file.contains_tensor("blk.0.attn_q.bias") ||
                          file.contains_tensor("blk.0.attn_k.bias") ||
-                         file.contains_tensor("blk.0.attn_v.bias") ||
-                         file.contains_tensor("blk.0.attn_output.bias");
+                         file.contains_tensor("blk.0.attn_v.bias");
+    out.attention_output_bias = file.contains_tensor("blk.0.attn_output.bias");
     out.transformer.use_qkv_bias = out.attention_bias;
+    out.transformer.use_attention_output_bias = out.attention_output_bias;
     out.tie_word_embeddings = !file.contains_tensor("output.weight") && file.contains_tensor("token_embd.weight");
     out.transformer.use_qk_norm = file.contains_tensor("blk.0.attn_q_norm.weight") ||
                                   file.contains_tensor("blk.0.attn_k_norm.weight");
@@ -2396,12 +2775,10 @@ HybridGPTModel make_hf_hybrid_transformer_model(Backend& backend, const HFTransf
 }
 
 HFWeightName map_hf_transformer_weight_name(HFArchitecture architecture, const std::string& hf_name) {
-    if (architecture == HFArchitecture::Qwen35 ||
-        architecture == HFArchitecture::Mixtral ||
-        architecture == HFArchitecture::DeepSeek) return map_qwen35_weight_name(hf_name);
+    if (architecture == HFArchitecture::Qwen35) return map_qwen35_weight_name(hf_name);
     MCL_CHECK(architecture_uses_llama_like_weights(architecture),
               "HF architecture weight mapping is not implemented: " + hf_architecture_name(architecture));
-    return map_gemma_hf_weight_name(hf_name);
+    return map_dense_decoder_weight_name(hf_name);
 }
 
 HFWeightName map_gguf_transformer_weight_name(HFArchitecture architecture, const std::string& gguf_name) {
@@ -2436,7 +2813,69 @@ HFWeightName map_gguf_transformer_weight_name(HFArchitecture architecture, const
 std::vector<std::string> expected_hf_transformer_weight_names(const HFTransformerConfig& cfg, bool include_lm_head) {
     MCL_CHECK(architecture_uses_llama_like_weights(cfg.architecture),
               "HF architecture expected weights are not implemented: " + cfg.architecture_name);
-    return expected_gemma_hf_weight_names(to_gemma_compatible_config(cfg), include_lm_head);
+    const bool glm = cfg.architecture == HFArchitecture::GLM4;
+    std::vector<std::string> names{
+        glm ? "transformer.embedding.word_embeddings.weight" : "model.embed_tokens.weight",
+        glm ? "transformer.encoder.final_layernorm.weight" : "model.norm.weight",
+    };
+    if (cfg.layer_norm) {
+        names.push_back(glm ? "transformer.encoder.final_layernorm.bias" : "model.norm.bias");
+    }
+    if (include_lm_head) names.push_back(glm ? "transformer.output_layer.weight" : "lm_head.weight");
+    for (int i = 0; i < cfg.transformer.n_layer; ++i) {
+        const std::string p = glm
+            ? "transformer.encoder.layers." + std::to_string(i) + "."
+            : "model.layers." + std::to_string(i) + ".";
+        names.push_back(p + "input_layernorm.weight");
+        names.push_back(p + "post_attention_layernorm.weight");
+        if (cfg.layer_norm) {
+            names.push_back(p + "input_layernorm.bias");
+            names.push_back(p + "post_attention_layernorm.bias");
+        }
+        if (cfg.fused_qkv_weights) {
+            names.push_back(p + (glm ? "self_attention.query_key_value.weight"
+                                     : "self_attn.qkv_proj.weight"));
+            if (cfg.attention_bias) {
+                names.push_back(p + (glm ? "self_attention.query_key_value.bias"
+                                         : "self_attn.qkv_proj.bias"));
+            }
+        } else {
+            names.push_back(p + "self_attn.q_proj.weight");
+            names.push_back(p + "self_attn.k_proj.weight");
+            names.push_back(p + "self_attn.v_proj.weight");
+            if (cfg.attention_bias) {
+                names.push_back(p + "self_attn.q_proj.bias");
+                names.push_back(p + "self_attn.k_proj.bias");
+                names.push_back(p + "self_attn.v_proj.bias");
+            }
+        }
+        names.push_back(p + (glm ? "self_attention.dense.weight" : "self_attn.o_proj.weight"));
+        if (cfg.attention_output_bias) {
+            names.push_back(p + (glm ? "self_attention.dense.bias" : "self_attn.o_proj.bias"));
+        }
+        if (cfg.transformer.use_qk_norm) {
+            names.push_back(p + "self_attn.q_norm.weight");
+            names.push_back(p + "self_attn.k_norm.weight");
+        }
+        if (cfg.fused_mlp_weights) {
+            names.push_back(p + (glm ? "mlp.dense_h_to_4h.weight" : "mlp.gate_up_proj.weight"));
+            if (cfg.mlp_bias) {
+                names.push_back(p + (glm ? "mlp.dense_h_to_4h.bias" : "mlp.gate_up_proj.bias"));
+            }
+        } else {
+            names.push_back(p + "mlp.gate_proj.weight");
+            names.push_back(p + "mlp.up_proj.weight");
+            if (cfg.mlp_bias) {
+                names.push_back(p + "mlp.gate_proj.bias");
+                names.push_back(p + "mlp.up_proj.bias");
+            }
+        }
+        names.push_back(p + (glm ? "mlp.dense_4h_to_h.weight" : "mlp.down_proj.weight"));
+        if (cfg.mlp_bias) {
+            names.push_back(p + (glm ? "mlp.dense_4h_to_h.bias" : "mlp.down_proj.bias"));
+        }
+    }
+    return names;
 }
 
 std::vector<std::string> expected_gguf_transformer_weight_names(const HFTransformerConfig& cfg, bool include_lm_head) {
@@ -2490,7 +2929,438 @@ HFWeightLoadReport load_hf_transformer_weights(Backend& backend,
                                                bool trainable) {
     MCL_CHECK(architecture_uses_llama_like_weights(cfg.architecture),
               "HF architecture weight loading is not implemented: " + cfg.architecture_name);
-    return load_gemma_hf_weights(backend, model, safetensors_paths, to_gemma_compatible_config(cfg), strict, trainable);
+    MCL_CHECK(!cfg.has_moe,
+              "unsupported MoE model family (" + cfg.architecture_name +
+                  "): dense HF weight loader cannot load router/expert tensors");
+    MCL_CHECK(model.config.vocab_size == cfg.transformer.vocab_size &&
+                  model.config.n_embd == cfg.transformer.n_embd &&
+                  model.config.n_layer == cfg.transformer.n_layer &&
+                  model.config.n_head == cfg.transformer.n_head &&
+                  model.config.n_kv_head == cfg.transformer.n_kv_head,
+              "HF config does not match ModernGPTModel config");
+
+    SafeTensorsArchiveLite archive(safetensors_paths);
+    HFWeightLoadReport report;
+    std::unordered_set<std::string> used;
+
+    auto find = [&](const std::vector<std::string>& aliases, bool required) {
+        const auto name = first_existing(archive, aliases);
+        if (name.empty() && required && !aliases.empty()) report.missing.push_back(aliases.front());
+        return name;
+    };
+    auto apply_vector = [&](const std::vector<std::string>& aliases,
+                            Parameter& parameter,
+                            bool required) -> bool {
+        const auto name = find(aliases, required);
+        if (name.empty()) return false;
+        const auto& info = archive.info(name);
+        MCL_CHECK(info.shape.size() == 1, "expected rank-1 HF tensor: " + name);
+        assign_parameter(parameter, tensor_from_f32(backend, info.shape, archive.f32(name)), trainable);
+        used.insert(name);
+        report.applied.push_back(name);
+        ++report.loaded_tensors;
+        return true;
+    };
+    auto apply_direct = [&](const std::vector<std::string>& aliases,
+                            Parameter& parameter,
+                            bool required) -> std::string {
+        const auto name = find(aliases, required);
+        if (name.empty()) return {};
+        assign_parameter(parameter,
+                         tensor_from_f32(backend, archive.info(name).shape, archive.f32(name)),
+                         trainable);
+        used.insert(name);
+        report.applied.push_back(name);
+        ++report.loaded_tensors;
+        return name;
+    };
+    auto apply_linear = [&](const std::vector<std::string>& aliases,
+                            Linear& linear,
+                            bool required) -> bool {
+        const auto name = find(aliases, required);
+        if (name.empty()) return false;
+        const auto& info = archive.info(name);
+        MCL_CHECK(info.shape.size() == 2, "expected rank-2 HF linear weight: " + name);
+        const int64_t in = linear.in_features();
+        const int64_t out = linear.out_features();
+        Tensor tensor;
+        if (shape_is(info, {out, in})) {
+            tensor = tensor_from_f32(backend, {in, out}, transpose_2d(archive.f32(name), out, in));
+        } else if (shape_is(info, {in, out})) {
+            tensor = tensor_from_f32(backend, {in, out}, archive.f32(name));
+        } else {
+            MCL_CHECK(false, "HF linear weight shape mismatch: " + name);
+        }
+        assign_parameter(linear.weight, std::move(tensor), trainable);
+        used.insert(name);
+        report.applied.push_back(name);
+        ++report.loaded_tensors;
+        return true;
+    };
+    auto apply_linear_bias = [&](const std::vector<std::string>& aliases,
+                                 Linear& linear,
+                                 bool required) -> bool {
+        if (!linear.has_bias()) {
+            if (required && !aliases.empty()) report.missing.push_back(aliases.front());
+            return false;
+        }
+        return apply_vector(aliases, linear.bias, required);
+    };
+
+    const std::vector<std::string> embed_aliases{
+        "model.embed_tokens.weight",
+        "model.tok_embeddings.weight",
+        "transformer.embedding.word_embeddings.weight",
+        "transformer.word_embeddings.weight",
+        "transformer.wte.weight",
+    };
+    const auto embed_name = apply_direct(embed_aliases, model.token_embedding.weight, true);
+    apply_vector({"model.norm.weight", "model.final_layernorm.weight",
+                  "transformer.encoder.final_layernorm.weight", "transformer.final_layernorm.weight",
+                  "transformer.ln_f.weight"},
+                 model.final_norm.weight, true);
+    if (cfg.layer_norm) {
+        apply_vector({"model.norm.bias", "model.final_layernorm.bias",
+                      "transformer.encoder.final_layernorm.bias", "transformer.final_layernorm.bias",
+                      "transformer.ln_f.bias"},
+                     model.final_norm.bias, true);
+    }
+
+    const auto lm_name = find({"lm_head.weight", "model.lm_head.weight",
+                               "transformer.output_layer.weight", "output_layer.weight"}, false);
+    if (!lm_name.empty()) {
+        const auto& info = archive.info(lm_name);
+        MCL_CHECK(info.shape.size() == 2, "expected rank-2 HF lm_head weight: " + lm_name);
+        Tensor tensor;
+        if (shape_is(info, {cfg.transformer.vocab_size, cfg.transformer.n_embd})) {
+            tensor = tensor_from_f32(
+                backend, {cfg.transformer.n_embd, cfg.transformer.vocab_size},
+                transpose_2d(archive.f32(lm_name), cfg.transformer.vocab_size, cfg.transformer.n_embd));
+        } else if (shape_is(info, {cfg.transformer.n_embd, cfg.transformer.vocab_size})) {
+            tensor = tensor_from_f32(
+                backend, {cfg.transformer.n_embd, cfg.transformer.vocab_size}, archive.f32(lm_name));
+        } else {
+            MCL_CHECK(false, "HF lm_head weight shape mismatch: " + lm_name);
+        }
+        assign_parameter(model.lm_head, std::move(tensor), trainable);
+        used.insert(lm_name);
+        report.applied.push_back(lm_name);
+        ++report.loaded_tensors;
+    } else if (cfg.tie_word_embeddings && !embed_name.empty()) {
+        const auto& info = archive.info(embed_name);
+        MCL_CHECK(shape_is(info, {cfg.transformer.vocab_size, cfg.transformer.n_embd}),
+                  "tied embedding weight shape mismatch");
+        assign_parameter(
+            model.lm_head,
+            tensor_from_f32(
+                backend, {cfg.transformer.n_embd, cfg.transformer.vocab_size},
+                transpose_2d(archive.f32(embed_name), cfg.transformer.vocab_size, cfg.transformer.n_embd)),
+            trainable);
+        report.applied.push_back(embed_name + "->lm_head.weight");
+    } else {
+        report.missing.push_back("lm_head.weight");
+    }
+
+    for (int i = 0; i < cfg.transformer.n_layer; ++i) {
+        auto& block = *model.blocks[static_cast<std::size_t>(i)];
+        const std::string p = "model.layers." + std::to_string(i) + ".";
+        const std::string g = "transformer.encoder.layers." + std::to_string(i) + ".";
+
+        apply_vector({p + "input_layernorm.weight", p + "input_layer_norm.weight",
+                      p + "ln_1.weight", g + "input_layernorm.weight"},
+                     block.norm1().weight, true);
+        apply_vector({p + "post_attention_layernorm.weight", p + "pre_feedforward_layernorm.weight",
+                      p + "post_attention_layer_norm.weight", p + "ln_2.weight",
+                      g + "post_attention_layernorm.weight"},
+                     block.norm2().weight, true);
+        if (cfg.layer_norm) {
+            apply_vector({p + "input_layernorm.bias", p + "input_layer_norm.bias",
+                          p + "ln_1.bias", g + "input_layernorm.bias"},
+                         block.norm1().bias, true);
+            apply_vector({p + "post_attention_layernorm.bias", p + "pre_feedforward_layernorm.bias",
+                          p + "post_attention_layer_norm.bias", p + "ln_2.bias",
+                          g + "post_attention_layernorm.bias"},
+                         block.norm2().bias, true);
+        }
+
+        auto& attention = block.attention();
+        const std::vector<std::string> fused_qkv_aliases{
+            p + "self_attn.qkv_proj.weight",
+            p + "self_attn.query_key_value.weight",
+            p + "attention.wqkv.weight",
+            g + "self_attention.query_key_value.weight",
+        };
+        const bool fused_qkv_present = !first_existing(archive, fused_qkv_aliases).empty();
+        if (fused_qkv_present) {
+            const auto name = find(fused_qkv_aliases, true);
+            const int64_t hidden = cfg.transformer.n_embd;
+            const int64_t q_dim = attention.q_proj().out_features();
+            const int64_t k_dim = attention.k_proj().out_features();
+            const int64_t v_dim = attention.v_proj().out_features();
+            const int64_t total = q_dim + k_dim + v_dim;
+            const auto& info = archive.info(name);
+            MCL_CHECK(info.shape.size() == 2, "expected rank-2 fused HF QKV weight: " + name);
+            std::vector<float> packed;
+            if (shape_is(info, {total, hidden})) {
+                packed = transpose_2d(archive.f32(name), total, hidden);
+            } else if (shape_is(info, {hidden, total})) {
+                packed = archive.f32(name);
+            } else {
+                MCL_CHECK(false, "fused HF QKV weight shape mismatch: " + name);
+            }
+            auto slice_columns = [&](int64_t begin, int64_t width) {
+                std::vector<float> result(static_cast<std::size_t>(hidden * width));
+                for (int64_t row = 0; row < hidden; ++row) {
+                    std::copy_n(packed.begin() + row * total + begin, width,
+                                result.begin() + row * width);
+                }
+                return result;
+            };
+            attention.enable_split_projections(true);
+            assign_parameter(attention.q_proj().weight,
+                             tensor_from_f32(backend, {hidden, q_dim}, slice_columns(0, q_dim)),
+                             trainable);
+            assign_parameter(attention.k_proj().weight,
+                             tensor_from_f32(backend, {hidden, k_dim}, slice_columns(q_dim, k_dim)),
+                             trainable);
+            assign_parameter(attention.v_proj().weight,
+                             tensor_from_f32(backend, {hidden, v_dim}, slice_columns(q_dim + k_dim, v_dim)),
+                             trainable);
+            used.insert(name);
+            report.applied.push_back(name + "->q_proj+k_proj+v_proj");
+            ++report.loaded_tensors;
+            if (cfg.attention_bias) {
+                const auto bias_name = find({p + "self_attn.qkv_proj.bias",
+                                             p + "self_attn.query_key_value.bias",
+                                             p + "attention.wqkv.bias",
+                                             g + "self_attention.query_key_value.bias"},
+                                            true);
+                if (!bias_name.empty()) {
+                    const auto bias = archive.f32(bias_name);
+                    MCL_CHECK(bias.size() == static_cast<std::size_t>(total),
+                              "fused HF QKV bias shape mismatch: " + bias_name);
+                    auto assign_bias_slice = [&](Linear& linear, int64_t begin, int64_t width) {
+                        MCL_CHECK(linear.has_bias(), "fused HF QKV bias requires initialized split biases");
+                        std::vector<float> part(
+                            bias.begin() + begin, bias.begin() + begin + width);
+                        assign_parameter(linear.bias,
+                                         tensor_from_f32(backend, {width}, part),
+                                         trainable);
+                    };
+                    assign_bias_slice(attention.q_proj(), 0, q_dim);
+                    assign_bias_slice(attention.k_proj(), q_dim, k_dim);
+                    assign_bias_slice(attention.v_proj(), q_dim + k_dim, v_dim);
+                    used.insert(bias_name);
+                    report.applied.push_back(bias_name + "->q_proj+k_proj+v_proj.bias");
+                    ++report.loaded_tensors;
+                }
+            }
+        } else {
+            attention.enable_split_projections(true);
+            apply_linear({p + "self_attn.q_proj.weight", p + "attention.q_proj.weight"},
+                         attention.q_proj(), true);
+            apply_linear({p + "self_attn.k_proj.weight", p + "attention.k_proj.weight"},
+                         attention.k_proj(), true);
+            apply_linear({p + "self_attn.v_proj.weight", p + "attention.v_proj.weight"},
+                         attention.v_proj(), true);
+            if (cfg.attention_bias) {
+                apply_linear_bias({p + "self_attn.q_proj.bias", p + "attention.q_proj.bias"},
+                                  attention.q_proj(), true);
+                apply_linear_bias({p + "self_attn.k_proj.bias", p + "attention.k_proj.bias"},
+                                  attention.k_proj(), true);
+                apply_linear_bias({p + "self_attn.v_proj.bias", p + "attention.v_proj.bias"},
+                                  attention.v_proj(), true);
+            }
+        }
+        apply_linear({p + "self_attn.o_proj.weight", p + "self_attn.out_proj.weight",
+                      p + "attention.o_proj.weight", g + "self_attention.dense.weight"},
+                     attention.o_proj(), true);
+        if (cfg.attention_output_bias) {
+            apply_linear_bias({p + "self_attn.o_proj.bias", p + "self_attn.out_proj.bias",
+                               p + "attention.o_proj.bias", g + "self_attention.dense.bias"},
+                              attention.o_proj(), true);
+        }
+        if (cfg.transformer.use_qk_norm) {
+            apply_vector({p + "self_attn.q_norm.weight", p + "self_attn.q_layernorm.weight",
+                          p + "attention.q_norm.weight"},
+                         attention.q_norm().weight, true);
+            apply_vector({p + "self_attn.k_norm.weight", p + "self_attn.k_layernorm.weight",
+                          p + "attention.k_norm.weight"},
+                         attention.k_norm().weight, true);
+        }
+
+        auto& mlp = block.mlp();
+        const std::vector<std::string> fused_mlp_aliases{
+            p + "mlp.gate_up_proj.weight",
+            p + "mlp.gate_up.weight",
+            g + "mlp.dense_h_to_4h.weight",
+        };
+        const bool fused_mlp_present = !first_existing(archive, fused_mlp_aliases).empty();
+        if (fused_mlp_present) {
+            if (cfg.transformer.split_mlp_projections) {
+                const auto name = find(fused_mlp_aliases, true);
+                const int64_t hidden = cfg.transformer.n_embd;
+                const int64_t width = cfg.transformer.mlp_hidden;
+                const int64_t total = width * 2;
+                const auto& info = archive.info(name);
+                MCL_CHECK(info.shape.size() == 2,
+                          "expected rank-2 fused HF gate/up weight: " + name);
+                std::vector<float> packed;
+                if (shape_is(info, {total, hidden})) {
+                    packed = transpose_2d(archive.f32(name), total, hidden);
+                } else if (shape_is(info, {hidden, total})) {
+                    packed = archive.f32(name);
+                } else {
+                    MCL_CHECK(false, "fused HF gate/up weight shape mismatch: " + name);
+                }
+                auto slice_columns = [&](int64_t begin) {
+                    std::vector<float> result(static_cast<std::size_t>(hidden * width));
+                    for (int64_t row = 0; row < hidden; ++row) {
+                        std::copy_n(packed.begin() + row * total + begin, width,
+                                    result.begin() + row * width);
+                    }
+                    return result;
+                };
+                mlp.enable_split_projections(true);
+                assign_parameter(
+                    mlp.gate_proj().weight,
+                    tensor_from_f32(backend, {hidden, width}, slice_columns(0)),
+                    trainable);
+                assign_parameter(
+                    mlp.up_proj().weight,
+                    tensor_from_f32(backend, {hidden, width}, slice_columns(width)),
+                    trainable);
+                used.insert(name);
+                report.applied.push_back(name + "->gate_proj+up_proj");
+                ++report.loaded_tensors;
+                if (cfg.mlp_bias) {
+                    const auto bias_name = find(
+                        {p + "mlp.gate_up_proj.bias", p + "mlp.gate_up.bias",
+                         g + "mlp.dense_h_to_4h.bias"},
+                        true);
+                    if (!bias_name.empty()) {
+                        const auto bias = archive.f32(bias_name);
+                        MCL_CHECK(bias.size() == static_cast<std::size_t>(total),
+                                  "fused HF gate/up bias shape mismatch: " + bias_name);
+                        assign_parameter(
+                            mlp.gate_proj().bias,
+                            tensor_from_f32(
+                                backend, {width},
+                                std::vector<float>(bias.begin(), bias.begin() + width)),
+                            trainable);
+                        assign_parameter(
+                            mlp.up_proj().bias,
+                            tensor_from_f32(
+                                backend, {width},
+                                std::vector<float>(bias.begin() + width, bias.end())),
+                            trainable);
+                        used.insert(bias_name);
+                        report.applied.push_back(bias_name + "->gate_proj+up_proj.bias");
+                        ++report.loaded_tensors;
+                    }
+                }
+            } else {
+                mlp.enable_split_projections(false);
+                apply_linear(fused_mlp_aliases, mlp.gate_up_proj, true);
+                if (cfg.mlp_bias) {
+                    apply_linear_bias({p + "mlp.gate_up_proj.bias", p + "mlp.gate_up.bias",
+                                       g + "mlp.dense_h_to_4h.bias"},
+                                      mlp.gate_up_proj, true);
+                }
+            }
+        } else {
+            const auto gate_aliases =
+                std::vector<std::string>{p + "mlp.gate_proj.weight", p + "feed_forward.w1.weight"};
+            const auto up_aliases =
+                std::vector<std::string>{p + "mlp.up_proj.weight", p + "feed_forward.w3.weight"};
+            if (cfg.transformer.split_mlp_projections) {
+                mlp.enable_split_projections(true);
+                apply_linear(gate_aliases, mlp.gate_proj(), true);
+                apply_linear(up_aliases, mlp.up_proj(), true);
+                if (cfg.mlp_bias) {
+                    apply_linear_bias({p + "mlp.gate_proj.bias", p + "feed_forward.w1.bias"},
+                                      mlp.gate_proj(), true);
+                    apply_linear_bias({p + "mlp.up_proj.bias", p + "feed_forward.w3.bias"},
+                                      mlp.up_proj(), true);
+                }
+            } else {
+                const auto gate_name = find(gate_aliases, true);
+                const auto up_name = find(up_aliases, true);
+                if (!gate_name.empty() && !up_name.empty()) {
+                    const int64_t hidden = cfg.transformer.n_embd;
+                    const int64_t width = cfg.transformer.mlp_hidden;
+                    MCL_CHECK(shape_is(archive.info(gate_name), {width, hidden}),
+                              "HF gate_proj weight shape mismatch: " + gate_name);
+                    MCL_CHECK(shape_is(archive.info(up_name), {width, hidden}),
+                              "HF up_proj weight shape mismatch: " + up_name);
+                    const auto gate = transpose_2d(archive.f32(gate_name), width, hidden);
+                    const auto up = transpose_2d(archive.f32(up_name), width, hidden);
+                    std::vector<float> packed(static_cast<std::size_t>(hidden * width * 2));
+                    for (int64_t row = 0; row < hidden; ++row) {
+                        std::copy_n(gate.begin() + row * width, width,
+                                    packed.begin() + row * width * 2);
+                        std::copy_n(up.begin() + row * width, width,
+                                    packed.begin() + row * width * 2 + width);
+                    }
+                    mlp.enable_split_projections(false);
+                    assign_parameter(mlp.gate_up_proj.weight,
+                                     tensor_from_f32(backend, {hidden, width * 2}, packed),
+                                     trainable);
+                    used.insert(gate_name);
+                    used.insert(up_name);
+                    report.applied.push_back(gate_name + "+" + up_name + "->gate_up_proj.weight");
+                    report.loaded_tensors += 2;
+                    if (cfg.mlp_bias) {
+                        const auto gate_bias_name = find(
+                            {p + "mlp.gate_proj.bias", p + "feed_forward.w1.bias"}, true);
+                        const auto up_bias_name = find(
+                            {p + "mlp.up_proj.bias", p + "feed_forward.w3.bias"}, true);
+                        if (!gate_bias_name.empty() && !up_bias_name.empty()) {
+                            const auto gate_bias = archive.f32(gate_bias_name);
+                            const auto up_bias = archive.f32(up_bias_name);
+                            MCL_CHECK(
+                                gate_bias.size() == static_cast<std::size_t>(width) &&
+                                    up_bias.size() == static_cast<std::size_t>(width),
+                                "HF split gate/up bias shape mismatch");
+                            std::vector<float> packed_bias(
+                                static_cast<std::size_t>(width * 2));
+                            std::copy(gate_bias.begin(), gate_bias.end(), packed_bias.begin());
+                            std::copy(up_bias.begin(), up_bias.end(),
+                                      packed_bias.begin() + width);
+                            MCL_CHECK(mlp.gate_up_proj.has_bias(),
+                                      "HF split gate/up biases require initialized fused bias");
+                            assign_parameter(
+                                mlp.gate_up_proj.bias,
+                                tensor_from_f32(backend, {width * 2}, packed_bias),
+                                trainable);
+                            used.insert(gate_bias_name);
+                            used.insert(up_bias_name);
+                            report.applied.push_back(
+                                gate_bias_name + "+" + up_bias_name +
+                                "->gate_up_proj.bias");
+                            report.loaded_tensors += 2;
+                        }
+                    }
+                }
+            }
+        }
+        apply_linear({p + "mlp.down_proj.weight", p + "feed_forward.w2.weight",
+                      g + "mlp.dense_4h_to_h.weight"},
+                     mlp.down_proj, true);
+        if (cfg.mlp_bias) {
+            apply_linear_bias({p + "mlp.down_proj.bias", p + "feed_forward.w2.bias",
+                               g + "mlp.dense_4h_to_h.bias"},
+                              mlp.down_proj, true);
+        }
+    }
+
+    for (const auto& name : archive.names()) {
+        if (used.find(name) == used.end()) report.unexpected.push_back(name);
+    }
+    if (strict && !report.missing.empty()) {
+        MCL_CHECK(false, "missing required dense HF weights; first missing: " + report.missing.front());
+    }
+    return report;
 }
 
 HFWeightLoadReport load_hf_hybrid_transformer_weights(Backend& backend,

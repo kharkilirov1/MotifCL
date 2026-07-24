@@ -21,6 +21,7 @@ set(MOTIFCL_TESTS
     test_modern_transformer
     test_gemma_compat
     test_hf_modern_compat
+    test_hf_dense_families
     test_gguf
     test_microkernel
     test_native_matmul

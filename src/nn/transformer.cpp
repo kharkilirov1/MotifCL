@@ -59,6 +59,268 @@ void check_decode_step_token_shape(const Tensor& token_ids, const char* owner) {
     MCL_CHECK(T == 1, std::string(owner) + " decode_step expects exactly one token per batch");
 }
 
+Tensor rope_scaled_reference(const Tensor& x,
+                             int n_head,
+                             int64_t batch_size,
+                             int64_t seq_len,
+                             float theta,
+                             int rotary_dim,
+                             int64_t token_offset,
+                             bool split_half,
+                             RopeScalingType scaling_type,
+                             float scaling_factor,
+                             int original_context,
+                             float low_freq_factor,
+                             float high_freq_factor,
+                             float beta_fast,
+                             float beta_slow,
+                             const Tensor* positions = nullptr) {
+    MCL_CHECK(x.dtype() == DType::F32 && x.ndim() == 2,
+              "scaled RoPE reference expects flattened f32 [B*T,C]");
+    MCL_CHECK(batch_size > 0 && seq_len > 0 && x.shape()[0] == batch_size * seq_len,
+              "scaled RoPE reference batch/sequence mismatch");
+    MCL_CHECK(n_head > 0 && x.shape()[1] % n_head == 0,
+              "scaled RoPE reference head shape mismatch");
+    const int channels = static_cast<int>(x.shape()[1]);
+    const int head_dim = channels / n_head;
+    int rd = rotary_dim <= 0 ? head_dim : rotary_dim;
+    rd = std::min(rd, head_dim);
+    rd -= rd % 2;
+    MCL_CHECK(rd > 0, "scaled RoPE reference requires a positive even rotary_dim");
+    const int pairs = rd / 2;
+    const float factor = std::max(1e-6f, scaling_factor);
+    const int original = std::max(1, original_context);
+    constexpr float kTwoPi = 6.28318530717958647692f;
+
+    float effective_theta = theta;
+    if (scaling_type == RopeScalingType::Dynamic && rd > 2 && factor > 1.0f) {
+        int64_t active_context = token_offset + seq_len;
+        if (positions) {
+            const auto position_values = positions->to_vector<std::int32_t>();
+            for (const auto position : position_values) {
+                active_context = std::max(active_context, static_cast<int64_t>(position) + 1);
+            }
+        }
+        if (active_context > original) {
+            const float stretch =
+                factor * static_cast<float>(active_context) / static_cast<float>(original) -
+                (factor - 1.0f);
+            effective_theta *= std::pow(
+                stretch, static_cast<float>(rd) / static_cast<float>(rd - 2));
+        }
+    }
+
+    std::vector<float> frequencies(static_cast<std::size_t>(pairs));
+    int yarn_low = 0;
+    int yarn_high = std::max(0, pairs - 1);
+    if (scaling_type == RopeScalingType::YaRN && theta > 1.0f) {
+        auto correction_dim = [&](float rotations) {
+            const float safe_rotations = std::max(rotations, 1e-6f);
+            return static_cast<float>(rd) *
+                   std::log(static_cast<float>(original) / (safe_rotations * kTwoPi)) /
+                   (2.0f * std::log(theta));
+        };
+        yarn_low = std::clamp(static_cast<int>(std::floor(correction_dim(beta_fast))), 0, pairs - 1);
+        yarn_high = std::clamp(static_cast<int>(std::ceil(correction_dim(beta_slow))), 0, pairs - 1);
+        if (yarn_high < yarn_low) std::swap(yarn_low, yarn_high);
+    }
+    for (int i = 0; i < pairs; ++i) {
+        const float exponent = static_cast<float>(2 * i) / static_cast<float>(rd);
+        const float base_frequency = 1.0f / std::pow(effective_theta, exponent);
+        float frequency = base_frequency;
+        if (scaling_type == RopeScalingType::YaRN) {
+            const float denom = std::max(0.001f, static_cast<float>(yarn_high - yarn_low));
+            const float ramp = std::clamp((static_cast<float>(i - yarn_low)) / denom, 0.0f, 1.0f);
+            const float extrapolation_mask = 1.0f - ramp;
+            frequency = (base_frequency / factor) * (1.0f - extrapolation_mask) +
+                        base_frequency * extrapolation_mask;
+        } else if (scaling_type == RopeScalingType::Llama3) {
+            const float wavelength = kTwoPi / base_frequency;
+            const float low_wavelength = static_cast<float>(original) / std::max(low_freq_factor, 1e-6f);
+            const float high_wavelength = static_cast<float>(original) / std::max(high_freq_factor, 1e-6f);
+            if (wavelength > low_wavelength) {
+                frequency = base_frequency / factor;
+            } else if (wavelength >= high_wavelength) {
+                const float smooth =
+                    (static_cast<float>(original) / wavelength - low_freq_factor) /
+                    std::max(1e-6f, high_freq_factor - low_freq_factor);
+                frequency = (1.0f - smooth) * (base_frequency / factor) +
+                            smooth * base_frequency;
+            }
+        }
+        frequencies[static_cast<std::size_t>(i)] = frequency;
+    }
+
+    const auto input = x.to_vector<float>();
+    std::vector<std::int32_t> explicit_positions;
+    if (positions) {
+        MCL_CHECK(positions->dtype() == DType::I32 &&
+                      positions->numel() == batch_size * seq_len,
+                  "scaled RoPE explicit positions shape mismatch");
+        explicit_positions = positions->to_vector<std::int32_t>();
+    }
+    std::vector<float> output(input.size());
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t t = 0; t < seq_len; ++t) {
+            float position = explicit_positions.empty()
+                ? static_cast<float>(token_offset + t)
+                : static_cast<float>(explicit_positions[static_cast<std::size_t>(b * seq_len + t)]);
+            if (scaling_type == RopeScalingType::Linear) position /= factor;
+            const int64_t row = b * seq_len + t;
+            for (int head = 0; head < n_head; ++head) {
+                const std::size_t base =
+                    static_cast<std::size_t>(row * channels + head * head_dim);
+                for (int d = 0; d < head_dim; ++d) {
+                    if (d >= rd) {
+                        output[base + static_cast<std::size_t>(d)] =
+                            input[base + static_cast<std::size_t>(d)];
+                        continue;
+                    }
+                    const int pair = split_half ? (d % pairs) : (d / 2);
+                    const float angle =
+                        position * frequencies[static_cast<std::size_t>(pair)];
+                    const float cs = std::cos(angle);
+                    const float sn = std::sin(angle);
+                    if (split_half) {
+                        if (d < pairs) {
+                            output[base + static_cast<std::size_t>(d)] =
+                                input[base + static_cast<std::size_t>(d)] * cs -
+                                input[base + static_cast<std::size_t>(d + pairs)] * sn;
+                        } else {
+                            output[base + static_cast<std::size_t>(d)] =
+                                input[base + static_cast<std::size_t>(d)] * cs +
+                                input[base + static_cast<std::size_t>(d - pairs)] * sn;
+                        }
+                    } else {
+                        const int even_d = d & ~1;
+                        const float even = input[base + static_cast<std::size_t>(even_d)];
+                        const float odd = input[base + static_cast<std::size_t>(even_d + 1)];
+                        output[base + static_cast<std::size_t>(d)] =
+                            d == even_d ? even * cs - odd * sn : even * sn + odd * cs;
+                    }
+                }
+            }
+        }
+    }
+    return Tensor::from_cpu(x.backend(), x.shape(), DType::F32, output.data());
+}
+
+Tensor softcap_reference(const Tensor& x, float cap) {
+    if (cap <= 0.0f) return x;
+    MCL_CHECK(x.dtype() == DType::F32, "softcap reference expects f32 logits");
+    auto values = x.to_vector<float>();
+    for (auto& value : values) value = cap * std::tanh(value / cap);
+    return Tensor::from_cpu(x.backend(), x.shape(), DType::F32, values.data());
+}
+
+Tensor grouped_query_attention_softcap_reference(const Tensor& q,
+                                                 const Tensor& k,
+                                                 const Tensor& v,
+                                                 int n_head,
+                                                 int n_kv_head,
+                                                 bool causal,
+                                                 int64_t batch_size,
+                                                 int64_t query_len,
+                                                 int64_t key_len,
+                                                 int64_t query_offset,
+                                                 float scale_override,
+                                                 float softcap,
+                                                 int sliding_window) {
+    MCL_CHECK(q.dtype() == DType::F32 && k.dtype() == DType::F32 && v.dtype() == DType::F32,
+              "attention softcap reference requires f32 q/k/v tensors");
+    MCL_CHECK(q.ndim() == 2 && k.ndim() == 2 && v.ndim() == 2,
+              "attention softcap reference expects flattened rank-2 q/k/v tensors");
+    MCL_CHECK(batch_size > 0 && query_len > 0 && key_len > 0 &&
+                  q.shape()[0] == batch_size * query_len,
+              "attention softcap reference received invalid batch/query dimensions");
+    MCL_CHECK(n_head > 0 && n_kv_head > 0 && n_head % n_kv_head == 0,
+              "attention softcap reference requires query heads divisible by KV heads");
+    MCL_CHECK(q.shape()[1] % n_head == 0 && k.shape()[1] % n_kv_head == 0 &&
+                  v.shape()[1] % n_kv_head == 0,
+              "attention softcap reference received invalid head dimensions");
+    const int64_t key_storage_len = k.shape()[0] / batch_size;
+    MCL_CHECK(k.shape()[0] == batch_size * key_storage_len &&
+                  v.shape()[0] == batch_size * key_storage_len && key_len <= key_storage_len,
+              "attention softcap reference received invalid key/value storage dimensions");
+
+    const int64_t head_dim = q.shape()[1] / n_head;
+    const int64_t v_head_dim = v.shape()[1] / n_kv_head;
+    MCL_CHECK(k.shape()[1] / n_kv_head == head_dim,
+              "attention softcap reference requires matching query/key head dimensions");
+    const float scale = scale_override > 0.0f
+        ? scale_override
+        : 1.0f / std::sqrt(static_cast<float>(head_dim));
+    const int heads_per_kv = n_head / n_kv_head;
+    const auto q_values = q.to_vector<float>();
+    const auto k_values = k.to_vector<float>();
+    const auto v_values = v.to_vector<float>();
+    std::vector<float> output(static_cast<std::size_t>(
+        batch_size * query_len * static_cast<int64_t>(n_head) * v_head_dim), 0.0f);
+    std::vector<float> scores(static_cast<std::size_t>(key_len));
+
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t qi = 0; qi < query_len; ++qi) {
+            const int64_t query_position = query_offset + qi;
+            for (int h = 0; h < n_head; ++h) {
+                const int kv_head = h / heads_per_kv;
+                float max_score = -std::numeric_limits<float>::infinity();
+                for (int64_t ki = 0; ki < key_len; ++ki) {
+                    const bool outside_causal = causal && ki > query_position;
+                    const bool outside_window =
+                        sliding_window > 0 && ki + sliding_window <= query_position;
+                    if (outside_causal || outside_window) {
+                        scores[static_cast<std::size_t>(ki)] =
+                            -std::numeric_limits<float>::infinity();
+                        continue;
+                    }
+                    float dot = 0.0f;
+                    const int64_t q_base =
+                        ((b * query_len + qi) * n_head + h) * head_dim;
+                    const int64_t k_base =
+                        ((b * key_storage_len + ki) * n_kv_head + kv_head) * head_dim;
+                    for (int64_t d = 0; d < head_dim; ++d) {
+                        dot += q_values[static_cast<std::size_t>(q_base + d)] *
+                               k_values[static_cast<std::size_t>(k_base + d)];
+                    }
+                    const float scaled = dot * scale;
+                    const float score = softcap * std::tanh(scaled / softcap);
+                    scores[static_cast<std::size_t>(ki)] = score;
+                    max_score = std::max(max_score, score);
+                }
+                float denominator = 0.0f;
+                for (int64_t ki = 0; ki < key_len; ++ki) {
+                    auto& score = scores[static_cast<std::size_t>(ki)];
+                    if (std::isfinite(score)) {
+                        score = std::exp(score - max_score);
+                        denominator += score;
+                    } else {
+                        score = 0.0f;
+                    }
+                }
+                MCL_CHECK(denominator > 0.0f,
+                          "attention softcap reference produced an empty attention row");
+                const int64_t out_base =
+                    ((b * query_len + qi) * n_head + h) * v_head_dim;
+                for (int64_t ki = 0; ki < key_len; ++ki) {
+                    const float probability =
+                        scores[static_cast<std::size_t>(ki)] / denominator;
+                    const int64_t v_base =
+                        ((b * key_storage_len + ki) * n_kv_head + kv_head) * v_head_dim;
+                    for (int64_t d = 0; d < v_head_dim; ++d) {
+                        output[static_cast<std::size_t>(out_base + d)] +=
+                            probability * v_values[static_cast<std::size_t>(v_base + d)];
+                    }
+                }
+            }
+        }
+    }
+    return Tensor::from_cpu(q.backend(),
+                            {batch_size * query_len,
+                             static_cast<int64_t>(n_head) * v_head_dim},
+                            DType::F32,
+                            output.data());
+}
+
 } // namespace
 
 Tensor MLP::forward(const Tensor& x) {
@@ -205,6 +467,11 @@ TransformerConfig normalize_config(TransformerConfig cfg) {
     MCL_CHECK(cfg.dropout >= 0.0f && cfg.dropout < 1.0f, "TransformerConfig dropout must be in [0, 1)");
     MCL_CHECK(cfg.rms_norm_eps > 0.0f, "TransformerConfig rms_norm_eps must be positive");
     MCL_CHECK(cfg.attention_scale >= 0.0f, "TransformerConfig attention_scale must be non-negative");
+    MCL_CHECK(cfg.attention_softcap >= 0.0f, "TransformerConfig attention_softcap must be non-negative");
+    MCL_CHECK(cfg.final_logit_softcap >= 0.0f, "TransformerConfig final_logit_softcap must be non-negative");
+    MCL_CHECK(cfg.rope_scaling_factor > 0.0f, "TransformerConfig rope_scaling_factor must be positive");
+    MCL_CHECK(cfg.rope_low_freq_factor > 0.0f && cfg.rope_high_freq_factor > 0.0f,
+              "TransformerConfig rope frequency factors must be positive");
     MCL_CHECK(cfg.sliding_window >= 0, "TransformerConfig sliding_window must be non-negative");
     MCL_CHECK(cfg.embedding_scale > 0.0f, "TransformerConfig embedding_scale must be positive");
     if (!cfg.layer_kv_shared_sources.empty()) {
@@ -394,7 +661,7 @@ bool can_use_fused_swiglu_mlp_residual(const ModernMLP& mlp) {
 }
 
 Tensor fused_or_eager_mlp_residual(const Tensor& h, RMSNorm& norm, ModernMLP& mlp) {
-    if (can_use_fused_swiglu_mlp_residual(mlp)) {
+    if (!norm.is_layer_norm() && can_use_fused_swiglu_mlp_residual(mlp)) {
         return motifcl::fused_swiglu_mlp_rmsnorm_residual(
             h,
             norm.weight.data,
@@ -914,7 +1181,8 @@ bool can_use_fused_decode_projection_pair_rmsnorm(const Tensor& x,
                                                   const Linear& b) {
     if (!env_enabled("MOTIFCL_ENABLE_FUSED_RMSNORM_DECODE_PAIR") ||
         env_enabled("MOTIFCL_DISABLE_FUSED_RMSNORM_DECODE_PAIR") ||
-        autograd::is_enabled()) return false;
+        autograd::is_enabled() ||
+        norm.is_layer_norm()) return false;
     if (!can_use_fused_decode_projection_pair(x, a, b)) return false;
     if (!norm.weight.data.valid() || norm.weight.data.dtype() != DType::F32 || norm.weight.data.ndim() != 1) return false;
     if (norm.weight.data.shape()[0] != x.shape()[1]) return false;
@@ -1151,7 +1419,38 @@ Tensor activation_mul(const Tensor& x, const Tensor& y, const char* kernel_name)
     return out;
 }
 
-Tensor gelu_mul_fast(const Tensor& x, const Tensor& y) {
+Tensor gelu_mul_fast(const Tensor& x,
+                     const Tensor& y,
+                     TransformerActivation activation = TransformerActivation::GELUTanh) {
+    if (activation == TransformerActivation::GELU) {
+        MCL_CHECK(x.dtype() == DType::F32 && y.dtype() == DType::F32 &&
+                      x.shape() == y.shape() && x.backend_ptr() == y.backend_ptr(),
+                  "exact GELU multiply expects same-shape f32 tensors on one backend");
+        const auto xv = x.to_vector<float>();
+        const auto yv = y.to_vector<float>();
+        std::vector<float> out(xv.size());
+        constexpr float kInvSqrt2 = 0.7071067811865475f;
+        for (std::size_t i = 0; i < xv.size(); ++i) {
+            const float gelu =
+                0.5f * xv[i] * (1.0f + std::erf(xv[i] * kInvSqrt2));
+            out[i] = gelu * yv[i];
+        }
+        return Tensor::from_cpu(x.backend(), x.shape(), DType::F32, out.data());
+    }
+    if (x.backend().is_vulkan()) {
+        const auto xv = x.to_vector<float>();
+        const auto yv = y.to_vector<float>();
+        std::vector<float> out(xv.size());
+        constexpr float kGeluScale = 0.7978845608028654f;
+        for (std::size_t i = 0; i < xv.size(); ++i) {
+            const float value = xv[i];
+            const float gelu =
+                0.5f * value *
+                (1.0f + std::tanh(kGeluScale * (value + 0.044715f * value * value * value)));
+            out[i] = gelu * yv[i];
+        }
+        return Tensor::from_cpu(x.backend(), x.shape(), DType::F32, out.data());
+    }
     if (autograd::is_enabled()) return motifcl::mul(motifcl::gelu(x), y);
     return activation_mul(x, y, "gelu_mul_f32");
 }
@@ -1509,7 +1808,10 @@ ModernMLP::ModernMLP(Backend& backend, int n_embd, int hidden, bool swiglu_enabl
       dropout_p(dropout),
       gate_proj_(backend, n_embd, hidden, use_bias, skip_weight_init),
       up_proj_(backend, n_embd, hidden, use_bias, skip_weight_init),
-      use_split_projections_(false) {}
+      use_split_projections_(false) {
+    activation = swiglu_enabled ? TransformerActivation::SiLU
+                                : TransformerActivation::GELUTanh;
+}
 
 Tensor ModernMLP::forward(const Tensor& x) {
     Tensor hidden;
@@ -1535,7 +1837,8 @@ Tensor ModernMLP::forward(const Tensor& x) {
         if (use_swiglu && dropout_p == 0.0f && can_use_fused_silu_down_q4_0_col(gate, up, down_proj)) {
             return fused_silu_down_q4_0_col(gate, up, down_proj);
         }
-        hidden = use_swiglu ? silu_mul_fast(gate, up) : gelu_mul_fast(gate, up);
+        hidden = use_swiglu ? silu_mul_fast(gate, up)
+                            : gelu_mul_fast(gate, up, activation);
     } else {
         if (can_use_fused_packed_swiglu_q4_0_decode(x, gate_up_proj, down_proj.in_features(),
                                                     use_swiglu, dropout_p)) {
@@ -1573,7 +1876,9 @@ Tensor mlp_forward_rmsnorm_decode(const Tensor& h, RMSNorm& norm, ModernMLP& mlp
         if (mlp.use_swiglu && mlp.dropout_p == 0.0f && can_use_fused_silu_down_q4_0_col(gate, up, mlp.down_proj)) {
             out = fused_silu_down_q4_0_col(gate, up, mlp.down_proj);
         } else {
-            Tensor hidden = mlp.use_swiglu ? silu_mul_fast(gate, up) : gelu_mul_fast(gate, up);
+            Tensor hidden = mlp.use_swiglu
+                ? silu_mul_fast(gate, up)
+                : gelu_mul_fast(gate, up, mlp.activation);
             out = mlp.down_proj.forward(hidden);
         }
         return mlp.dropout_p > 0.0f ? motifcl::dropout(out, mlp.dropout_p, true) : out;
@@ -1718,7 +2023,7 @@ ModernSelfAttention::ModernSelfAttention(Backend& backend, const TransformerConf
       o_proj_(backend,
               normalize_config(raw_config).n_head * normalize_config(raw_config).v_head_dim,
               normalize_config(raw_config).n_embd,
-              normalize_config(raw_config).use_qkv_bias,
+              normalize_config(raw_config).use_attention_output_bias,
               normalize_config(raw_config).skip_weight_init),
       q_norm_(backend, normalize_config(raw_config).head_dim, normalize_config(raw_config).rms_norm_eps),
       k_norm_(backend, normalize_config(raw_config).head_dim, normalize_config(raw_config).rms_norm_eps),
@@ -1735,7 +2040,15 @@ ModernSelfAttention::ModernSelfAttention(Backend& backend, const TransformerConf
     use_rope_ = cfg.use_rope;
     rope_split_half_ = cfg.rope_split_half;
     rope_theta_ = cfg.rope_theta;
+    rope_scaling_type_ = cfg.rope_scaling_type;
+    rope_scaling_factor_ = cfg.rope_scaling_factor;
+    rope_original_context_ = cfg.rope_original_context;
+    rope_low_freq_factor_ = cfg.rope_low_freq_factor;
+    rope_high_freq_factor_ = cfg.rope_high_freq_factor;
+    rope_beta_fast_ = cfg.rope_beta_fast;
+    rope_beta_slow_ = cfg.rope_beta_slow;
     attention_scale_ = cfg.attention_scale;
+    attention_softcap_ = cfg.attention_softcap;
     rotary_dim_ = cfg.rotary_dim;
     dropout_p_ = cfg.dropout;
     attention_window_ = cfg.sliding_window;
@@ -1764,6 +2077,12 @@ QKV ModernSelfAttention::project_qkv(const Tensor& x) {
 Tensor ModernSelfAttention::apply_rope(const Tensor& x, int n_head, int64_t batch_size,
                                        int64_t seq_len, int64_t token_offset) const {
     if (!use_rope_) return x;
+    if (rope_scaling_type_ != RopeScalingType::None) {
+        return rope_scaled_reference(
+            x, n_head, batch_size, seq_len, rope_theta_, rotary_dim_, token_offset,
+            rope_split_half_, rope_scaling_type_, rope_scaling_factor_, rope_original_context_,
+            rope_low_freq_factor_, rope_high_freq_factor_, rope_beta_fast_, rope_beta_slow_);
+    }
     return rope_split_half_
         ? motifcl::rope_split_half(x, n_head, batch_size, seq_len, rope_theta_, rotary_dim_, token_offset)
         : motifcl::rope(x, n_head, batch_size, seq_len, rope_theta_, rotary_dim_, token_offset);
@@ -1773,6 +2092,13 @@ Tensor ModernSelfAttention::apply_rope_positions(const Tensor& x, const Tensor& 
                                                  int n_head, int64_t batch_size,
                                                  int64_t seq_len) const {
     if (!use_rope_) return x;
+    if (rope_scaling_type_ != RopeScalingType::None) {
+        return rope_scaled_reference(
+            x, n_head, batch_size, seq_len, rope_theta_, rotary_dim_, 0,
+            rope_split_half_, rope_scaling_type_, rope_scaling_factor_, rope_original_context_,
+            rope_low_freq_factor_, rope_high_freq_factor_, rope_beta_fast_, rope_beta_slow_,
+            &positions);
+    }
     return rope_split_half_
         ? motifcl::rope_positions_split_half(x, positions, n_head, batch_size, seq_len, rope_theta_, rotary_dim_)
         : motifcl::rope_positions(x, positions, n_head, batch_size, seq_len, rope_theta_, rotary_dim_);
@@ -2143,7 +2469,9 @@ Tensor fused_rope_cache_append_decode(const Tensor& q,
 }
 
 bool can_use_fused_rmsnorm_residual_add(const Tensor& residual, const Tensor& x, const RMSNorm& norm) {
-    if (env_enabled("MOTIFCL_DISABLE_FUSED_RMSNORM_RESIDUAL_ADD") || autograd::is_enabled()) return false;
+    if (env_enabled("MOTIFCL_DISABLE_FUSED_RMSNORM_RESIDUAL_ADD") ||
+        autograd::is_enabled() ||
+        norm.is_layer_norm()) return false;
     if (!residual.valid() || !x.valid() || !norm.weight.data.valid()) return false;
     if (residual.dtype() != DType::F32 || x.dtype() != DType::F32 || norm.weight.data.dtype() != DType::F32) return false;
     if (residual.ndim() != 2 || x.ndim() != 2 || norm.weight.data.ndim() != 1) return false;
@@ -2223,7 +2551,7 @@ Tensor ModernSelfAttention::forward(const Tensor& x, int64_t batch_size, int64_t
     apply_v_norm_if_enabled(*this, split.v);
     Tensor q;
     Tensor k;
-    if (use_qk_norm_ && !rope_split_half_ &&
+    if (use_qk_norm_ && !rope_split_half_ && rope_scaling_type_ == RopeScalingType::None &&
         can_use_fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
                                           head_dim_, batch_size, seq_len, use_rope_, rotary_dim_)) {
         auto fused = fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
@@ -2235,11 +2563,17 @@ Tensor ModernSelfAttention::forward(const Tensor& x, int64_t batch_size, int64_t
         q = apply_rope(split.q, n_head_, batch_size, seq_len, 0);
         k = apply_rope(split.k, n_kv_head_, batch_size, seq_len, 0);
     }
-    auto context = attention_window_ > 0
-        ? motifcl::grouped_query_attention_windowed(q, k, split.v, n_head_, n_kv_head_, attention_window_,
-                                                    causal, batch_size, seq_len, seq_len, 0, attention_scale_)
-        : motifcl::grouped_query_attention(q, k, split.v, n_head_, n_kv_head_, causal, batch_size, seq_len, seq_len, 0,
-                                           attention_scale_);
+    auto context = attention_softcap_ > 0.0f
+        ? grouped_query_attention_softcap_reference(
+              q, k, split.v, n_head_, n_kv_head_, causal, batch_size, seq_len, seq_len, 0,
+              attention_scale_, attention_softcap_, attention_window_)
+        : attention_window_ > 0
+              ? motifcl::grouped_query_attention_windowed(
+                    q, k, split.v, n_head_, n_kv_head_, attention_window_, causal, batch_size,
+                    seq_len, seq_len, 0, attention_scale_)
+              : motifcl::grouped_query_attention(
+                    q, k, split.v, n_head_, n_kv_head_, causal, batch_size, seq_len, seq_len, 0,
+                    attention_scale_);
     auto out = o_proj_.forward(context);
     return dropout_p_ > 0.0f ? motifcl::dropout(out, dropout_p_, true) : out;
 }
@@ -2250,7 +2584,7 @@ Tensor ModernSelfAttention::forward_masked(const Tensor& x, const Tensor& mask, 
     apply_v_norm_if_enabled(*this, split.v);
     Tensor q;
     Tensor k;
-    if (use_qk_norm_ && !rope_split_half_ &&
+    if (use_qk_norm_ && !rope_split_half_ && rope_scaling_type_ == RopeScalingType::None &&
         can_use_fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
                                           head_dim_, batch_size, seq_len, use_rope_, rotary_dim_)) {
         auto fused = fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
@@ -2278,6 +2612,7 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, KVCache& cache, 
     const int64_t offset = cache.length;
     Tensor q;
     if (!use_v_norm_ && !use_qk_norm_ && !rope_split_half_ &&
+        rope_scaling_type_ == RopeScalingType::None &&
         can_use_fused_rope_cache_append_decode(split.q, split.k, split.v, cache.k, cache.v,
                                                n_head_, n_kv_head_, head_dim_,
                                                batch_size, seq_len, cache.max_seq_len, offset,
@@ -2287,6 +2622,7 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, KVCache& cache, 
                                            batch_size, cache.max_seq_len, offset,
                                            rope_theta_, rotary_dim_);
     } else if (!use_v_norm_ && use_qk_norm_ && !rope_split_half_ &&
+        rope_scaling_type_ == RopeScalingType::None &&
         can_use_fused_qk_norm_rope_cache_append_decode(split.q, split.k, split.v, q_norm_, k_norm_,
                                                        cache.k, cache.v, n_head_, n_kv_head_, head_dim_,
                                                        batch_size, seq_len, cache.max_seq_len, offset,
@@ -2297,7 +2633,7 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, KVCache& cache, 
                                                    rope_theta_, rotary_dim_);
     } else {
         Tensor k_new;
-        if (use_qk_norm_ && !rope_split_half_ &&
+        if (use_qk_norm_ && !rope_split_half_ && rope_scaling_type_ == RopeScalingType::None &&
             can_use_fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
                                               head_dim_, batch_size, seq_len, use_rope_, rotary_dim_)) {
             auto fused = fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
@@ -2313,11 +2649,17 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, KVCache& cache, 
     }
     cache.length += seq_len;
     const int64_t key_len = cache.length;
-    auto context = attention_window_ > 0
-        ? motifcl::grouped_query_attention_windowed(q, cache.k, cache.v, n_head_, n_kv_head_, attention_window_, true,
-                                                    batch_size, seq_len, key_len, offset, attention_scale_)
-        : motifcl::grouped_query_attention(q, cache.k, cache.v, n_head_, n_kv_head_, true,
-                                           batch_size, seq_len, key_len, offset, attention_scale_);
+    auto context = attention_softcap_ > 0.0f
+        ? grouped_query_attention_softcap_reference(
+              q, cache.k, cache.v, n_head_, n_kv_head_, true, batch_size, seq_len, key_len,
+              offset, attention_scale_, attention_softcap_, attention_window_)
+        : attention_window_ > 0
+              ? motifcl::grouped_query_attention_windowed(
+                    q, cache.k, cache.v, n_head_, n_kv_head_, attention_window_, true,
+                    batch_size, seq_len, key_len, offset, attention_scale_)
+              : motifcl::grouped_query_attention(
+                    q, cache.k, cache.v, n_head_, n_kv_head_, true, batch_size, seq_len,
+                    key_len, offset, attention_scale_);
     return o_proj_.forward(context);
 }
 
@@ -2335,12 +2677,18 @@ Tensor ModernSelfAttention::forward_with_shared_kv_cache(const Tensor& x,
     apply_q_norm_if_enabled(*this, q);
     const int64_t offset = shared_cache.length - seq_len;
     q = apply_rope(q, n_head_, batch_size, seq_len, offset);
-    auto context = attention_window_ > 0
-        ? motifcl::grouped_query_attention_windowed(q, shared_cache.k, shared_cache.v, n_head_, n_kv_head_,
-                                                    attention_window_, true, batch_size, seq_len,
-                                                    shared_cache.length, offset, attention_scale_)
-        : motifcl::grouped_query_attention(q, shared_cache.k, shared_cache.v, n_head_, n_kv_head_, true,
-                                           batch_size, seq_len, shared_cache.length, offset, attention_scale_);
+    auto context = attention_softcap_ > 0.0f
+        ? grouped_query_attention_softcap_reference(
+              q, shared_cache.k, shared_cache.v, n_head_, n_kv_head_, true, batch_size,
+              seq_len, shared_cache.length, offset, attention_scale_, attention_softcap_,
+              attention_window_)
+        : attention_window_ > 0
+              ? motifcl::grouped_query_attention_windowed(
+                    q, shared_cache.k, shared_cache.v, n_head_, n_kv_head_, attention_window_,
+                    true, batch_size, seq_len, shared_cache.length, offset, attention_scale_)
+              : motifcl::grouped_query_attention(
+                    q, shared_cache.k, shared_cache.v, n_head_, n_kv_head_, true, batch_size,
+                    seq_len, shared_cache.length, offset, attention_scale_);
     return o_proj_.forward(context);
 }
 
@@ -2355,7 +2703,7 @@ Tensor ModernSelfAttention::forward_with_cache_masked(const Tensor& x, const Ten
     const int64_t offset = cache.length;
     Tensor q;
     Tensor k_new;
-    if (use_qk_norm_ && !rope_split_half_ &&
+    if (use_qk_norm_ && !rope_split_half_ && rope_scaling_type_ == RopeScalingType::None &&
         can_use_fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
                                           head_dim_, batch_size, seq_len, use_rope_, rotary_dim_)) {
         auto fused = fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
@@ -2407,7 +2755,7 @@ Tensor ModernSelfAttention::forward_with_cache(const Tensor& x, PagedKVCache& ca
     const int64_t query_abs_start = cache.tokens_seen;
     Tensor q;
     Tensor k_new;
-    if (use_qk_norm_ && !rope_split_half_ &&
+    if (use_qk_norm_ && !rope_split_half_ && rope_scaling_type_ == RopeScalingType::None &&
         can_use_fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
                                           head_dim_, batch_size, seq_len, use_rope_, rotary_dim_)) {
         auto fused = fused_qk_norm_rope_decode(split.q, split.k, q_norm_, k_norm_, n_head_, n_kv_head_,
@@ -2531,8 +2879,10 @@ HybridTransformerBlock::HybridTransformerBlock(Backend& backend,
                                                const TransformerConfig& raw_config,
                                                const HybridLayerConfig& raw_layer_config)
     : layer_config(raw_layer_config),
-      norm1_(backend, normalize_config(raw_config).n_embd),
-      norm2_(backend, normalize_config(raw_config).n_embd) {
+      norm1_(backend, normalize_config(raw_config).n_embd, normalize_config(raw_config).rms_norm_eps,
+             normalize_config(raw_config).use_layer_norm),
+      norm2_(backend, normalize_config(raw_config).n_embd, normalize_config(raw_config).rms_norm_eps,
+             normalize_config(raw_config).use_layer_norm) {
     auto cfg = normalize_config(raw_config);
     causal_ = cfg.causal;
     cfg.split_qkv_projections = true;
@@ -2562,7 +2912,8 @@ HybridTransformerBlock::HybridTransformerBlock(Backend& backend,
         moe_ = std::make_unique<MoEFFN>(backend, cfg.n_embd, cfg.mlp_hidden, experts, top_k);
     } else {
         mlp_ = std::make_unique<ModernMLP>(backend, cfg.n_embd, cfg.mlp_hidden,
-                                           cfg.use_swiglu, cfg.use_qkv_bias, cfg.dropout);
+                                           cfg.use_swiglu, cfg.use_mlp_bias, cfg.dropout);
+        mlp_->activation = cfg.activation;
         mlp_->enable_split_projections(true);
     }
 }
@@ -2648,14 +2999,18 @@ bool HybridTransformerBlock::uses_state_cache() const {
 }
 
 ModernTransformerBlock::ModernTransformerBlock(Backend& backend, const TransformerConfig& raw_config)
-    : norm1_(backend, normalize_config(raw_config).n_embd),
+    : norm1_(backend, normalize_config(raw_config).n_embd, normalize_config(raw_config).rms_norm_eps,
+             normalize_config(raw_config).use_layer_norm),
       attn_(backend, normalize_config(raw_config)),
-      norm2_(backend, normalize_config(raw_config).n_embd),
-      post_attention_norm_(backend, normalize_config(raw_config).n_embd, normalize_config(raw_config).rms_norm_eps),
-      post_ffw_norm_(backend, normalize_config(raw_config).n_embd, normalize_config(raw_config).rms_norm_eps),
+      norm2_(backend, normalize_config(raw_config).n_embd, normalize_config(raw_config).rms_norm_eps,
+             normalize_config(raw_config).use_layer_norm),
+      post_attention_norm_(backend, normalize_config(raw_config).n_embd, normalize_config(raw_config).rms_norm_eps,
+                           normalize_config(raw_config).use_layer_norm),
+      post_ffw_norm_(backend, normalize_config(raw_config).n_embd, normalize_config(raw_config).rms_norm_eps,
+                     normalize_config(raw_config).use_layer_norm),
       layer_output_scale_(Tensor::ones(backend, {1})),
       mlp_(backend, normalize_config(raw_config).n_embd, normalize_config(raw_config).mlp_hidden,
-           normalize_config(raw_config).use_swiglu, normalize_config(raw_config).use_qkv_bias,
+           normalize_config(raw_config).use_swiglu, normalize_config(raw_config).use_mlp_bias,
            normalize_config(raw_config).dropout, normalize_config(raw_config).skip_weight_init) {
     const auto cfg = normalize_config(raw_config);
     dropout_p_ = cfg.dropout;
@@ -2664,6 +3019,8 @@ ModernTransformerBlock::ModernTransformerBlock(Backend& backend, const Transform
     use_post_ffw_norm_ = cfg.use_post_ffw_norm;
     use_layer_output_scale_ = cfg.use_layer_output_scale;
     use_per_layer_input_ = cfg.use_per_layer_inputs;
+    norm_first_ = cfg.norm_first;
+    mlp_.activation = cfg.activation;
     if (use_per_layer_input_) {
         per_layer_input_gate_ = std::make_unique<Linear>(backend, cfg.n_embd, cfg.per_layer_input_dim,
                                                          false, cfg.skip_weight_init);
@@ -2680,14 +3037,14 @@ Tensor ModernTransformerBlock::forward(const Tensor& x) {
 }
 
 Tensor ModernTransformerBlock::forward(const Tensor& x, int64_t batch_size, int64_t seq_len, const Tensor* per_layer_input) {
-    auto attn_out = attn_.forward(norm1_.forward(x), batch_size, seq_len, causal_);
+    auto attn_out = attn_.forward(norm_first_ ? norm1_.forward(x) : x, batch_size, seq_len, causal_);
     auto h = apply_attention_residual(x, attn_out);
     return finish_after_attention(h, per_layer_input);
 }
 
 Tensor ModernTransformerBlock::forward_masked(const Tensor& x, const Tensor& mask, int64_t batch_size, int64_t seq_len,
                                               const Tensor* per_layer_input) {
-    auto attn_out = attn_.forward_masked(norm1_.forward(x), mask, batch_size, seq_len, causal_);
+    auto attn_out = attn_.forward_masked(norm_first_ ? norm1_.forward(x) : x, mask, batch_size, seq_len, causal_);
     auto h = apply_attention_residual(x, attn_out);
     return finish_after_attention(h, per_layer_input);
 }
@@ -2705,7 +3062,7 @@ Tensor ModernTransformerBlock::forward_with_cache_eager(const Tensor& x,
                                                         int64_t batch_size,
                                                         int64_t seq_len,
                                                         const Tensor* per_layer_input) {
-    auto attn_out = attn_.forward_with_cache(norm1_.forward(x), cache, batch_size, seq_len);
+    auto attn_out = attn_.forward_with_cache(norm_first_ ? norm1_.forward(x) : x, cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
     return finish_after_attention(h, per_layer_input);
 }
@@ -2862,7 +3219,7 @@ Tensor ModernTransformerBlock::forward_with_shared_kv_cache(const Tensor& x,
                                                             int64_t batch_size,
                                                             int64_t seq_len,
                                                             const Tensor* per_layer_input) {
-    auto attn_out = attn_.forward_with_shared_kv_cache(norm1_.forward(x), shared_cache, batch_size, seq_len);
+    auto attn_out = attn_.forward_with_shared_kv_cache(norm_first_ ? norm1_.forward(x) : x, shared_cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
     return finish_after_attention(h, per_layer_input);
 }
@@ -2885,7 +3242,7 @@ Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input_eager(c
                                                                                const Tensor* packed_per_layer_input,
                                                                                int layer_index,
                                                                                int64_t token_count) {
-    auto attn_out = attn_.forward_with_cache(norm1_.forward(x), cache, batch_size, seq_len);
+    auto attn_out = attn_.forward_with_cache(norm_first_ ? norm1_.forward(x) : x, cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
     return decode_tail_after_attention_packed_replay(h, packed_per_layer_input, layer_index, token_count);
 }
@@ -3070,7 +3427,7 @@ Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input_replay(
 Tensor ModernTransformerBlock::forward_with_cache_masked(const Tensor& x, const Tensor& mask, KVCache& cache,
                                                          int64_t batch_size, int64_t seq_len,
                                                          const Tensor* per_layer_input) {
-    auto attn_out = attn_.forward_with_cache_masked(norm1_.forward(x), mask, cache, batch_size, seq_len);
+    auto attn_out = attn_.forward_with_cache_masked(norm_first_ ? norm1_.forward(x) : x, mask, cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
     return finish_after_attention(h, per_layer_input);
 }
@@ -3079,7 +3436,7 @@ Tensor ModernTransformerBlock::forward_with_cache_positions_masked(const Tensor&
                                                                    KVCache& cache, int64_t batch_size, int64_t seq_len,
                                                                    int64_t cache_length_after, bool causal,
                                                                    const Tensor* per_layer_input) {
-    auto attn_out = attn_.forward_with_cache_positions_masked(norm1_.forward(x), positions, mask, cache,
+    auto attn_out = attn_.forward_with_cache_positions_masked(norm_first_ ? norm1_.forward(x) : x, positions, mask, cache,
                                                               batch_size, seq_len, cache_length_after, causal);
     auto h = apply_attention_residual(x, attn_out);
     return finish_after_attention(h, per_layer_input);
@@ -3087,7 +3444,7 @@ Tensor ModernTransformerBlock::forward_with_cache_positions_masked(const Tensor&
 
 Tensor ModernTransformerBlock::forward_with_cache(const Tensor& x, PagedKVCache& cache, int64_t batch_size, int64_t seq_len,
                                                   const Tensor* per_layer_input) {
-    auto attn_out = attn_.forward_with_cache(norm1_.forward(x), cache, batch_size, seq_len);
+    auto attn_out = attn_.forward_with_cache(norm_first_ ? norm1_.forward(x) : x, cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
     return finish_after_attention(h, per_layer_input);
 }
@@ -3099,12 +3456,15 @@ Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input(const T
                                                                          const Tensor* packed_per_layer_input,
                                                                          int layer_index,
                                                                          int64_t token_count) {
-    auto attn_out = attn_.forward_with_cache(norm1_.forward(x), cache, batch_size, seq_len);
+    auto attn_out = attn_.forward_with_cache(norm_first_ ? norm1_.forward(x) : x, cache, batch_size, seq_len);
     auto h = apply_attention_residual(x, attn_out);
     return decode_tail_after_attention_packed_replay(h, packed_per_layer_input, layer_index, token_count);
 }
 
 Tensor ModernTransformerBlock::decode_tail_after_attention(const Tensor& h) {
+    if (!norm_first_) {
+        return apply_layer_output_scale(norm2_.forward(apply_ffn_residual(h, mlp_.forward(h))));
+    }
     Tensor out = (!use_post_ffw_norm_ && !use_per_layer_input_ && !use_layer_output_scale_)
         ? fused_or_eager_mlp_residual(h, norm2_, mlp_)
         : apply_ffn_residual(h, mlp_forward_rmsnorm_decode(h, norm2_, mlp_));
@@ -3112,6 +3472,7 @@ Tensor ModernTransformerBlock::decode_tail_after_attention(const Tensor& h) {
 }
 
 Tensor ModernTransformerBlock::decode_tail_after_attention_replay(const Tensor& h) {
+    if (!norm_first_) return decode_tail_after_attention(h);
     const bool eligible =
         decode_tail_graph_replay_enabled() &&
         !autograd::is_enabled() &&
@@ -3361,7 +3722,8 @@ Tensor ModernTransformerBlock::apply_attention_residual(const Tensor& x, const T
         return fused_rmsnorm_residual_add(x, attn_out, post_attention_norm_);
     }
     const auto y = use_post_attention_norm_ ? post_attention_norm_.forward(attn_out) : attn_out;
-    return add(x, y);
+    auto h = add(x, y);
+    return norm_first_ ? h : norm1_.forward(h);
 }
 
 Tensor ModernTransformerBlock::apply_ffn_residual(const Tensor& h, const Tensor& mlp_out) {
@@ -3373,6 +3735,11 @@ Tensor ModernTransformerBlock::apply_ffn_residual(const Tensor& h, const Tensor&
 }
 
 Tensor ModernTransformerBlock::finish_after_attention(const Tensor& h, const Tensor* per_layer_input) {
+    if (!norm_first_) {
+        auto out = norm2_.forward(apply_ffn_residual(h, mlp_.forward(h)));
+        out = apply_per_layer_input(out, per_layer_input);
+        return apply_layer_output_scale(out);
+    }
     if (!use_per_layer_input_ && per_layer_input == nullptr) {
         return decode_tail_after_attention_replay(h);
     }
@@ -3543,7 +3910,8 @@ ModernGPTModel::ModernGPTModel(Backend& backend, const TransformerConfig& raw_co
                                         normalize_config(raw_config).n_embd},
                                        0.02f),
                          normalize_config(raw_config).learned_position_embeddings),
-      final_norm(backend, normalize_config(raw_config).n_embd),
+      final_norm(backend, normalize_config(raw_config).n_embd, normalize_config(raw_config).rms_norm_eps,
+                 normalize_config(raw_config).use_layer_norm),
       lm_head(random_parameter_or_empty(backend,
                                         {normalize_config(raw_config).n_embd,
                                          normalize_config(raw_config).vocab_size},
@@ -4190,19 +4558,22 @@ void ModernGPTModel::disable_quantized_inference() {
 }
 
 Tensor ModernGPTModel::project_logits(const Tensor& h) {
+    auto finish = [&](Tensor logits) {
+        return softcap_reference(logits, config.final_logit_softcap);
+    };
     if (quantized_lm_head_.valid() && (!autograd::is_enabled() || !lm_head.data.valid())) {
         const Tensor& decode_head = decode_quantized_lm_head_.valid() ? decode_quantized_lm_head_ : quantized_lm_head_;
         const DType decode_dtype = decode_quantized_lm_head_.valid() ? decode_quantized_lm_head_dtype_ : quantized_weight_dtype_;
         if ((decode_dtype == DType::Q4_0 || decode_dtype == DType::Q4_0_COL ||
              is_k_quant_dtype(decode_dtype)) &&
             h.ndim() == 2 && h.shape()[0] == 1) {
-            return matmul(h, decode_head);
+            return finish(matmul(h, decode_head));
         }
         auto hq = quantize_q8_symmetric_rows(h);
-        return matmul(hq, quantized_lm_head_);
+        return finish(matmul(hq, quantized_lm_head_));
     }
     MCL_CHECK(lm_head.data.valid(), "ModernGPTModel dense lm_head is not initialized");
-    return matmul(h, lm_head.data);
+    return finish(matmul(h, lm_head.data));
 }
 
 void HybridRuntimeCache::reset() {
@@ -4224,7 +4595,8 @@ HybridGPTModel::HybridGPTModel(Backend& backend,
                                         normalize_config(raw_config).n_embd},
                                        0.02f),
                          normalize_config(raw_config).learned_position_embeddings),
-      final_norm(backend, normalize_config(raw_config).n_embd),
+      final_norm(backend, normalize_config(raw_config).n_embd, normalize_config(raw_config).rms_norm_eps,
+                 normalize_config(raw_config).use_layer_norm),
       lm_head(random_parameter_or_empty(backend,
                                         {normalize_config(raw_config).n_embd,
                                          normalize_config(raw_config).vocab_size},
@@ -4427,19 +4799,22 @@ void HybridGPTModel::disable_quantized_inference() {
 }
 
 Tensor HybridGPTModel::project_logits(const Tensor& h) {
+    auto finish = [&](Tensor logits) {
+        return softcap_reference(logits, config.final_logit_softcap);
+    };
     if (quantized_lm_head_.valid() && (!autograd::is_enabled() || !lm_head.data.valid())) {
         const Tensor& decode_head = decode_quantized_lm_head_.valid() ? decode_quantized_lm_head_ : quantized_lm_head_;
         const DType decode_dtype = decode_quantized_lm_head_.valid() ? decode_quantized_lm_head_dtype_ : quantized_weight_dtype_;
         if ((decode_dtype == DType::Q4_0 || decode_dtype == DType::Q4_0_COL ||
              is_k_quant_dtype(decode_dtype)) &&
             h.ndim() == 2 && h.shape()[0] == 1) {
-            return matmul(h, decode_head);
+            return finish(matmul(h, decode_head));
         }
         auto hq = quantize_q8_symmetric_rows(h);
-        return matmul(hq, quantized_lm_head_);
+        return finish(matmul(hq, quantized_lm_head_));
     }
     MCL_CHECK(lm_head.data.valid(), "HybridGPTModel dense lm_head is not initialized");
-    return matmul(h, lm_head.data);
+    return finish(matmul(h, lm_head.data));
 }
 
 } // namespace motifcl::nn
