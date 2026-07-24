@@ -336,8 +336,9 @@ VulkanOpResult run_vulkan_kv_cache_append_quantized(VulkanRuntime& runtime,
                                                     std::size_t kv_channels,
                                                     std::size_t start_pos,
                                                     std::uint32_t kv_dtype);
-// Non-causal batch=1 GQA backward (three cached dispatches). probs_scratch
-// and ds_scratch must hold n_head*query_tokens*key_tokens floats each.
+// F32 GQA backward (two cached dispatches), partitioned by (batch, head).
+// probs_scratch and ds_scratch must each hold
+// batch*n_head*query_tokens*key_tokens floats.
 VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtime,
                                                            const VulkanBuffer& q,
                                                            const VulkanBuffer& k,
@@ -348,11 +349,14 @@ VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtim
                                                            VulkanBuffer& grad_q,
                                                            VulkanBuffer& grad_k,
                                                            VulkanBuffer& grad_v,
+                                                           std::size_t batch,
                                                            std::size_t query_tokens,
                                                            std::size_t key_tokens,
                                                            std::size_t n_head,
                                                            std::size_t n_kv_head,
                                                            std::size_t head_dim,
+                                                           bool causal,
+                                                           std::size_t query_offset,
                                                            float scale);
 VulkanF32TensorResult run_vulkan_compact_counter_backward_input(
     const std::vector<std::uint32_t>& packed_state_words,
@@ -644,6 +648,17 @@ VulkanOpResult run_vulkan_compact_counter_decode_weight(VulkanRuntime& runtime,
                                                         std::size_t in_features,
                                                         std::size_t out_features,
                                                         std::size_t C);
+// Fused decode-in-GEMM forward: y[batch,out] = x[batch,in] * W(state)^T.
+// Uses a wave64 rb4 register block and never materializes dense FP32 W.
+VulkanOpResult run_vulkan_compact_counter_forward_u8(VulkanRuntime& runtime,
+                                                      const VulkanBuffer& x,
+                                                      const VulkanBuffer& state,
+                                                      const VulkanBuffer& scale,
+                                                      VulkanBuffer& out,
+                                                      std::size_t batch,
+                                                      std::size_t in_features,
+                                                      std::size_t out_features,
+                                                      std::size_t C);
 // Fused memory-native counter update (row stats + stochastic tick + scale
 // commit), bit-exact vs the OpenCL fused kernels for the same seed. state is
 // the packed U8/3-byte CounterStateLinear layout; scratch buffers hold

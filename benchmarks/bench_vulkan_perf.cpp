@@ -840,7 +840,7 @@ int main(int argc, char** argv) {
             if (!r.success) return r.error;
             r = motifcl::run_vulkan_grouped_query_attention_backward(runtime, fx->q, fx->k, fx->v, fx->g,
                                                                      fx->probs, fx->ds, fx->dq, fx->dk, fx->dv,
-                                                                     qt, kt, nh, nkh, hd, scale);
+                                                                     1, qt, kt, nh, nkh, hd, false, 0, scale);
             return r.success ? std::string() : r.error;
         };
         if (opencl_available) {

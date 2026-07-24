@@ -1208,14 +1208,7 @@ Tensor grouped_query_attention(const Tensor& q, const Tensor& k, const Tensor& v
         MCL_CHECK(k.dtype() == DType::F32 || !split_value_dim,
                   "vulkan quantized grouped_query_attention requires v_head_dim == head_dim");
         const bool use_fast_noncausal = k.dtype() == DType::F32 && !causal && !split_value_dim &&
-                                        s.batch == 1 && s.key_stride == s.key_tokens && query_offset == 0;
-        // EXPERIMENTAL: the general forward pairs with the same shared
-        // GroupedQueryAttentionBackwardNode (which already takes causal/batch);
-        // MOTIFCL_GQA_GENERAL_AUTOGRAD=1 opts in while parity is being pinned.
-        const char* general_ag = std::getenv("MOTIFCL_GQA_GENERAL_AUTOGRAD");
-        const bool allow_general_autograd = general_ag && *general_ag && *general_ag != '0';
-        MCL_CHECK(!needs_grad || use_fast_noncausal || allow_general_autograd,
-                  "vulkan general grouped_query_attention forward does not support autograd yet");
+                                         s.batch == 1 && s.key_stride == s.key_tokens && query_offset == 0;
         auto out = use_fast_noncausal
             ? grouped_query_attention_vulkan_f32_device(q, k, v, s, n_head, n_kv_head, scale_value)
             : grouped_query_attention_vulkan_general_device(q, k, v, s, n_head, n_kv_head, causal,
@@ -2267,13 +2260,10 @@ MultiHeadAttentionGradients grouped_query_attention_backward_fused(const Tensor&
     MCL_CHECK(k.dtype() == DType::F32 && v.dtype() == DType::F32,
               "grouped_query_attention_backward supports f32 k/v only; quantized KV backward is not implemented");
     if (q.backend().is_vulkan()) {
-        MCL_CHECK(!causal, "vulkan grouped_query_attention backward supports non-causal attention only");
-        MCL_CHECK(s.batch == 1, "vulkan grouped_query_attention backward supports batch_size == 1");
         MCL_CHECK(s.key_stride == s.key_tokens,
-                  "vulkan grouped_query_attention backward does not support padded k/v stride");
-        MCL_CHECK(query_offset == 0, "vulkan grouped_query_attention backward does not support query_offset");
+                   "vulkan grouped_query_attention backward does not support padded k/v stride");
         MCL_CHECK(s.v_head_dim == s.head_dim,
-                  "vulkan grouped_query_attention backward requires v_head_dim == head_dim");
+                   "vulkan grouped_query_attention backward requires v_head_dim == head_dim");
         const float scale_value = 1.0f / std::sqrt(static_cast<float>(s.head_dim));
         MultiHeadAttentionGradients grads{
             Tensor::empty(q.backend(), q.shape(), DType::F32),
@@ -2281,9 +2271,11 @@ MultiHeadAttentionGradients grouped_query_attention_backward_fused(const Tensor&
             Tensor::empty(v.backend(), v.shape(), DType::F32),
         };
         auto probs = Tensor::empty(q.backend(),
-                                   {static_cast<int64_t>(n_head) * s.query_tokens, s.key_tokens}, DType::F32);
+                                   {s.batch * static_cast<int64_t>(n_head) * s.query_tokens,
+                                    s.key_tokens}, DType::F32);
         auto ds = Tensor::empty(q.backend(),
-                                {static_cast<int64_t>(n_head) * s.query_tokens, s.key_tokens}, DType::F32);
+                                {s.batch * static_cast<int64_t>(n_head) * s.query_tokens,
+                                 s.key_tokens}, DType::F32);
         const auto run = run_vulkan_grouped_query_attention_backward(
             q.backend().vulkan_runtime(),
             q.storage().vulkan_buffer,
@@ -2295,11 +2287,14 @@ MultiHeadAttentionGradients grouped_query_attention_backward_fused(const Tensor&
             grads.dq.storage().vulkan_buffer,
             grads.dk.storage().vulkan_buffer,
             grads.dv.storage().vulkan_buffer,
+            static_cast<std::size_t>(s.batch),
             static_cast<std::size_t>(s.query_tokens),
             static_cast<std::size_t>(s.key_tokens),
             static_cast<std::size_t>(n_head),
             static_cast<std::size_t>(n_kv_head),
             static_cast<std::size_t>(s.head_dim),
+            causal,
+            static_cast<std::size_t>(query_offset),
             scale_value);
         MCL_CHECK(run.success, std::string("vulkan grouped_query_attention backward failed: ") + run.error);
         autograd::record_op("grouped_query_attention_backward_vulkan_f32",

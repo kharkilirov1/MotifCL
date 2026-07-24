@@ -32,7 +32,9 @@ set(MOTIFCL_TESTS
     test_f16_matmul_autograd
     test_reversible_attn
     test_vulkan_backend
+    test_vulkan_counter_fused
     test_vulkan_gqa_p0
+    test_vulkan_gqa_training
     test_vulkan_kv_decode_p0
     test_vulkan_q4_fused_p0
     test_vulkan_row_bias_p0
@@ -70,6 +72,11 @@ if(TARGET motifcl)
         target_link_libraries(${test_name} PRIVATE motifcl)
         motifcl_apply_compiler_options(${test_name})
         motifcl_register_test(${test_name})
+        if(test_name STREQUAL "test_group_counter_import" OR
+           test_name STREQUAL "test_ternary_solver")
+            set_tests_properties(${test_name} PROPERTIES
+                WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+        endif()
     endforeach()
 endif()
 

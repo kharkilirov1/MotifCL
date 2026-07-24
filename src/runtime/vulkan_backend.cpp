@@ -6987,7 +6987,11 @@ VulkanOpResult run_vulkan_f32_matmul(VulkanRuntime& runtime,
         std::uint32_t k;
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
-    const bool use_rb4 = runtime.caps().prefer_rb4_matmul;
+    // The square 256x256 startup probe captures the Polaris small-matrix
+    // crossover, but very wide training projections amortize rb4's register
+    // footprint and benefit from its 4x4 output reuse.
+    const bool use_rb4 =
+        runtime.caps().prefer_rb4_matmul || (n >= 4096 && m >= 32);
     if (use_rb4) {
         // Register-block 32x32 tile, 8x8 lanes (one wave64), 16 outputs/lane.
         const std::uint32_t groups_x = static_cast<std::uint32_t>((n + 31) / 32);
@@ -7038,7 +7042,7 @@ VulkanOpResult run_vulkan_f32_matmul_transpose_b(VulkanRuntime& runtime,
         std::uint32_t k;
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
-    if (runtime.caps().prefer_rb4_matmul) {
+    if (runtime.caps().prefer_rb4_matmul || (k >= 4096 && m >= 32)) {
         return runtime.dispatch_cached(vkspirv::k_mm_f32_nt_rb4, vkspirv::k_mm_f32_nt_rb4_words, buffers, &push,
                                        sizeof(push), static_cast<std::uint32_t>((n + 31) / 32),
                                        static_cast<std::uint32_t>((m + 31) / 32), 1);
@@ -7075,7 +7079,7 @@ VulkanOpResult run_vulkan_f32_matmul_transpose_a(VulkanRuntime& runtime,
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
     const std::vector<const VulkanBuffer*> buffers = {&a, &b, &c};
-    if (runtime.caps().prefer_rb4_matmul) {
+    if (runtime.caps().prefer_rb4_matmul || (n >= 4096 && k >= 32)) {
         return runtime.dispatch_cached(vkspirv::k_mm_f32_tn_rb4, vkspirv::k_mm_f32_tn_rb4_words, buffers, &push,
                                        sizeof(push), static_cast<std::uint32_t>((n + 31) / 32),
                                        static_cast<std::uint32_t>((m + 31) / 32), 1);
@@ -8225,11 +8229,15 @@ VulkanOpResult run_vulkan_compact_counter_apply_update_fused(VulkanRuntime& runt
                  rms_eps};
     const std::vector<const VulkanBuffer*> stats_buffers = {&state, &scale, &v, &grad_out, &x,
                                                             &scale_new_scratch, &denom_scratch};
-    const bool use_sg_stats = runtime.caps().subgroup_arithmetic_compute;
-    const auto* stats_spirv = use_sg_stats ? vkspirv::k_counter_row_stats_fused_f32_subgroup
-                                            : vkspirv::k_counter_row_stats_fused_f32;
-    const auto stats_words = use_sg_stats ? vkspirv::k_counter_row_stats_fused_f32_subgroup_words
-                                          : vkspirv::k_counter_row_stats_fused_f32_words;
+    const bool use_sg_stats =
+        runtime.caps().subgroup_arithmetic_compute &&
+        runtime.caps().subgroup_size == 64;
+    const auto* stats_spirv = use_sg_stats
+        ? vkspirv::k_counter_row_stats_fused_f32_subgroup
+        : vkspirv::k_counter_row_stats_fused_f32;
+    const auto stats_words = use_sg_stats
+        ? vkspirv::k_counter_row_stats_fused_f32_subgroup_words
+        : vkspirv::k_counter_row_stats_fused_f32_words;
     auto stage = runtime.dispatch_cached(stats_spirv, stats_words, stats_buffers,
                                          &stats_push, sizeof(stats_push),
                                          static_cast<std::uint32_t>(out_features), 1, 1);
@@ -8346,6 +8354,71 @@ VulkanOpResult run_vulkan_compact_counter_decode_weight(VulkanRuntime& runtime,
                                    static_cast<std::uint32_t>((groups + 63) / 64), 1, 1);
 }
 
+VulkanOpResult run_vulkan_compact_counter_forward_u8(VulkanRuntime& runtime,
+                                                      const VulkanBuffer& x,
+                                                      const VulkanBuffer& state,
+                                                      const VulkanBuffer& scale,
+                                                      VulkanBuffer& out,
+                                                      std::size_t batch,
+                                                      std::size_t in_features,
+                                                      std::size_t out_features,
+                                                      std::size_t C) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (batch == 0 || in_features == 0 || out_features == 0) {
+        return fail("Vulkan compact-counter forward requires non-zero dimensions");
+    }
+    if (in_features % 4 != 0) {
+        return fail("Vulkan compact-counter forward requires in_features divisible by 4");
+    }
+    if (C == 0 || 3 * (2 * C - 1) > 64) {
+        return fail("Vulkan compact-counter forward C is out of 6-bit range");
+    }
+    if (!runtime.supports_storage_buffer_i8()) {
+        return fail("Vulkan compact-counter forward requires VK_KHR_8bit_storage on persistent Tensor buffers");
+    }
+    if (batch > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        in_features > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        out_features > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        C > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return fail("Vulkan compact-counter forward dimensions exceed specialized SPIR-V limits");
+    }
+    if (out_features > std::numeric_limits<std::size_t>::max() / (in_features / 4)) {
+        return fail("Vulkan compact-counter forward state size overflows size_t");
+    }
+    const std::size_t groups = out_features * (in_features / 4);
+    if (groups > std::numeric_limits<std::size_t>::max() / 3 ||
+        batch > std::numeric_limits<std::size_t>::max() / in_features ||
+        batch > std::numeric_limits<std::size_t>::max() / out_features) {
+        return fail("Vulkan compact-counter forward buffer size overflows size_t");
+    }
+    if (state.nbytes() < groups * 3) return fail("Vulkan compact-counter forward state buffer is too small");
+    if (scale.nbytes() < out_features * sizeof(float)) {
+        return fail("Vulkan compact-counter forward scale buffer is too small");
+    }
+    if (x.nbytes() < batch * in_features * sizeof(float) ||
+        out.nbytes() < batch * out_features * sizeof(float)) {
+        return fail("Vulkan compact-counter forward activation buffer is too small");
+    }
+
+    const struct {
+        std::uint32_t C;
+        std::uint32_t in_features;
+        std::uint32_t out_features;
+        std::uint32_t batch;
+    } push{static_cast<std::uint32_t>(C), static_cast<std::uint32_t>(in_features),
+           static_cast<std::uint32_t>(out_features), static_cast<std::uint32_t>(batch)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &state, &scale, &out};
+    return runtime.dispatch_cached(vkspirv::k_counter_forward_f32_rb4,
+                                   vkspirv::k_counter_forward_f32_rb4_words, buffers,
+                                   &push, sizeof(push),
+                                   static_cast<std::uint32_t>((out_features + 31) / 32),
+                                   static_cast<std::uint32_t>((batch + 31) / 32), 1);
+}
+
 VulkanOpResult run_vulkan_compact_counter_backward_input_u8(VulkanRuntime& runtime,
                                                             const VulkanBuffer& state,
                                                             const VulkanBuffer& scale,
@@ -8413,12 +8486,11 @@ VulkanOpResult run_vulkan_compact_counter_backward_input_u8(VulkanRuntime& runti
     } push{static_cast<std::int32_t>(C), static_cast<std::int32_t>(in_features),
            static_cast<std::int32_t>(out_features), static_cast<std::int32_t>(batch)};
     const std::vector<const VulkanBuffer*> buffers = {&grad_out, &state, &scale, &grad_x};
-    // One invocation per (row, group-of-4): batch * (in_features / 4) groups.
-    const std::size_t dispatch_groups = batch * (in_features / 4);
-    const auto run = runtime.dispatch_cached(vkspirv::k_counter_backward_input_f32,
-                                             vkspirv::k_counter_backward_input_f32_words, buffers, &push,
-                                             sizeof(push),
-                                             static_cast<std::uint32_t>((dispatch_groups + 63) / 64), 1, 1);
+    const auto run = runtime.dispatch_cached(vkspirv::k_counter_backward_input_f32_rb4,
+                                             vkspirv::k_counter_backward_input_f32_rb4_words,
+                                             buffers, &push, sizeof(push),
+                                             static_cast<std::uint32_t>((in_features + 31) / 32),
+                                             static_cast<std::uint32_t>((batch + 31) / 32), 1);
     result.success = run.success;
     result.device_name = run.device_name;
     result.error = run.error;
@@ -9131,18 +9203,22 @@ VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtim
                                                            VulkanBuffer& grad_q,
                                                            VulkanBuffer& grad_k,
                                                            VulkanBuffer& grad_v,
+                                                           std::size_t batch,
                                                            std::size_t query_tokens,
                                                            std::size_t key_tokens,
                                                            std::size_t n_head,
                                                            std::size_t n_kv_head,
                                                            std::size_t head_dim,
+                                                           bool causal,
+                                                           std::size_t query_offset,
                                                            float scale) {
     VulkanOpResult result;
     auto fail = [&](const std::string& message) {
         result.error = message;
         return result;
     };
-    if (query_tokens == 0 || key_tokens == 0 || n_head == 0 || n_kv_head == 0 || head_dim == 0) {
+    if (batch == 0 || query_tokens == 0 || key_tokens == 0 ||
+        n_head == 0 || n_kv_head == 0 || head_dim == 0) {
         return fail("Vulkan GQA backward requires non-zero query/key/head dimensions");
     }
     if (n_head % n_kv_head != 0) return fail("Vulkan GQA backward requires n_head % n_kv_head == 0");
@@ -9150,9 +9226,18 @@ VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtim
         return fail("Vulkan GQA backward currently supports key_tokens <= 1024 (shared-memory softmax)");
     }
     if (!std::isfinite(scale)) return fail("Vulkan GQA backward requires a finite scale");
-    const std::size_t q_size = query_tokens * n_head * head_dim;
-    const std::size_t kv_size = key_tokens * n_kv_head * head_dim;
-    const std::size_t probs_size = n_head * query_tokens * key_tokens;
+    if (batch > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        query_tokens > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        key_tokens > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        n_head > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        n_kv_head > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        head_dim > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        query_offset > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return fail("Vulkan GQA backward dimensions exceed specialized SPIR-V limits");
+    }
+    const std::size_t q_size = batch * query_tokens * n_head * head_dim;
+    const std::size_t kv_size = batch * key_tokens * n_kv_head * head_dim;
+    const std::size_t probs_size = batch * n_head * query_tokens * key_tokens;
     if (q.nbytes() < q_size * sizeof(float) || grad_out.nbytes() < q_size * sizeof(float) ||
         grad_q.nbytes() < q_size * sizeof(float)) {
         return fail("Vulkan GQA backward q/grad buffer is too small");
@@ -9166,40 +9251,43 @@ VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtim
     }
 
     const struct {
+        std::uint32_t batch;
         std::uint32_t query_tokens;
         std::uint32_t key_tokens;
         std::uint32_t n_head;
         std::uint32_t n_kv_head;
         std::uint32_t head_dim;
+        std::uint32_t causal;
+        std::uint32_t query_offset;
         float scale;
-    } push{static_cast<std::uint32_t>(query_tokens), static_cast<std::uint32_t>(key_tokens),
-           static_cast<std::uint32_t>(n_head),       static_cast<std::uint32_t>(n_kv_head),
-           static_cast<std::uint32_t>(head_dim),     scale};
+    } push{static_cast<std::uint32_t>(batch),        static_cast<std::uint32_t>(query_tokens),
+           static_cast<std::uint32_t>(key_tokens),   static_cast<std::uint32_t>(n_head),
+           static_cast<std::uint32_t>(n_kv_head),    static_cast<std::uint32_t>(head_dim),
+           causal ? 1u : 0u,                         static_cast<std::uint32_t>(query_offset),
+           scale};
 
-    // Stage 1: softmax probabilities + ds. Stage 2: dQ. Stage 3: dK/dV. In
-    // immediate mode each cached dispatch submits and waits on its fence; in
-    // batch mode the cached path emits compute->compute barriers.
-    const std::vector<const VulkanBuffer*> probs_buffers = {&q, &k, &v, &grad_out, &probs_scratch, &ds_scratch};
-    const bool use_sg_bwd = runtime.caps().subgroup_arithmetic_compute;
+    // Stage 1: softmax probabilities + ds + dQ. Stage 2: dK/dV. In immediate
+    // mode each cached dispatch submits and waits on its fence; in batch mode
+    // the cached path emits a compute->compute barrier.
+    const std::vector<const VulkanBuffer*> probs_buffers = {
+        &q, &k, &v, &grad_out, &probs_scratch, &ds_scratch, &grad_q};
+    const bool use_sg_bwd =
+        runtime.caps().subgroup_arithmetic_compute && runtime.caps().subgroup_size == 64;
     const auto* bwd_spirv = use_sg_bwd ? vkspirv::k_gqa_bwd_probs_f32_subgroup : vkspirv::k_gqa_bwd_probs_f32;
     const auto bwd_words = use_sg_bwd ? vkspirv::k_gqa_bwd_probs_f32_subgroup_words : vkspirv::k_gqa_bwd_probs_f32_words;
     auto stage = runtime.dispatch_cached(bwd_spirv, bwd_words,
                                          probs_buffers, &push, sizeof(push),
                                          static_cast<std::uint32_t>(query_tokens),
-                                         static_cast<std::uint32_t>(n_head), 1);
-    if (!stage.success) return stage;
-
-    const std::vector<const VulkanBuffer*> dq_buffers = {&k, &ds_scratch, &grad_q};
-    stage = runtime.dispatch_cached(vkspirv::k_gqa_bwd_dq_f32, vkspirv::k_gqa_bwd_dq_f32_words, dq_buffers,
-                                    &push, sizeof(push), static_cast<std::uint32_t>(query_tokens),
-                                    static_cast<std::uint32_t>(n_head), 1);
+                                         static_cast<std::uint32_t>(n_head),
+                                         static_cast<std::uint32_t>(batch));
     if (!stage.success) return stage;
 
     const std::vector<const VulkanBuffer*> dkv_buffers = {&q, &grad_out, &probs_scratch, &ds_scratch, &grad_k,
                                                           &grad_v};
     return runtime.dispatch_cached(vkspirv::k_gqa_bwd_dkv_f32, vkspirv::k_gqa_bwd_dkv_f32_words, dkv_buffers,
-                                   &push, sizeof(push), static_cast<std::uint32_t>(key_tokens),
-                                   static_cast<std::uint32_t>(n_kv_head), 1);
+                                   &push, sizeof(push), static_cast<std::uint32_t>((key_tokens + 3) / 4),
+                                   static_cast<std::uint32_t>(n_kv_head),
+                                   static_cast<std::uint32_t>(batch));
 }
 
 VulkanF32TensorResult run_vulkan_grouped_query_attention(const std::vector<float>& q,

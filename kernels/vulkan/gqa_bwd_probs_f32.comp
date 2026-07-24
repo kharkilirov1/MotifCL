@@ -1,9 +1,9 @@
-// Grouped-query attention backward, stage 1 of 3 (non-causal, batch=1):
+// Grouped-query attention backward, stage 1 of 3:
 // recompute softmax probabilities and the softmax-backward "ds" term.
 //   p_out [n_head, query_tokens, key_tokens]  = softmax probabilities
 //   ds_out[n_head, query_tokens, key_tokens]  = p * (dp - sum(dp * p))
 // where dp[tk] = sum_d dout[tq,h,d] * v[tk,g,d].
-// One wave64 workgroup per (query token, head).
+// One wave64 workgroup per (batch, query token, head).
 #version 450
 
 layout(local_size_x = 64) in;
@@ -14,13 +14,17 @@ layout(std430, set = 0, binding = 2) readonly buffer VBuf { float v[]; };
 layout(std430, set = 0, binding = 3) readonly buffer DoutBuf { float dout[]; };
 layout(std430, set = 0, binding = 4) writeonly buffer PBuf { float p_out[]; };
 layout(std430, set = 0, binding = 5) writeonly buffer DsBuf { float ds_out[]; };
+layout(std430, set = 0, binding = 6) writeonly buffer DqBuf { float dq[]; };
 
 layout(push_constant) uniform Push {
+    uint batch;
     uint query_tokens;
     uint key_tokens;
     uint n_head;
     uint n_kv_head;
     uint head_dim;
+    uint causal;
+    uint query_offset;
     float scale;
 } p;
 
@@ -31,27 +35,33 @@ shared float scratch[64];
 void main() {
     const uint tq = gl_WorkGroupID.x;
     const uint h = gl_WorkGroupID.y;
+    const uint b = gl_WorkGroupID.z;
     const uint lane = gl_LocalInvocationID.x;
-    if (tq >= p.query_tokens || h >= p.n_head) return;
+    if (b >= p.batch || tq >= p.query_tokens || h >= p.n_head) return;
 
     const uint group_size = p.n_head / p.n_kv_head;
     const uint g = h / group_size;
     const uint q_stride = p.n_head * p.head_dim;
     const uint kv_stride = p.n_kv_head * p.head_dim;
-    const uint q_base = tq * q_stride + h * p.head_dim;
+    const uint q_base = (b * p.query_tokens + tq) * q_stride + h * p.head_dim;
     const uint kv_off = g * p.head_dim;
-    const uint row_base = (h * p.query_tokens + tq) * p.key_tokens;
+    const uint row_base = ((b * p.n_head + h) * p.query_tokens + tq) * p.key_tokens;
+    const uint max_key = p.query_offset + tq;
 
     // Softmax recompute (same passes as forward).
     float maxv = -3.402823466e+38;
     for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
-        float dot = 0.0;
-        const uint k_base = tk * kv_stride + kv_off;
-        for (uint d = 0u; d < p.head_dim; ++d) {
-            dot += q[q_base + d] * k[k_base + d];
+        float score = -3.402823466e+38;
+        if (p.causal == 0u || tk <= max_key) {
+            float dot = 0.0;
+            const uint k_base = (b * p.key_tokens + tk) * kv_stride + kv_off;
+            for (uint d = 0u; d < p.head_dim; ++d) {
+                dot += q[q_base + d] * k[k_base + d];
+            }
+            score = dot * p.scale;
+            maxv = max(maxv, score);
         }
-        probs[tk] = dot * p.scale;
-        maxv = max(maxv, probs[tk]);
+        probs[tk] = score;
     }
     scratch[lane] = maxv;
     barrier();
@@ -63,7 +73,9 @@ void main() {
     barrier();
     float sum = 0.0;
     for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
-        const float e = exp(probs[tk] - maxv);
+        const float e = probs[tk] == -3.402823466e+38
+            ? 0.0
+            : exp(probs[tk] - maxv);
         probs[tk] = e;
         sum += e;
     }
@@ -82,9 +94,11 @@ void main() {
         const float prob = probs[tk] * inv_sum;
         probs[tk] = prob;
         float dp = 0.0;
-        const uint v_base = tk * kv_stride + kv_off;
-        for (uint d = 0u; d < p.head_dim; ++d) {
-            dp += dout[q_base + d] * v[v_base + d];
+        if (prob != 0.0) {
+            const uint v_base = (b * p.key_tokens + tk) * kv_stride + kv_off;
+            for (uint d = 0u; d < p.head_dim; ++d) {
+                dp += dout[q_base + d] * v[v_base + d];
+            }
         }
         dps[tk] = dp;
         dot_dp_p += dp * prob;
@@ -100,7 +114,21 @@ void main() {
 
     for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
         const float prob = probs[tk];
+        const float ds = prob * (dps[tk] - dot_dp_p);
         p_out[row_base + tk] = prob;
-        ds_out[row_base + tk] = prob * (dps[tk] - dot_dp_p);
+        ds_out[row_base + tk] = ds;
+        dps[tk] = ds;
+    }
+    barrier();
+
+    // Fuse the former stage-2 dQ pass while probabilities and ds are still
+    // resident in LDS, avoiding a second workgroup grid and global ds reads.
+    for (uint d = lane; d < p.head_dim; d += 64u) {
+        float acc = 0.0;
+        for (uint tk = 0u; tk < p.key_tokens; ++tk) {
+            acc += dps[tk] *
+                k[(b * p.key_tokens + tk) * kv_stride + kv_off + d];
+        }
+        dq[q_base + d] = acc * p.scale;
     }
 }

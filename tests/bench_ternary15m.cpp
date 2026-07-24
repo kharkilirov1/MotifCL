@@ -72,13 +72,15 @@ int main() {
         const int n_kv_head = 6;
         const std::int64_t hidden = 768;
         const std::int64_t vocab = env_int("BENCH_VOCAB", 32000);
+        const int layer_count = env_int("BENCH_LAYERS", 6);
         const std::int64_t N = B * T;
         const float eps = 1e-5f;
         const float counter_lr = 0.005f;
         const float head_lr = 0.01f;
         const int C = 11;
 
-        std::cout << "bench_ternary15m: B=" << B << " T=" << T << " steps=" << steps
+        std::cout << "bench_ternary15m: B=" << B << " T=" << T
+                  << " layers=" << layer_count << " steps=" << steps
                   << " (+" << warmup << " warmup)\n";
 
         const bool use_fp = env_int("BENCH_FP", 0) != 0;
@@ -95,7 +97,7 @@ int main() {
         };
         std::vector<float> ones(static_cast<std::size_t>(dim), 1.0f);
         std::vector<Block> blocks;
-        for (int l = 0; l < 6; ++l) {
+        for (int l = 0; l < layer_count; ++l) {
             Block blk{
                 std::make_unique<nn::CounterStateLinear>(backend, dim, dim, C, counter_lr),
                 std::make_unique<nn::CounterStateLinear>(backend, dim, dim, C, counter_lr),
@@ -154,9 +156,8 @@ int main() {
                 auto q = lin(blk, 0, a);
                 auto k = lin(blk, 1, a);
                 auto v = lin(blk, 2, a);
-                // Requires MOTIFCL_GQA_GENERAL_AUTOGRAD=1 for batch>1/causal:
-                // the general forward + shared backward node combination is
-                // being parity-pinned; throughput is valid either way.
+                // Vulkan dispatch selects the general batched forward and its
+                // matching causal/batched backward automatically.
                 auto attn = grouped_query_attention(q, k, v, n_head, n_kv_head, false,
                                                     static_cast<int>(B), T, T, 0, 0.0f);
                 auto o = lin(blk, 3, attn);

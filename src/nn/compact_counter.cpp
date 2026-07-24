@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include <motifcl/autograd/graph.hpp>
 #include <motifcl/autograd/node.hpp>
 #include <motifcl/core/error.hpp>
 #include <motifcl/ops/matmul.hpp>
@@ -265,13 +266,32 @@ Tensor CounterStateLinear::backward_input_from_state(const Tensor& grad_out) con
 Tensor CounterStateLinear::forward(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::F32 && x.ndim() == 2, "CounterStateLinear expects rank-2 f32 input");
     MCL_CHECK(x.shape()[1] == in_, "CounterStateLinear input feature mismatch");
-    // Compute the forward under NoGrad so the ordinary matmul autograd cannot attach a node
-    // that retains the dense decoded weight; the counter layer attaches its own node below.
-    Tensor y = [&] {
-        autograd::NoGradGuard guard;
-        Tensor w = decode_weight();             // [out, in] (transient: freed after the forward matmul)
-        return matmul_transpose_b(x, w);        // x @ w^T -> [N, out]
-    }();
+    Tensor y;
+    if (backend_->is_vulkan()) {
+        // Decode packed ternary state inside the rb4 GEMM. This is both the
+        // training and inference path; no dense FP32 weight allocation exists.
+        y = Tensor::empty(*backend_, {x.shape()[0], out_}, DType::F32);
+        const auto result = run_vulkan_compact_counter_forward_u8(
+            backend_->vulkan_runtime(),
+            x.storage().vulkan_buffer,
+            state.storage().vulkan_buffer,
+            scale.storage().vulkan_buffer,
+            y.storage().vulkan_buffer,
+            static_cast<std::size_t>(x.shape()[0]),
+            static_cast<std::size_t>(in_),
+            static_cast<std::size_t>(out_),
+            static_cast<std::size_t>(C_));
+        MCL_CHECK(result.success, std::string("vulkan compact-counter forward failed: ") + result.error);
+        autograd::record_op("compact_counter_forward_vulkan_f32_rb4",
+                            {x.id(), state.id(), scale.id()}, {y.id()});
+    } else {
+        // The portable reference keeps the established decode + matmul path.
+        y = [&] {
+            autograd::NoGradGuard guard;
+            Tensor w = decode_weight();
+            return matmul_transpose_b(x, w);
+        }();
+    }
     if (autograd::is_enabled() && training_) {  // gate on training, not x.requires_grad: a counter
         y.set_requires_grad(true);              // layer must update itself even on a raw (grad-less) input
         y._set_grad_fn(std::make_shared<CounterBackwardNode>(x, this, next_seed()));

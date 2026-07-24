@@ -39,8 +39,14 @@ float cc_uniform01(uint h) {
 
 void cc_decode(int code, int C, out int t, out int c) {
     const int lv = 2 * C - 1;
-    t = code / lv - 1;
-    c = code % lv - (C - 1);
+    if (code < 3 * lv) {
+        const int band = code < lv ? 0 : (code < 2 * lv ? 1 : 2);
+        t = band - 1;
+        c = code - band * lv - (C - 1);
+    } else {
+        t = code / lv - 1;
+        c = code % lv - (C - 1);
+    }
 }
 
 int cc_encode(int t, int c, int C) {
