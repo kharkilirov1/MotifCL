@@ -1122,6 +1122,22 @@ Tensor matmul_vulkan_f32_transpose_a_device(const Tensor& a, const Tensor& b) {
     return out;
 }
 
+// y = a * b^T  (a [M,K], b [N,K], y [M,N])
+//   grad_a = grad_y * b        -> plain matmul
+//   grad_b = grad_y^T * a      -> matmul_transpose_a
+// Without this node a tied LM head (logits = h @ embed^T) silently severs the
+// backward chain on Vulkan: the forward runs, the loss is finite, and nothing
+// upstream of the head ever receives a gradient.
+struct MatMulTransposeBBackward : autograd::Node {
+    Tensor a, b;
+    MatMulTransposeBBackward(Tensor a, Tensor b) : a(std::move(a)), b(std::move(b)) {}
+    std::vector<Tensor> inputs() const override { return {a, b}; }
+    void backward(const Tensor& grad_output) override {
+        if (a.requires_grad()) a.backward(matmul(grad_output, b));
+        if (b.requires_grad()) b.backward(matmul_transpose_a(grad_output, a));
+    }
+};
+
 Tensor matmul_flags(const Tensor& a, const Tensor& b, bool trans_a, bool trans_b) {
     (void)microkernel_runtime_uses_opencl(MicrokernelDomain::Matmul);
     require_matmul_f32(a, b);
@@ -1131,7 +1147,12 @@ Tensor matmul_flags(const Tensor& a, const Tensor& b, bool trans_a, bool trans_b
             return matmul_vulkan_f32_device(a, b);
         }
         if (!trans_a && trans_b && vulkan_matmul_f32_transpose_b_supported(a, b)) {
-            return matmul_vulkan_f32_transpose_b_device(a, b);
+            auto out = matmul_vulkan_f32_transpose_b_device(a, b);
+            if (autograd::is_enabled() && (a.requires_grad() || b.requires_grad())) {
+                out.set_requires_grad(true);
+                out._set_grad_fn(std::make_shared<MatMulTransposeBBackward>(a, b));
+            }
+            return out;
         }
         if (trans_a && !trans_b && vulkan_matmul_f32_transpose_a_supported(a, b)) {
             return matmul_vulkan_f32_transpose_a_device(a, b);
