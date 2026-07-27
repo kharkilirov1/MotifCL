@@ -41,6 +41,10 @@ CTestTestfile.cmake
 Testing/
 _deps/
 
+# Tokenized training corpora — ~1 GB of .bin shards, regenerate per
+# docs/TERNARY15M_PRETRAIN_RESULTS.md rather than tracking them
+data/
+
 # Editors/OS
 .vscode/
 .idea/
