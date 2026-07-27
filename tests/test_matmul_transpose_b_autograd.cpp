@@ -104,6 +104,45 @@ int main() {
             std::cerr << "FAIL: gradients disagree with the plain-matmul reference\n";
             return 1;
         }
+
+        // --- a tied head puts the SAME tensor in two places in the graph (the
+        // token lookup and the head), so the backward must ACCUMULATE. If it
+        // overwrote instead, half the embedding's gradient would vanish with no
+        // error anywhere. Diamond: z = x1*w^T + x2*w^T, so grad_w must equal the
+        // sum of the two single-path gradients. ---
+        auto x1 = make(backend, M, K, 0x44u, false);
+        auto x2 = make(backend, M, K, 0x55u, false);
+        auto w_shared = make(backend, N, K, 0x66u, true);
+        auto z = add(matmul_transpose_b(x1, w_shared), matmul_transpose_b(x2, w_shared));
+        auto seed3 = Tensor::from_cpu(backend, {M, N}, DType::F32, seed_host.data());
+        z.backward(seed3);
+
+        auto w_a = make(backend, N, K, 0x66u, true);
+        auto ya = matmul_transpose_b(x1, w_a);
+        ya.backward(Tensor::from_cpu(backend, {M, N}, DType::F32, seed_host.data()));
+        auto w_b = make(backend, N, K, 0x66u, true);
+        auto yb = matmul_transpose_b(x2, w_b);
+        yb.backward(Tensor::from_cpu(backend, {M, N}, DType::F32, seed_host.data()));
+
+        const auto gs = w_shared.grad()->to_vector<float>();
+        const auto g_a = w_a.grad()->to_vector<float>();
+        const auto g_b = w_b.grad()->to_vector<float>();
+        double dsum = 0.0, mag = 0.0;
+        for (std::size_t i = 0; i < gs.size(); ++i) {
+            dsum = std::max(dsum, static_cast<double>(std::fabs(gs[i] - (g_a[i] + g_b[i]))));
+            mag = std::max(mag, static_cast<double>(std::fabs(gs[i])));
+        }
+        std::cout << "shared-tensor grad: max|diff from sum| = " << dsum
+                  << " (max|grad| = " << mag << ")\n";
+        if (dsum > 1e-4) {
+            std::cerr << "FAIL: a twice-used tensor does not accumulate its gradient\n";
+            return 1;
+        }
+        if (mag == 0.0) {
+            std::cerr << "FAIL: shared-tensor gradient is all zero — nothing was tested\n";
+            return 1;
+        }
+
         std::puts("PASS test_matmul_transpose_b_autograd");
         return 0;
     } catch (const std::exception& e) {

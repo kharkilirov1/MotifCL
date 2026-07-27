@@ -102,16 +102,43 @@ Two measurable causes, both addressable:
    storing latents, and the most plausible reason the floor sits higher.
 
 Minor deviations from the reference, listed for completeness: untied LM head
-(the Vulkan `matmul_transpose_b` path records no autograd node, so a tied head
-silently severs the backward chain), no gradient clipping on the FP params
-(reference uses 1.0), fused gate+up.
+(the Vulkan `matmul_transpose_b` path recorded no autograd node, so a tied head
+silently severed the backward chain — see below, this is now fixed and behind
+`TIE_HEAD=1`), no gradient clipping on the FP params (reference uses 1.0),
+fused gate+up.
+
+### Tying, measured after the fact
+
+The missing autograd node has since been added, so `TIE_HEAD=1` is available.
+Two 200-step runs from scratch, identical seed and schedule, differing only in
+the head:
+
+| | tied | untied |
+|---|---:|---:|
+| val loss @200 | 4.1014 | 3.9036 |
+| throughput | 3343 tok/s | 3632 tok/s |
+| checkpoint | 111 MB | 216 MB |
+
+Tying works — the loss falls from ln(32000) = 10.37 to 4.10, which it could not
+do if the head's gradient were being dropped. It halves the checkpoint, exactly
+the 37 MB of weights plus 74 MB of Adam moments predicted below.
+
+The two columns that favour untied are not a verdict on quality. 200 steps is
+far too short to rank the architectures: untied has 9.2 M extra free parameters
+that fit fastest at the very start, which is precisely where this probe stops.
+The throughput gap (−8 %) is real and unexplained — plausibly the transpose_b
+kernel being less tuned than plain matmul, plus accumulating a second gradient
+into a 32000x288 tensor. Whether tying helps at the 160k-step horizon is
+untested; the reference architecture ties, which is the reason to expect it to.
 
 ## What run 2 should change, in order of expected effect
 
 1. Chunked vocabulary loss + BATCH=32 — attacks the dominant noise source and
    frees over a gigabyte of VRAM at the same time.
-2. Tied LM head — removes 37 MB of weights and 74 MB of Adam moments; needs the
-   `matmul_transpose_b` autograd node on Vulkan first.
+2. Tied LM head — removes 37 MB of weights and 74 MB of Adam moments. The
+   blocking autograd node now exists and the saving is confirmed (216 -> 111 MB);
+   set `TIE_HEAD=1`. Costs ~8 % throughput, quality effect at full horizon
+   untested.
 3. Gradient clipping at 1.0 on the FP params, matching the reference.
 4. As a separate experiment: C=15 or C=21 against accumulator saturation. This
    tests the structural hypothesis directly — if the floor drops, the bound on

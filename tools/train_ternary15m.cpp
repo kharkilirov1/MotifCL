@@ -13,7 +13,9 @@
 //
 // env: DATA_DIR (required), OUT_DIR (required), STEPS, BATCH, SEQ, LR
 // (counter peak), LR_FP (embedding/norm peak), WARMUP_FRAC, MIN_LR_FRAC,
-// EVAL_EVERY, EVAL_RECORDS, CKPT_EVERY, LOG_EVERY, SEED, RESUME (default 1).
+// EVAL_EVERY, EVAL_RECORDS, CKPT_EVERY, LOG_EVERY, SEED, RESUME (default 1),
+// TIE_HEAD (default 0 — run 1's untied head; 1 reuses the embedding as the LM
+// head, which needs the matmul_transpose_b autograd node).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -99,6 +101,7 @@ int main() {
         const int log_every = env_int("LOG_EVERY", 20);
         const unsigned base_seed = (unsigned)env_int("SEED", 1337);
         const bool resume = env_int("RESUME", 1) != 0;
+        const bool tie_head = env_int("TIE_HEAD", 0) != 0;
 
         const std::int64_t dim = 288, hidden = 768, vocab = 32000;
         const int n_head = 6, n_kv_head = 6, n_layers = 6, C = 11;
@@ -136,17 +139,20 @@ int main() {
         }
         auto emb = Tensor::from_cpu(backend, {vocab, dim}, DType::F32, emb_host.data());
         emb.set_requires_grad(true);
-        // Untied LM head: the Vulkan matmul_transpose_b path has no autograd
-        // node yet, so a tied head silently severs the whole backward chain.
-        // The 42 ternary linears are unaffected; revisit when tied autograd lands.
-        std::vector<float> head_host((std::size_t)(dim * vocab));
-        {
+        // LM head. TIE_HEAD=1 reuses the embedding (logits = x @ emb^T), which
+        // is what the reference architecture does and saves dim*vocab weights
+        // plus their two Adam moments. Run 1 had to leave it untied because the
+        // Vulkan matmul_transpose_b path carried no autograd node and silently
+        // severed the whole backward chain; that node now exists.
+        Tensor head;
+        if (!tie_head) {
+            std::vector<float> head_host((std::size_t)(dim * vocab));
             std::mt19937 rng(base_seed + 7u);
             std::normal_distribution<float> gauss(0.0f, 0.02f);
             for (auto& x : head_host) x = gauss(rng);
+            head = Tensor::from_cpu(backend, {dim, vocab}, DType::F32, head_host.data());
+            head.set_requires_grad(true);
         }
-        auto head = Tensor::from_cpu(backend, {dim, vocab}, DType::F32, head_host.data());
-        head.set_requires_grad(true);
         const std::int64_t max_flat = std::max(N, (std::int64_t)32 * T);
         std::vector<float> pos_zero((std::size_t)(max_flat * dim), 0.0f);
         auto pos_w = Tensor::from_cpu(backend, {max_flat, dim}, DType::F32, pos_zero.data());
@@ -189,7 +195,7 @@ int main() {
             fp.push_back(std::move(p));
         };
         add_fp(&emb, 0.1f);
-        add_fp(&head, 0.1f);
+        if (!tie_head) add_fp(&head, 0.1f);
         for (auto& blk : blocks) { add_fp(&blk.norm1, 0.0f); add_fp(&blk.norm2, 0.0f); }
         add_fp(&norm_f, 0.0f);
 
@@ -197,7 +203,7 @@ int main() {
         auto ckpt_path = [&](const std::string& name) { return out_dir + "/" + name; };
         auto save_ckpt = [&](int step) {
             save_tensor(emb, ckpt_path("emb.mt"));
-            save_tensor(head, ckpt_path("head.mt"));
+            if (!tie_head) save_tensor(head, ckpt_path("head.mt"));
             save_tensor(norm_f, ckpt_path("norm_f.mt"));
             for (int l = 0; l < n_layers; ++l) {
                 auto& blk = blocks[(std::size_t)l];
@@ -228,8 +234,10 @@ int main() {
             };
             load_into(emb, ckpt_path("emb.mt"));
             emb.set_requires_grad(true);
-            load_into(head, ckpt_path("head.mt"));
-            head.set_requires_grad(true);
+            if (!tie_head) {
+                load_into(head, ckpt_path("head.mt"));
+                head.set_requires_grad(true);
+            }
             load_into(norm_f, ckpt_path("norm_f.mt"));
             norm_f.set_requires_grad(true);
             for (int l = 0; l < n_layers; ++l) {
@@ -254,8 +262,8 @@ int main() {
             }
             // fp param tensor pointers were replaced by load_into; rebind.
             fp[0].t = &emb;
-            fp[1].t = &head;
-            std::size_t k = 2;
+            std::size_t k = 1;
+            if (!tie_head) fp[k++].t = &head;
             for (auto& blk : blocks) { fp[k++].t = &blk.norm1; fp[k++].t = &blk.norm2; }
             fp[k].t = &norm_f;
         };
@@ -279,7 +287,8 @@ int main() {
                 cur = add(h, blk.wdown->forward(m));
             }
             auto xf = rmsnorm(cur, norm_f, eps);
-            auto logits = matmul(xf, head);   // untied (see note above)
+            auto logits = tie_head ? matmul_transpose_b(xf, emb)   // emb is [vocab, dim]
+                                   : matmul(xf, head);            // head is [dim, vocab]
             return softmax_cross_entropy(logits, targets);
         };
 
@@ -343,6 +352,7 @@ int main() {
 
         std::cout << "ternary15m pretrain: steps=" << steps_total << " B=" << B << " T=" << T
                   << " lr=" << lr_counter_peak << " lr_fp=" << lr_fp_peak
+                  << " head=" << (tie_head ? "tied" : "untied")
                   << " start=" << start_step << "\n";
 
         double win_ms = 0.0;
