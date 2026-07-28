@@ -2,6 +2,18 @@
 
 MotifCL is a C++17/OpenCL neural compute framework for legacy AMD GPUs, especially Polaris/RX 580-class hardware. It is designed as a compact research-first alternative to heavy ML runtimes: OpenCL runtime, Tensor API, eager autograd for core training loops, neural-network modules, Transformer forward stack, LoRA/Motif/SARC research modules, Python bindings, tests, tools, benchmarks, and CMake install/export support.
 
+## Headline result: ternary LM pretrained from scratch on a 2017 Radeon RX 580
+
+A stories15M-shaped model (288 dim, 6 layers, 32k vocab) trained **from random init**
+on a single RX 580 8 GB: 48 h, 160k steps, 655M tokens, ~4,150 tok/s, zero NaNs, zero
+restarts. Every attention/FFN linear is a ternary **counter synapse** — no FP32 master
+weights and no optimizer moments ever existed; the ~6-bit counter state *is* the model.
+Best val ppl **6.06** vs 4.94–4.99 for the same architecture trained BitNet-style (STE
+over FP32 latents) on an L40S. Full write-up + raw 2,083-line training log:
+[docs/TERNARY15M_PRETRAIN_RESULTS.md](https://github.com/kharkilirov1/MotifCL/blob/fog-qkv-split/docs/TERNARY15M_PRETRAIN_RESULTS.md)
+(branch `fog-qkv-split`). Method package: [memory-native](https://github.com/kharkilirov1/memory-native).
+
+
 This release is a productionized source tree rather than a single-file kernel demo. The C++ core builds as a reusable library target `MotifCL::motifcl`; examples, tests, tools and benchmarks are separate targets; kernels are installed and discoverable through `MOTIFCL_KERNEL_DIR` or the installed data directory.
 
 ## Implemented stack
@@ -154,3 +166,12 @@ cmake --build build -j
 ## Current engineering boundaries
 
 MotifCL is now structured and buildable as a real library, but it is still intentionally small. It does not attempt to be a full PyTorch replacement. Transformer forward and a small GPT-style backward/training path work through token/position embeddings, RMSNorm, FlashAttention-style tiled multi-head attention, MLP, and cross entropy. Modern HF-style inference now routes through `HFTransformerConfig` + `ModernGPTModel`; Gemma/LLaMA/Mistral/Qwen2-style configs share the same modern stack and common safetensors weight layout instead of living as separate model branches. Biasless/dropout-free modern SwiGLU MLP residual branches can use an experimental custom fused backward node with `MOTIFCL_ENABLE_FUSED_MLP_BACKWARD=1`; `MOTIFCL_ENABLE_HIGH_LEVEL_MLP_FUSION=1` additionally tries the normed-buffer-free row-inverse cached RMSNorm+gate/up projection path. These modes currently exist for experimentation and must beat the default register-blocked GEMM path before becoming default. Q8_0 and Q4_0 quantize/dequantize and matmul are implemented as correctness-first symmetric paths with per-tensor, per-row/per-column, flat blockwise, mixed Q8/Q4 matmul support, register-blocked unscaled quantized kernels, mixed per-layer transformer inference policy, a `cl_khr_integer_dot_product` generated-kernel path for Q8 when the driver exposes it, a Q4 dot4-unrolled unscaled specialization for `K % 4 == 0`, and portable fallback kernels. F32 matmul now uses a 4x4 per-thread register-blocked 32x32 workgroup tile for normal non-transposed matmul, while transpose and scaled-quant metadata paths keep conservative fallback kernels. Rowwise sum/max, RMSNorm, RMS-per-row, LayerNorm, and RMSNorm backward-X use cooperative workgroup row reductions instead of one-thread-per-row reductions when the device supports 256-workitem groups; RMSNorm+residual backward has a fused helper. Static graph capture can replay captured GPU kernel launches and scalar host reductions, exposes a linear schedule, records tensor specs, estimates buffer reuse/liveness, can emit shape-polymorphic signatures, supports exact same-shape runtime tensor rebinding for captured kernel buffer arguments, and can switch pure captured kernel graphs to `cl_khr_command_buffer` replay/update when the driver exposes the extension. Runtime OpenCL handles are shared across buffers/programs/kernels/replay so tensor storage can be downloaded/released safely after a Backend scope ends; creating new ops still intentionally requires a live Backend/KernelCache. Remaining limits are mainly true dynamic-shape rebinding/recompilation, planner-materialized buffer allocation for arbitrary captured graphs, hand-written vendor ISA assembly kernels, full FP16 backward coverage across all training ops, exact byte-for-byte SentencePiece `precompiled_charsmap` parity for arbitrary ICU rule sets, architecture-specific HF weight mappers beyond the implemented LLaMA/Gemma/Mistral/Qwen/Qwen3.5/Mixtral aliases, fully compact packed ragged KV-cache storage, exact full-vocab GPU top-p without the current candidate cap, deeper backend-handle ergonomics for post-Backend new ops, and broader production performance tuning.
+
+## How this was built
+
+Built entirely by AI (Claude) under sustained human direction, over months, by someone
+with no formal CS/math background. Working protocol: every claim needs an executable
+witness — tests, frozen pre-run forecasts, raw logs committed next to results, negative
+results reported first-class. The repo, not the author, answers technical questions.
+Status: **frozen** (July 2026) — out of money and hardware, not out of ideas.
+Everything reproduces from a cold clone.
