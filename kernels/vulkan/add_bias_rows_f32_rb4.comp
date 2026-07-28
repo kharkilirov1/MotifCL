@@ -1,0 +1,21 @@
+// Row-broadcast bias add, four contiguous outputs per invocation.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BiasBuf { float bias[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint count;
+    uint cols;
+} p;
+
+void main() {
+    const uint base = gl_GlobalInvocationID.x * 4u;
+    for (uint j = 0u; j < 4u; ++j) {
+        const uint idx = base + j;
+        if (idx < p.count) outv[idx] = x[idx] + bias[idx % p.cols];
+    }
+}

@@ -13,6 +13,20 @@
 
 namespace motifcl::nn {
 
+enum class TransformerActivation {
+    SiLU,
+    GELU,
+    GELUTanh,
+};
+
+enum class RopeScalingType {
+    None,
+    Linear,
+    Dynamic,
+    YaRN,
+    Llama3,
+};
+
 class TransformerBlock : public Module {
 public:
     TransformerBlock(Backend& backend, int n_embd, int n_head, int mlp_hidden);
@@ -56,6 +70,7 @@ struct TransformerConfig {
     int n_head = 0;
     int n_kv_head = 0;
     int head_dim = 0;
+    int v_head_dim = 0;
     int n_layer = 0;
     int mlp_hidden = 0;
     float dropout = 0.0f;
@@ -66,7 +81,16 @@ struct TransformerConfig {
     bool causal = true;
     bool learned_position_embeddings = false;
     float rope_theta = 10000.0f;
+    RopeScalingType rope_scaling_type = RopeScalingType::None;
+    float rope_scaling_factor = 1.0f;
+    int rope_original_context = 0;
+    float rope_low_freq_factor = 1.0f;
+    float rope_high_freq_factor = 4.0f;
+    float rope_beta_fast = 32.0f;
+    float rope_beta_slow = 1.0f;
     float attention_scale = 0.0f; // <=0 means use the standard 1/sqrt(head_dim)
+    float attention_softcap = 0.0f;
+    float final_logit_softcap = 0.0f;
     int rotary_dim = 0;
     bool rope_split_half = false;
     int sliding_window = 0;
@@ -82,6 +106,11 @@ struct TransformerConfig {
     std::vector<int> layer_kv_shared_sources;
     bool split_qkv_projections = false;
     bool split_mlp_projections = false;
+    TransformerActivation activation = TransformerActivation::SiLU;
+    bool use_layer_norm = false;
+    bool norm_first = true;
+    bool use_attention_output_bias = false;
+    bool use_mlp_bias = false;
     bool skip_weight_init = false;
     bool use_qk_norm = false;
     bool use_v_norm = false;
@@ -151,6 +180,7 @@ public:
     Linear gate_up_proj;
     Linear down_proj;
     bool use_swiglu = true;
+    TransformerActivation activation = TransformerActivation::SiLU;
     float dropout_p = 0.0f;
 
     ModernMLP(Backend& backend, int n_embd, int hidden, bool use_swiglu = true,
@@ -236,6 +266,7 @@ public:
     int n_head() const { return n_head_; }
     int n_kv_head() const { return n_kv_head_; }
     int head_dim() const { return head_dim_; }
+    int v_head_dim() const { return v_head_dim_; }
     int attention_window() const { return attention_window_; }
     void set_attention_window(int window);
     bool qk_norm_enabled() const { return use_qk_norm_; }
@@ -282,12 +313,22 @@ private:
     int n_head_ = 0;
     int n_kv_head_ = 0;
     int head_dim_ = 0;
+    int v_head_dim_ = 0;
     int q_dim_ = 0;
     int kv_dim_ = 0;
+    int v_dim_ = 0;
     bool use_rope_ = true;
     bool rope_split_half_ = false;
     float rope_theta_ = 10000.0f;
+    RopeScalingType rope_scaling_type_ = RopeScalingType::None;
+    float rope_scaling_factor_ = 1.0f;
+    int rope_original_context_ = 0;
+    float rope_low_freq_factor_ = 1.0f;
+    float rope_high_freq_factor_ = 4.0f;
+    float rope_beta_fast_ = 32.0f;
+    float rope_beta_slow_ = 1.0f;
     float attention_scale_ = 0.0f;
+    float attention_softcap_ = 0.0f;
     int rotary_dim_ = 0;
     float dropout_p_ = 0.0f;
     int attention_window_ = 0;
@@ -449,6 +490,7 @@ private:
     bool use_post_ffw_norm_ = false;
     bool use_layer_output_scale_ = false;
     bool use_per_layer_input_ = false;
+    bool norm_first_ = true;
 
     Tensor apply_attention_residual(const Tensor& x, const Tensor& attn_out);
     Tensor apply_ffn_residual(const Tensor& h, const Tensor& mlp_out);

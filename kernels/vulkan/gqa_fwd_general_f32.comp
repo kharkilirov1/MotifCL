@@ -1,0 +1,154 @@
+// General F32 grouped-query attention forward.
+// Handles batch, causal/query offsets, sliding windows, padded KV strides and
+// all public mask layouts/dtypes. One wave64-sized workgroup owns one
+// (batch, query token, query head) row and keeps its softmax in LDS.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KBuf { float k[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VBuf { float v[]; };
+layout(std430, set = 0, binding = 3) readonly buffer MaskBuf { uint8_t mask_bytes[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint batch;
+    uint query_tokens;
+    uint key_tokens;
+    uint key_stride;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    uint v_head_dim;
+    uint causal;
+    uint query_offset;
+    uint sliding_window;
+    uint mask_layout;
+    uint mask_mode;
+    uint mask_dtype; // 0=none, 1=f32, 2=i32, 3=u8
+    float scale;
+} p;
+
+shared float scores[1024];
+shared float scratch_max[64];
+shared float scratch_sum[64];
+shared uint scratch_valid[64];
+
+uint mask_index(uint b, uint tq, uint tk) {
+    if (p.mask_layout == 1u) return tq * p.key_tokens + tk; // [Q,K]
+    if (p.mask_layout == 2u) return b * p.key_tokens + tk; // [B,K]
+    if (p.mask_layout == 3u) return (b * p.query_tokens + tq) * p.key_tokens + tk;
+    if (p.mask_layout == 4u) return b * p.key_tokens + tk; // [B,1,K]
+    if (p.mask_layout == 5u) return tq * p.key_tokens + tk; // [1,Q,K]
+    return tq * p.key_tokens + tk;
+}
+
+uint mask_code(uint idx) {
+    if (p.mask_dtype == 3u) return uint(mask_bytes[idx]);
+    const uint base = idx * 4u;
+    return uint(mask_bytes[base]) |
+           (uint(mask_bytes[base + 1u]) << 8u) |
+           (uint(mask_bytes[base + 2u]) << 16u) |
+           (uint(mask_bytes[base + 3u]) << 24u);
+}
+
+bool mask_blocks(uint idx) {
+    if (p.mask_dtype == 0u || p.mask_mode != 0u) return false;
+    if (p.mask_dtype == 1u) return uintBitsToFloat(mask_code(idx)) != 0.0;
+    return mask_code(idx) != 0u;
+}
+
+float mask_bias(uint idx) {
+    return (p.mask_dtype == 1u && p.mask_mode != 0u)
+        ? uintBitsToFloat(mask_code(idx))
+        : 0.0;
+}
+
+bool key_allowed(uint b, uint tq, uint tk) {
+    const uint abs_query = p.query_offset + tq;
+    if (p.causal != 0u && tk > abs_query) return false;
+    if (p.sliding_window != 0u) {
+        const uint min_key = abs_query + 1u > p.sliding_window
+            ? abs_query + 1u - p.sliding_window
+            : 0u;
+        if (tk < min_key) return false;
+    }
+    return !mask_blocks(mask_index(b, tq, tk));
+}
+
+void main() {
+    const uint tq = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint b = gl_WorkGroupID.z;
+    const uint lane = gl_LocalInvocationID.x;
+    if (b >= p.batch || tq >= p.query_tokens || h >= p.n_head) return;
+
+    const uint group_size = p.n_head / p.n_kv_head;
+    const uint kv_head = h / group_size;
+    const uint q_channels = p.n_head * p.head_dim;
+    const uint k_channels = p.n_kv_head * p.head_dim;
+    const uint v_channels = p.n_kv_head * p.v_head_dim;
+    const uint out_channels = p.n_head * p.v_head_dim;
+    const uint q_base = (b * p.query_tokens + tq) * q_channels + h * p.head_dim;
+    const uint k_head_offset = kv_head * p.head_dim;
+    const uint v_head_offset = kv_head * p.v_head_dim;
+    const float neg_inf = -3.402823466e+38;
+
+    float lane_max = neg_inf;
+    uint lane_valid = 0u;
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        float score = neg_inf;
+        if (key_allowed(b, tq, tk)) {
+            const uint k_base = (b * p.key_stride + tk) * k_channels + k_head_offset;
+            float dot = 0.0;
+            for (uint d = 0u; d < p.head_dim; ++d) dot += q[q_base + d] * k[k_base + d];
+            score = dot * p.scale + mask_bias(mask_index(b, tq, tk));
+            lane_max = max(lane_max, score);
+            lane_valid += 1u;
+        }
+        scores[tk] = score;
+    }
+    scratch_max[lane] = lane_max;
+    scratch_valid[lane] = lane_valid;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            scratch_max[lane] = max(scratch_max[lane], scratch_max[lane + stride]);
+            scratch_valid[lane] += scratch_valid[lane + stride];
+        }
+        barrier();
+    }
+    const uint valid = scratch_valid[0];
+    const float row_max = scratch_max[0];
+
+    float lane_sum = 0.0;
+    if (valid != 0u) {
+        for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+            const float e = scores[tk] == neg_inf ? 0.0 : exp(scores[tk] - row_max);
+            scores[tk] = e;
+            lane_sum += e;
+        }
+    }
+    scratch_sum[lane] = lane_sum;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) scratch_sum[lane] += scratch_sum[lane + stride];
+        barrier();
+    }
+    const float inv_sum = scratch_sum[0] > 0.0 ? 1.0 / scratch_sum[0] : 0.0;
+    barrier();
+
+    const uint out_base = (b * p.query_tokens + tq) * out_channels + h * p.v_head_dim;
+    for (uint d = lane; d < p.v_head_dim; d += 64u) {
+        float acc = 0.0;
+        if (valid != 0u) {
+            for (uint tk = 0u; tk < p.key_tokens; ++tk) {
+                acc += scores[tk] *
+                    v[(b * p.key_stride + tk) * v_channels + v_head_offset + d];
+            }
+        }
+        outv[out_base + d] = acc * inv_sum;
+    }
+}

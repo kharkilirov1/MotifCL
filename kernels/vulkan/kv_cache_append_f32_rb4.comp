@@ -1,0 +1,32 @@
+// Four elements per invocation: coalesced F32 KV-cache append.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer NewKBuf { float new_k[]; };
+layout(std430, set = 0, binding = 1) readonly buffer NewVBuf { float new_v[]; };
+layout(std430, set = 0, binding = 2) buffer CacheKBuf { float cache_k[]; };
+layout(std430, set = 0, binding = 3) buffer CacheVBuf { float cache_v[]; };
+
+layout(push_constant) uniform Push {
+    uint batch;
+    uint new_tokens;
+    uint max_tokens;
+    uint kv_channels;
+    uint start_pos;
+    uint count;
+} p;
+
+void main() {
+    const uint base = gl_GlobalInvocationID.x * 4u;
+    for (uint j = 0u; j < 4u; ++j) {
+        const uint idx = base + j;
+        if (idx >= p.count) continue;
+        const uint c = idx % p.kv_channels;
+        const uint t = (idx / p.kv_channels) % p.new_tokens;
+        const uint b = idx / (p.new_tokens * p.kv_channels);
+        const uint dst = (b * p.max_tokens + p.start_pos + t) * p.kv_channels + c;
+        cache_k[dst] = new_k[idx];
+        cache_v[dst] = new_v[idx];
+    }
+}

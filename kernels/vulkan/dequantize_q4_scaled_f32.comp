@@ -1,0 +1,43 @@
+// Dequantize packed Q4_0 (nibbles in uint8_t) + scales -> f32.
+// Per-element: low nibble first (gid even), high nibble second (gid odd),
+// code-8 then *scale. Matches quant.cl dequantize_q4_0_to_f32_scaled exactly.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer InBuf  { uint8_t packed[]; };
+layout(std430, set = 0, binding = 1) readonly buffer ScaleBuf { float scales[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float out_f32[]; };
+
+layout(push_constant) uniform Push {
+    uint count;  // number of elements (not bytes)
+    uint mode;   // 0=scalar, 1=rows, 2=cols
+    uint rows;
+    uint cols;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.count) return;
+
+    uint byte_idx = gid >> 1u;
+    uint packed_byte = uint(packed[byte_idx]);
+    uint code;
+    if ((gid & 1u) != 0u) {
+        code = (packed_byte >> 4u) & 15u;
+    } else {
+        code = packed_byte & 15u;
+    }
+    int q = int(code) - 8;
+
+    float scale;
+    if (p.mode == 1u) {
+        scale = scales[gid / p.cols];
+    } else if (p.mode == 2u) {
+        scale = scales[gid - (gid / p.cols) * p.cols];
+    } else {
+        scale = scales[0];
+    }
+    out_f32[gid] = float(q) * scale;
+}

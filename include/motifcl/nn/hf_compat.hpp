@@ -21,7 +21,9 @@ enum class HFArchitecture {
     Gemma3,
     Gemma4,
     Llama,
+    Llama4,
     Mistral,
+    Ministral,
     Qwen2,
     Qwen3,
     Qwen35,
@@ -29,6 +31,8 @@ enum class HFArchitecture {
     Phi4,
     Mixtral,
     DeepSeek,
+    GLM4,
+    SmolLM,
     Falcon,
     GPTNeoX,
     Mamba,
@@ -132,6 +136,14 @@ struct HFTransformerConfig {
     float rms_norm_eps = 1e-6f;
     bool tie_word_embeddings = false;
     bool attention_bias = false;
+    bool attention_output_bias = false;
+    bool mlp_bias = false;
+    bool fused_qkv_weights = false;
+    bool fused_mlp_weights = false;
+    bool layer_norm = false;
+    bool norm_first = true;
+    std::string hidden_activation = "silu";
+    std::string rope_scaling_type = "none";
     int bos_token_id = 1;
     int eos_token_id = 2;
     int pad_token_id = 0;

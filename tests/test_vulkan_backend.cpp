@@ -1,11 +1,14 @@
 #include <iostream>
 #include <cstdlib>
+#include <cstdint>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <string>
 #include <vector>
 
 #include <motifcl/motifcl.hpp>
+#include <motifcl/nn/compact_counter.hpp>
 #include <motifcl/runtime/microkernel.hpp>
 #include <motifcl/runtime/vulkan_backend.hpp>
 
@@ -216,6 +219,1362 @@ int main() {
                 expect(std::fabs(add_result.output[i] - (add_a[i] + add_b[i])) <= 1e-6f,
                        "Vulkan add output mismatch");
             }
+        }
+
+        try {
+            auto vk_backend = Backend::create_vulkan();
+            auto VA = Tensor::from_cpu(vk_backend, {1, 3}, DType::F32, a.data());
+            auto VB = Tensor::from_cpu(vk_backend, {3, 2}, DType::F32, b.data());
+            auto VC = matmul(VA, VB);
+            const auto vc = VC.to_vector<float>();
+            expect(vc.size() == 2, "Vulkan-native Tensor matmul must return N output values");
+            if (vc.size() == 2) {
+                expect(std::fabs(vc[0] - 22.0f) <= 1e-5f && std::fabs(vc[1] - 28.0f) <= 1e-5f,
+                       "Vulkan-native Tensor matmul output mismatch");
+            }
+
+            const std::vector<std::int8_t> q8_a = {
+                1, -2, 3,
+                4, 0, 2,
+            };
+            const std::vector<std::int8_t> q8_b = {
+                2, -1,
+                -3, 4,
+                1, 2,
+            };
+            auto VQ8A = Tensor::from_cpu(vk_backend, {2, 3}, DType::Q8_0, q8_a.data());
+            auto VQ8B = Tensor::from_cpu(vk_backend, {3, 2}, DType::Q8_0, q8_b.data());
+            VQ8A._set_quant_scale(0.5f);
+            VQ8B._set_quant_scale(0.25f);
+            auto VQ8Y = matmul(VQ8A, VQ8B);
+            const auto vq8y = VQ8Y.to_vector<float>();
+            const std::vector<float> q8_expected = {
+                (1.0f * 2.0f + -2.0f * -3.0f + 3.0f * 1.0f) * 0.125f,
+                (1.0f * -1.0f + -2.0f * 4.0f + 3.0f * 2.0f) * 0.125f,
+                (4.0f * 2.0f + 0.0f * -3.0f + 2.0f * 1.0f) * 0.125f,
+                (4.0f * -1.0f + 0.0f * 4.0f + 2.0f * 2.0f) * 0.125f,
+            };
+            expect(vq8y.size() == q8_expected.size(), "Vulkan-native Tensor Q8 matmul must return M*N values");
+            if (vq8y.size() == q8_expected.size()) {
+                for (std::size_t i = 0; i < vq8y.size(); ++i) {
+                    expect(std::fabs(vq8y[i] - q8_expected[i]) <= 1e-5f,
+                           "Vulkan-native Tensor Q8 matmul output mismatch");
+                }
+            }
+
+            auto VSX = Tensor::from_cpu(vk_backend, {2, 3}, DType::F32, softmax_input.data());
+            auto VSY = softmax_rows(VSX);
+            const auto vsy = VSY.to_vector<float>();
+            expect(vsy.size() == softmax_input.size(), "Vulkan-native Tensor softmax must return rows*cols values");
+            if (vsy.size() == softmax_input.size()) {
+                expect(std::fabs(vsy[0] - softmax.output[0]) <= 1e-5f &&
+                           std::fabs(vsy[1] - softmax.output[1]) <= 1e-5f &&
+                           std::fabs(vsy[2] - softmax.output[2]) <= 1e-5f,
+                       "Vulkan-native Tensor softmax output mismatch");
+            }
+
+            auto VRX = Tensor::from_cpu(vk_backend, {2, 4}, DType::F32, rms_x.data());
+            auto VRW = Tensor::from_cpu(vk_backend, {4}, DType::F32, rms_w.data());
+            auto VRY = rmsnorm(VRX, VRW);
+            const auto vry = VRY.to_vector<float>();
+            expect(vry.size() == rms_x.size(), "Vulkan-native Tensor RMSNorm must return rows*cols values");
+            if (vry.size() == rms_x.size()) {
+                expect(std::fabs(vry[0] - rmsnorm_result.output[0]) <= 1e-5f &&
+                           std::fabs(vry[3] - rmsnorm_result.output[3]) <= 1e-5f &&
+                           std::fabs(vry[4] - rmsnorm_result.output[4]) <= 1e-5f,
+                       "Vulkan-native Tensor RMSNorm output mismatch");
+            }
+
+            auto VSwiX = Tensor::from_cpu(vk_backend, {2, 4}, DType::F32, swiglu_input.data());
+            auto VSwiY = swiglu(VSwiX);
+            const auto vswiy = VSwiY.to_vector<float>();
+            expect(vswiy.size() == swiglu_result.output.size(),
+                   "Vulkan-native Tensor SwiGLU must return rows*hidden values");
+            if (vswiy.size() == swiglu_result.output.size()) {
+                expect(std::fabs(vswiy[0] - swiglu_result.output[0]) <= 1e-5f &&
+                           std::fabs(vswiy[1] - swiglu_result.output[1]) <= 1e-5f &&
+                           std::fabs(vswiy[2] - swiglu_result.output[2]) <= 1e-5f,
+                       "Vulkan-native Tensor SwiGLU output mismatch");
+            }
+
+            auto VAddA = Tensor::from_cpu(vk_backend, {2, 2}, DType::F32, add_a.data());
+            auto VAddB = Tensor::from_cpu(vk_backend, {2, 2}, DType::F32, add_b.data());
+            auto VAddY = add(VAddA, VAddB);
+            const auto vadd_y = VAddY.to_vector<float>();
+            expect(vadd_y.size() == add_result.output.size(),
+                   "Vulkan-native Tensor add must return input-sized output");
+            if (vadd_y.size() == add_result.output.size()) {
+                expect(std::fabs(vadd_y[0] - add_result.output[0]) <= 1e-6f &&
+                           std::fabs(vadd_y[1] - add_result.output[1]) <= 1e-6f &&
+                           std::fabs(vadd_y[2] - add_result.output[2]) <= 1e-6f,
+                       "Vulkan-native Tensor add output mismatch");
+            }
+
+            // Tensor-level sub parity on Vulkan (mirror of add; needed for reversible inverse coupling).
+            auto VSubY = sub(VAddA, VAddB);
+            const auto vsub_y = VSubY.to_vector<float>();
+            expect(vsub_y.size() == add_a.size(),
+                   "Vulkan-native Tensor sub must return input-sized output");
+            if (vsub_y.size() == add_a.size()) {
+                for (std::size_t i = 0; i < add_a.size(); ++i) {
+                    expect(std::fabs(vsub_y[i] - (add_a[i] - add_b[i])) <= 1e-6f,
+                           "Vulkan-native Tensor sub output mismatch");
+                }
+            }
+
+            auto VSgdParam = Tensor::from_cpu(vk_backend, {2, 2}, DType::F32, add_a.data());
+            auto VSgdGrad = Tensor::from_cpu(vk_backend, {2, 2}, DType::F32, add_b.data());
+            sgd_update(VSgdParam, VSgdGrad, 0.1f);
+            const auto vsgd = VSgdParam.to_vector<float>();
+            expect(vsgd.size() == add_a.size(), "Vulkan-native Tensor SGD update must preserve param size");
+            if (vsgd.size() == add_a.size()) {
+                for (std::size_t i = 0; i < add_a.size(); ++i) {
+                    expect(std::fabs(vsgd[i] - (add_a[i] - 0.1f * add_b[i])) <= 1e-6f,
+                           "Vulkan-native Tensor SGD update output mismatch");
+                }
+            }
+
+            // matmul backward parity: dA = dC * B^T (NT kernel), dB = A^T * dC
+            // (TN kernel), checked against CPU references. Shapes cross the
+            // 16x16 tile (multiple workgroups, multiple K-tiles, non-multiples
+            // of 16) so cross-tile accumulation is asserted. Tolerance 1e-4
+            // absolute (F32 accumulation over K=40 with |values| <= ~1).
+            {
+                const std::size_t M = 33, K = 40, N = 18;
+                std::vector<float> mm_a(M * K);
+                std::vector<float> mm_b(K * N);
+                std::vector<float> mm_g(M * N);
+                for (std::size_t i = 0; i < mm_a.size(); ++i) mm_a[i] = 0.25f * static_cast<float>(i % 7) - 0.5f;
+                for (std::size_t i = 0; i < mm_b.size(); ++i) mm_b[i] = 0.125f * static_cast<float>(i % 5) - 0.25f;
+                for (std::size_t i = 0; i < mm_g.size(); ++i) mm_g[i] = 0.5f * static_cast<float>(i % 3) - 0.5f;
+
+                auto MA = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(M), static_cast<int64_t>(K)},
+                                           DType::F32, mm_a.data());
+                auto MB = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(K), static_cast<int64_t>(N)},
+                                           DType::F32, mm_b.data());
+                MA.set_requires_grad(true);
+                MB.set_requires_grad(true);
+                auto MC = matmul(MA, MB);
+                auto MG = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(M), static_cast<int64_t>(N)},
+                                           DType::F32, mm_g.data());
+                MC.backward(MG);
+                expect(MA.grad() != nullptr && MB.grad() != nullptr,
+                       "Vulkan matmul backward must populate both input gradients");
+                if (MA.grad() && MB.grad()) {
+                    const auto ga = MA.grad()->to_vector<float>();
+                    const auto gb = MB.grad()->to_vector<float>();
+                    bool ga_ok = ga.size() == M * K;
+                    bool gb_ok = gb.size() == K * N;
+                    for (std::size_t m = 0; m < M && ga_ok; ++m) {
+                        for (std::size_t k2 = 0; k2 < K; ++k2) {
+                            float ref = 0.0f;
+                            for (std::size_t n2 = 0; n2 < N; ++n2) ref += mm_g[m * N + n2] * mm_b[k2 * N + n2];
+                            if (std::fabs(ga[m * K + k2] - ref) > 1e-4f) ga_ok = false;
+                        }
+                    }
+                    for (std::size_t k2 = 0; k2 < K && gb_ok; ++k2) {
+                        for (std::size_t n2 = 0; n2 < N; ++n2) {
+                            float ref = 0.0f;
+                            for (std::size_t m = 0; m < M; ++m) ref += mm_a[m * K + k2] * mm_g[m * N + n2];
+                            if (std::fabs(gb[k2 * N + n2] - ref) > 1e-4f) gb_ok = false;
+                        }
+                    }
+                    expect(ga_ok, "Vulkan matmul backward dA parity mismatch vs CPU reference");
+                    expect(gb_ok, "Vulkan matmul backward dB parity mismatch vs CPU reference");
+                }
+
+                // M=1 decode form exercises the wave-per-output NT kernel in backward.
+                auto M1A = Tensor::from_cpu(vk_backend, {1, static_cast<int64_t>(K)}, DType::F32, mm_a.data());
+                auto M1B = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(K), static_cast<int64_t>(N)},
+                                            DType::F32, mm_b.data());
+                M1A.set_requires_grad(true);
+                M1B.set_requires_grad(true);
+                auto M1C = matmul(M1A, M1B);
+                auto M1G = Tensor::from_cpu(vk_backend, {1, static_cast<int64_t>(N)}, DType::F32, mm_g.data());
+                M1C.backward(M1G);
+                expect(M1A.grad() != nullptr && M1B.grad() != nullptr,
+                       "Vulkan M=1 matmul backward must populate both input gradients");
+                if (M1A.grad() && M1B.grad()) {
+                    const auto ga = M1A.grad()->to_vector<float>();
+                    const auto gb = M1B.grad()->to_vector<float>();
+                    bool ok = ga.size() == K;
+                    bool gb_ok = gb.size() == K * N;
+                    for (std::size_t k2 = 0; k2 < K && ok; ++k2) {
+                        float ref = 0.0f;
+                        for (std::size_t n2 = 0; n2 < N; ++n2) ref += mm_g[n2] * mm_b[k2 * N + n2];
+                        if (std::fabs(ga[k2] - ref) > 1e-4f) ok = false;
+                    }
+                    // dB = A^T[K,1] * dC[1,N] (outer product through the TN kernel).
+                    for (std::size_t k2 = 0; k2 < K && gb_ok; ++k2) {
+                        for (std::size_t n2 = 0; n2 < N; ++n2) {
+                            const float ref = mm_a[k2] * mm_g[n2];
+                            if (std::fabs(gb[k2 * N + n2] - ref) > 1e-4f) gb_ok = false;
+                        }
+                    }
+                    expect(ok, "Vulkan M=1 matmul backward dA parity mismatch vs CPU reference");
+                    expect(gb_ok, "Vulkan M=1 matmul backward dB parity mismatch vs CPU reference");
+                }
+            }
+
+            // RMSNorm backward parity (dx wave-per-row kernel + two-stage dw)
+            // vs CPU reference; tolerance 1e-4 absolute.
+            {
+                const std::size_t R = 3, C = 8;
+                const float eps = 1e-5f;
+                std::vector<float> nx(R * C), nw(C), ng(R * C);
+                for (std::size_t i = 0; i < nx.size(); ++i) nx[i] = 0.2f * static_cast<float>(i % 9) - 0.8f;
+                for (std::size_t i = 0; i < nw.size(); ++i) nw[i] = 0.5f + 0.1f * static_cast<float>(i % 4);
+                for (std::size_t i = 0; i < ng.size(); ++i) ng[i] = 0.3f * static_cast<float>(i % 5) - 0.6f;
+
+                auto NX = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(R), static_cast<int64_t>(C)},
+                                           DType::F32, nx.data());
+                auto NW = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(C)}, DType::F32, nw.data());
+                NX.set_requires_grad(true);
+                NW.set_requires_grad(true);
+                auto NY = rmsnorm(NX, NW, eps);
+                auto NG = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(R), static_cast<int64_t>(C)},
+                                           DType::F32, ng.data());
+                NY.backward(NG);
+                expect(NX.grad() != nullptr && NW.grad() != nullptr,
+                       "Vulkan rmsnorm backward must populate x and weight gradients");
+                if (NX.grad() && NW.grad()) {
+                    const auto gx = NX.grad()->to_vector<float>();
+                    const auto gw = NW.grad()->to_vector<float>();
+                    bool gx_ok = gx.size() == R * C;
+                    bool gw_ok = gw.size() == C;
+                    std::vector<float> inv_r(R);
+                    for (std::size_t r = 0; r < R; ++r) {
+                        float ss = 0.0f;
+                        for (std::size_t c = 0; c < C; ++c) ss += nx[r * C + c] * nx[r * C + c];
+                        inv_r[r] = 1.0f / std::sqrt(ss / static_cast<float>(C) + eps);
+                    }
+                    for (std::size_t r = 0; r < R && gx_ok; ++r) {
+                        float dot = 0.0f;
+                        for (std::size_t c = 0; c < C; ++c) dot += ng[r * C + c] * nw[c] * nx[r * C + c];
+                        for (std::size_t c = 0; c < C; ++c) {
+                            const float inv = inv_r[r];
+                            const float ref = ng[r * C + c] * nw[c] * inv -
+                                              nx[r * C + c] * inv * inv * inv * dot / static_cast<float>(C);
+                            if (std::fabs(gx[r * C + c] - ref) > 1e-4f) gx_ok = false;
+                        }
+                    }
+                    for (std::size_t c = 0; c < C && gw_ok; ++c) {
+                        float ref = 0.0f;
+                        for (std::size_t r = 0; r < R; ++r) ref += ng[r * C + c] * nx[r * C + c] * inv_r[r];
+                        if (std::fabs(gw[c] - ref) > 1e-4f) gw_ok = false;
+                    }
+                    expect(gx_ok, "Vulkan rmsnorm backward dx parity mismatch vs CPU reference");
+                    expect(gw_ok, "Vulkan rmsnorm backward dw parity mismatch vs CPU reference");
+                }
+            }
+
+            // SwiGLU backward parity vs CPU reference; tolerance 1e-4.
+            {
+                const std::size_t R = 2, H = 4;
+                std::vector<float> sp(R * 2 * H), sg(R * H);
+                for (std::size_t i = 0; i < sp.size(); ++i) sp[i] = 0.3f * static_cast<float>(i % 7) - 0.9f;
+                for (std::size_t i = 0; i < sg.size(); ++i) sg[i] = 0.4f * static_cast<float>(i % 3) - 0.4f;
+                auto SP = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(R), static_cast<int64_t>(2 * H)},
+                                           DType::F32, sp.data());
+                SP.set_requires_grad(true);
+                auto SY = swiglu(SP);
+                auto SG = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(R), static_cast<int64_t>(H)},
+                                           DType::F32, sg.data());
+                SY.backward(SG);
+                expect(SP.grad() != nullptr, "Vulkan swiglu backward must populate packed gradient");
+                if (SP.grad()) {
+                    const auto gp = SP.grad()->to_vector<float>();
+                    bool ok = gp.size() == R * 2 * H;
+                    for (std::size_t r = 0; r < R && ok; ++r) {
+                        for (std::size_t c = 0; c < H; ++c) {
+                            const float gate = sp[r * 2 * H + c];
+                            const float up = sp[r * 2 * H + H + c];
+                            const float go = sg[r * H + c];
+                            const float sig = 1.0f / (1.0f + std::exp(-gate));
+                            const float dgate = go * up * (sig + gate * sig * (1.0f - sig));
+                            const float dup = go * gate * sig;
+                            if (std::fabs(gp[r * 2 * H + c] - dgate) > 1e-4f) ok = false;
+                            if (std::fabs(gp[r * 2 * H + H + c] - dup) > 1e-4f) ok = false;
+                        }
+                    }
+                    expect(ok, "Vulkan swiglu backward parity mismatch vs CPU reference");
+                }
+            }
+
+            // GELU forward + backward parity (tanh approximation); tol 1e-4.
+            {
+                const std::size_t N = 7;
+                std::vector<float> gxv(N), ggv(N);
+                for (std::size_t i = 0; i < N; ++i) {
+                    gxv[i] = 0.7f * static_cast<float>(i) - 2.0f;
+                    ggv[i] = 0.25f * static_cast<float>(i % 4) - 0.25f;
+                }
+                auto GX = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(N)}, DType::F32, gxv.data());
+                GX.set_requires_grad(true);
+                auto GY = gelu(GX);
+                const auto gy = GY.to_vector<float>();
+                auto GG = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(N)}, DType::F32, ggv.data());
+                GY.backward(GG);
+                bool fwd_ok = gy.size() == N;
+                bool bwd_ok = GX.grad() != nullptr;
+                const float cst = 0.7978845608028654f;
+                for (std::size_t i = 0; i < N && fwd_ok; ++i) {
+                    const float v = gxv[i];
+                    const float t = cst * (v + 0.044715f * v * v * v);
+                    const float ref = 0.5f * v * (1.0f + std::tanh(t));
+                    if (std::fabs(gy[i] - ref) > 1e-4f) fwd_ok = false;
+                }
+                if (bwd_ok) {
+                    const auto gd = GX.grad()->to_vector<float>();
+                    for (std::size_t i = 0; i < N && bwd_ok; ++i) {
+                        const float v = gxv[i];
+                        const float inner = cst * (v + 0.044715f * v * v * v);
+                        const float th = std::tanh(inner);
+                        const float sech2 = 1.0f - th * th;
+                        const float inner_grad = cst * (1.0f + 3.0f * 0.044715f * v * v);
+                        const float ref = ggv[i] * (0.5f * (1.0f + th) + 0.5f * v * sech2 * inner_grad);
+                        if (std::fabs(gd[i] - ref) > 1e-4f) bwd_ok = false;
+                    }
+                }
+                expect(fwd_ok, "Vulkan gelu forward parity mismatch vs CPU reference");
+                expect(bwd_ok, "Vulkan gelu backward parity mismatch vs CPU reference");
+            }
+
+            // softmax rows backward (runtime-level kernel) vs CPU reference.
+            {
+                const std::size_t R = 2, C = 100;
+                std::vector<float> sy(R * C), sdy(R * C);
+                for (std::size_t r = 0; r < R; ++r) {
+                    float sum = 0.0f;
+                    for (std::size_t c = 0; c < C; ++c) {
+                        sy[r * C + c] = std::exp(0.01f * static_cast<float>((c * 7 + r * 3) % 23));
+                        sum += sy[r * C + c];
+                    }
+                    for (std::size_t c = 0; c < C; ++c) sy[r * C + c] /= sum;
+                }
+                for (std::size_t i = 0; i < sdy.size(); ++i) sdy[i] = 0.2f * static_cast<float>(i % 6) - 0.5f;
+                auto& vk_runtime = vk_backend.vulkan_runtime();
+                auto YB = vk_runtime.create_buffer(sy.size() * sizeof(float), sy.data());
+                auto DYB = vk_runtime.create_buffer(sdy.size() * sizeof(float), sdy.data());
+                auto DXB = vk_runtime.create_buffer(sy.size() * sizeof(float));
+                const auto sres = run_vulkan_softmax_rows_backward(vk_runtime, YB, DYB, DXB, R, C);
+                expect(sres.success, "Vulkan softmax backward dispatch must succeed");
+                if (sres.success) {
+                    std::vector<float> sdx(R * C, 0.0f);
+                    DXB.download(sdx.data(), sdx.size() * sizeof(float));
+                    bool ok = true;
+                    for (std::size_t r = 0; r < R && ok; ++r) {
+                        float dot = 0.0f;
+                        for (std::size_t c = 0; c < C; ++c) dot += sdy[r * C + c] * sy[r * C + c];
+                        for (std::size_t c = 0; c < C; ++c) {
+                            const float ref = sy[r * C + c] * (sdy[r * C + c] - dot);
+                            if (std::fabs(sdx[r * C + c] - ref) > 1e-5f) ok = false;
+                        }
+                    }
+                    expect(ok, "Vulkan softmax backward parity mismatch vs CPU reference");
+                }
+            }
+
+            nn::CounterStateLinear counter_layer(vk_backend, 4, 2, 3, 0.01f, 0.0f, 1.0f, 0.9f, 1.0e-8f, 123u);
+            counter_layer.set_training(false);
+            const auto counter_state = counter_layer.state.to_vector<std::uint8_t>();
+            const auto counter_scale = counter_layer.scale.to_vector<float>();
+            auto decode_counter_t = [&](std::size_t row, std::size_t feature) -> float {
+                const std::size_t gpr = 1;
+                const std::size_t group = feature / 4;
+                const std::size_t lane = feature % 4;
+                const std::size_t base = (row * gpr + group) * 3;
+                const std::uint32_t word = static_cast<std::uint32_t>(counter_state[base]) |
+                                           (static_cast<std::uint32_t>(counter_state[base + 1]) << 8u) |
+                                           (static_cast<std::uint32_t>(counter_state[base + 2]) << 16u);
+                const std::uint32_t code = (word >> (lane * 6u)) & 0x3fu;
+                return static_cast<float>(code / 5u) - 1.0f;
+            };
+
+            const auto counter_weight = counter_layer.decode_weight().to_vector<float>();
+            expect(counter_weight.size() == 8,
+                   "Vulkan CounterStateLinear decode_weight must return out*in values");
+            if (counter_weight.size() == 8 && counter_scale.size() == 2) {
+                for (std::size_t row = 0; row < 2; ++row) {
+                    for (std::size_t col = 0; col < 4; ++col) {
+                        const float expected = counter_scale[row] * decode_counter_t(row, col);
+                        expect(std::fabs(counter_weight[row * 4 + col] - expected) <= 1e-6f,
+                               "Vulkan CounterStateLinear decode_weight output mismatch");
+                    }
+                }
+            }
+
+            const std::vector<float> counter_x = {
+                1.0f, 2.0f, -1.0f, 0.5f,
+                -0.25f, 0.75f, 1.5f, -2.0f,
+            };
+            auto CounterX = Tensor::from_cpu(vk_backend, {2, 4}, DType::F32, counter_x.data());
+            const auto counter_y = counter_layer.forward(CounterX).to_vector<float>();
+            expect(counter_y.size() == 4,
+                   "Vulkan CounterStateLinear inference forward must return batch*out values");
+            if (counter_y.size() == 4 && counter_weight.size() == 8) {
+                for (std::size_t r = 0; r < 2; ++r) {
+                    for (std::size_t o = 0; o < 2; ++o) {
+                        float expected = 0.0f;
+                        for (std::size_t i = 0; i < 4; ++i) {
+                            expected += counter_x[r * 4 + i] * counter_weight[o * 4 + i];
+                        }
+                        expect(std::fabs(counter_y[r * 2 + o] - expected) <= 1e-5f,
+                               "Vulkan CounterStateLinear inference forward output mismatch");
+                    }
+                }
+            }
+
+            const std::vector<float> counter_grad_out = {
+                1.0f, -0.5f,
+                0.25f, 2.0f,
+            };
+            auto CounterGradOut = Tensor::from_cpu(vk_backend, {2, 2}, DType::F32, counter_grad_out.data());
+            const auto counter_grad_x = counter_layer.backward_input_from_state(CounterGradOut).to_vector<float>();
+            expect(counter_grad_x.size() == counter_x.size(),
+                   "Vulkan CounterStateLinear backward_input must return batch*in values");
+            if (counter_grad_x.size() == counter_x.size() && counter_scale.size() == 2) {
+                for (std::size_t r = 0; r < 2; ++r) {
+                    for (std::size_t i = 0; i < 4; ++i) {
+                        float expected = 0.0f;
+                        for (std::size_t o = 0; o < 2; ++o) {
+                            expected += counter_grad_out[r * 2 + o] * counter_scale[o] *
+                                        decode_counter_t(o, i);
+                        }
+                        expect(std::fabs(counter_grad_x[r * 4 + i] - expected) <= 1e-5f,
+                               "Vulkan CounterStateLinear backward_input output mismatch");
+                    }
+                }
+            }
+
+            const std::size_t qt = 2, kt = 3, nh = 2, nkh = 1, hd = 2;
+            const std::vector<float> gqa_q = {
+                1.0f, 0.0f, 0.0f, 1.0f,
+                1.0f, 1.0f, -1.0f, 0.5f,
+            };
+            const std::vector<float> gqa_k = {
+                1.0f, 0.0f,
+                0.0f, 1.0f,
+                1.0f, 1.0f,
+            };
+            const std::vector<float> gqa_v = {
+                1.0f, 2.0f,
+                3.0f, 4.0f,
+                5.0f, 6.0f,
+            };
+            const auto gqa_ref = run_vulkan_grouped_query_attention(gqa_q, gqa_k, gqa_v, qt, kt, nh, nkh, hd, 1.0f);
+            expect(gqa_ref.success, "Vulkan GQA reference dispatch must succeed");
+            auto VGQ = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(qt), static_cast<int64_t>(nh * hd)},
+                                        DType::F32, gqa_q.data());
+            auto VGK = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(kt), static_cast<int64_t>(nkh * hd)},
+                                        DType::F32, gqa_k.data());
+            auto VGV = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(kt), static_cast<int64_t>(nkh * hd)},
+                                        DType::F32, gqa_v.data());
+            auto VGY = grouped_query_attention(VGQ, VGK, VGV, static_cast<int>(nh), static_cast<int>(nkh),
+                                               false, 1, static_cast<int64_t>(qt), static_cast<int64_t>(kt), 0, 1.0f);
+            const auto vgy = VGY.to_vector<float>();
+            expect(vgy.size() == gqa_ref.output.size(), "Vulkan-native Tensor GQA must return query-sized output");
+            if (vgy.size() == gqa_ref.output.size()) {
+                for (std::size_t i = 0; i < vgy.size(); ++i) {
+                    expect(std::fabs(vgy[i] - gqa_ref.output[i]) <= 2.0e-5f,
+                           "Vulkan-native Tensor GQA output mismatch");
+                }
+            }
+
+            // Softmax cross-entropy forward + backward parity vs CPU
+            // reference (mean over rows; ignore out-of-range targets).
+            // Tolerance 1e-4 absolute.
+            {
+                const std::size_t R = 6, C = 37;
+                std::vector<float> logits(R * C);
+                std::vector<std::int32_t> tgt(R);
+                std::vector<float> ce_g = {0.7f};
+                for (std::size_t i = 0; i < logits.size(); ++i) {
+                    logits[i] = 0.15f * static_cast<float>((i * 13 + 5) % 29) - 2.0f;
+                }
+                for (std::size_t r = 0; r < R; ++r) tgt[r] = static_cast<std::int32_t>((r * 11 + 2) % C);
+                auto LG = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(R), static_cast<int64_t>(C)},
+                                           DType::F32, logits.data());
+                auto TG = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(R)}, DType::I32, tgt.data());
+                LG.set_requires_grad(true);
+                auto LOSS = softmax_cross_entropy(LG, TG);
+                const float loss_v = LOSS.item();
+                auto CEG = Tensor::from_cpu(vk_backend, {}, DType::F32, ce_g.data());
+                LOSS.backward(CEG);
+
+                float ref_loss = 0.0f;
+                std::vector<float> ref_grad(R * C, 0.0f);
+                for (std::size_t r = 0; r < R; ++r) {
+                    float maxv = -3.4e38f;
+                    for (std::size_t c = 0; c < C; ++c) maxv = std::max(maxv, logits[r * C + c]);
+                    float sum = 0.0f;
+                    for (std::size_t c = 0; c < C; ++c) sum += std::exp(logits[r * C + c] - maxv);
+                    ref_loss += std::log(sum) + maxv - logits[r * C + static_cast<std::size_t>(tgt[r])];
+                    for (std::size_t c = 0; c < C; ++c) {
+                        const float prob = std::exp(logits[r * C + c] - maxv) / sum;
+                        const float y = (static_cast<std::int32_t>(c) == tgt[r]) ? 1.0f : 0.0f;
+                        ref_grad[r * C + c] = ce_g[0] / static_cast<float>(R) * (prob - y);
+                    }
+                }
+                ref_loss /= static_cast<float>(R);
+                expect(std::fabs(loss_v - ref_loss) <= 1e-4f,
+                       "Vulkan softmax_cross_entropy forward parity mismatch vs CPU reference");
+                expect(LG.grad() != nullptr, "Vulkan softmax_cross_entropy backward must populate grad");
+                if (LG.grad()) {
+                    const auto gl = LG.grad()->to_vector<float>();
+                    bool ok = gl.size() == R * C;
+                    for (std::size_t i = 0; i < gl.size() && ok; ++i) {
+                        if (std::fabs(gl[i] - ref_grad[i]) > 1e-4f) ok = false;
+                    }
+                    expect(ok, "Vulkan softmax_cross_entropy backward parity mismatch vs CPU reference");
+                }
+            }
+
+            // Embedding gather forward + weight backward parity vs CPU reference.
+            {
+                const int V = 5, D = 4, T = 6;
+                std::vector<float> w(V * D);
+                for (std::size_t i = 0; i < w.size(); ++i) w[i] = 0.1f * static_cast<float>(i);
+                std::vector<std::int32_t> idx = {0, 3, 4, 1, 2, 4};
+                auto VW = Tensor::from_cpu(vk_backend, {V, D}, DType::F32, w.data());
+                VW.set_requires_grad(true);
+                auto VI = Tensor::from_cpu(vk_backend, {T}, DType::I32, idx.data());
+                nn::Embedding emb(vk_backend, V, D, /*skip_weight_init=*/true);
+                emb.weight.data = VW;
+                emb.weight.trainable = true;
+                VW.set_requires_grad(true);
+                emb.weight.data.set_requires_grad(true);
+                auto VY = emb.forward(VI);
+                const auto vy = VY.to_vector<float>();
+                // CPU reference gather.
+                bool gather_ok = vy.size() == static_cast<std::size_t>(T * D);
+                for (std::size_t t = 0; t < static_cast<std::size_t>(T) && gather_ok; ++t) {
+                    for (std::size_t d = 0; d < static_cast<std::size_t>(D); ++d) {
+                        const float ref = w[idx[t] * D + d];
+                        if (std::fabs(vy[t * D + d] - ref) > 1e-6f) gather_ok = false;
+                    }
+                }
+                expect(gather_ok, "Vulkan embedding gather forward parity mismatch vs CPU reference");
+
+                // Backward: grad_out flows into rows selected by idx.
+                std::vector<float> go(T * D);
+                for (std::size_t i = 0; i < go.size(); ++i) go[i] = 0.05f * static_cast<float>(i % 9) - 0.2f;
+                auto VGO = Tensor::from_cpu(vk_backend, {T, D}, DType::F32, go.data());
+                VY.backward(VGO);
+                expect(emb.weight.data.grad() != nullptr,
+                       "Vulkan embedding backward must populate weight gradient");
+                if (emb.weight.data.grad()) {
+                    const auto gw = emb.weight.data.grad()->to_vector<float>();
+                    bool bw_ok = gw.size() == static_cast<std::size_t>(V * D);
+                    std::vector<float> ref_gw(V * D, 0.0f);
+                    for (std::size_t t = 0; t < static_cast<std::size_t>(T); ++t) {
+                        for (std::size_t d = 0; d < static_cast<std::size_t>(D); ++d) {
+                            ref_gw[idx[t] * D + d] += go[t * D + d];
+                        }
+                    }
+                    for (std::size_t i = 0; i < gw.size() && bw_ok; ++i) {
+                        if (std::fabs(gw[i] - ref_gw[i]) > 1e-5f) bw_ok = false;
+                    }
+                    expect(bw_ok, "Vulkan embedding weight backward parity mismatch vs CPU reference");
+                }
+            }
+
+            // Embedding weight backward via the scatter fast path (Slice K):
+            // large vocab (V=64 > 2*T=12) triggers the scatter heuristic in
+            // embedding_weight_backward. Runs on every device: where native float
+            // atomics are trusted the native kernel is used, otherwise the CAS
+            // emulation (GCN4 / RX 580). Both must match the brute-force scan.
+            {
+                const int V = 64, D = 8, T = 6;
+                std::vector<float> w(V * D);
+                for (std::size_t i = 0; i < w.size(); ++i) w[i] = 0.01f * static_cast<float>(i);
+                std::vector<std::int32_t> idx = {5, 5, 10, 5, 60, 0};  // sparse, repeated rows
+                auto VW = Tensor::from_cpu(vk_backend, {V, D}, DType::F32, w.data());
+                VW.set_requires_grad(true);
+                auto VI = Tensor::from_cpu(vk_backend, {T}, DType::I32, idx.data());
+                nn::Embedding emb(vk_backend, V, D, /*skip_weight_init=*/true);
+                emb.weight.data = VW;
+                emb.weight.trainable = true;
+                VW.set_requires_grad(true);
+                emb.weight.data.set_requires_grad(true);
+                auto VY = emb.forward(VI);
+                std::vector<float> go(T * D);
+                for (std::size_t i = 0; i < go.size(); ++i) go[i] = 0.07f * static_cast<float>(i % 5) - 0.1f;
+                auto VGO = Tensor::from_cpu(vk_backend, {T, D}, DType::F32, go.data());
+                VY.backward(VGO);
+                expect(emb.weight.data.grad() != nullptr,
+                       "Vulkan embedding scatter backward must populate weight gradient");
+                if (emb.weight.data.grad()) {
+                    const auto gw = emb.weight.data.grad()->to_vector<float>();
+                    std::vector<float> ref_gw(V * D, 0.0f);
+                    for (std::size_t t = 0; t < static_cast<std::size_t>(T); ++t) {
+                        for (std::size_t d = 0; d < static_cast<std::size_t>(D); ++d) {
+                            ref_gw[idx[t] * D + d] += go[t * D + d];
+                        }
+                    }
+                    bool bw_ok = gw.size() == static_cast<std::size_t>(V * D);
+                    for (std::size_t i = 0; i < gw.size() && bw_ok; ++i) {
+                        if (std::fabs(gw[i] - ref_gw[i]) > 1e-5f) bw_ok = false;
+                    }
+                    expect(bw_ok, "Vulkan embedding scatter backward parity mismatch vs CPU reference");
+                }
+            }
+
+            // token_position_embedding forward + backward parity vs CPU reference.
+            {
+                const int V = 4, S = 3, D = 3, T = 6;  // token table [V,D], pos [S,D], B=2
+                std::vector<float> tw(V * D), pw(S * D);
+                for (std::size_t i = 0; i < tw.size(); ++i) tw[i] = 0.1f * static_cast<float>(i + 1);
+                for (std::size_t i = 0; i < pw.size(); ++i) pw[i] = -0.05f * static_cast<float>(i);
+                std::vector<std::int32_t> ids = {0, 2, 3, 1, 0, 3};  // B=2, T=3
+                auto VTW = Tensor::from_cpu(vk_backend, {V, D}, DType::F32, tw.data());
+                VTW.set_requires_grad(true);
+                auto VPW = Tensor::from_cpu(vk_backend, {S, D}, DType::F32, pw.data());
+                VPW.set_requires_grad(true);
+                auto VIDS = Tensor::from_cpu(vk_backend, {2, S}, DType::I32, ids.data());
+                auto VY = nn::token_position_embedding(VIDS, VTW, VPW);
+                const auto vy = VY.to_vector<float>();
+                bool fwd_ok = vy.size() == static_cast<std::size_t>(T * D);
+                for (std::size_t bt = 0; bt < static_cast<std::size_t>(T) && fwd_ok; ++bt) {
+                    const int pos = static_cast<int>(bt % S);
+                    const int id = ids[bt];
+                    for (std::size_t d = 0; d < static_cast<std::size_t>(D); ++d) {
+                        const float ref = tw[id * D + d] + pw[pos * D + d];
+                        if (std::fabs(vy[bt * D + d] - ref) > 1e-6f) fwd_ok = false;
+                    }
+                }
+                expect(fwd_ok, "Vulkan token_position_embedding forward parity mismatch vs CPU reference");
+
+                std::vector<float> go(T * D);
+                for (std::size_t i = 0; i < go.size(); ++i) go[i] = 0.07f * static_cast<float>(i % 5) - 0.1f;
+                auto VGO = Tensor::from_cpu(vk_backend, {T, D}, DType::F32, go.data());
+                VY.backward(VGO);
+                // CPU refs: token_grad same as gather, pos_grad sums over batch.
+                std::vector<float> ref_tw(V * D, 0.0f), ref_pw(S * D, 0.0f);
+                for (std::size_t bt = 0; bt < static_cast<std::size_t>(T); ++bt) {
+                    const int id = ids[bt];
+                    for (std::size_t d = 0; d < static_cast<std::size_t>(D); ++d) {
+                        ref_tw[id * D + d] += go[bt * D + d];
+                    }
+                }
+                for (std::size_t b = 0; b < 2; ++b) {
+                    for (std::size_t pos = 0; pos < static_cast<std::size_t>(S); ++pos) {
+                        for (std::size_t d = 0; d < static_cast<std::size_t>(D); ++d) {
+                            ref_pw[pos * D + d] += go[(b * S + pos) * D + d];
+                        }
+                    }
+                }
+                expect(VTW.grad() != nullptr, "Vulkan token_position_embedding backward must populate token grad");
+                expect(VPW.grad() != nullptr, "Vulkan token_position_embedding backward must populate position grad");
+                if (VTW.grad() && VPW.grad()) {
+                    const auto gw = VTW.grad()->to_vector<float>();
+                    const auto gpw = VPW.grad()->to_vector<float>();
+                    bool tw_ok = gw.size() == ref_tw.size();
+                    for (std::size_t i = 0; i < gw.size() && tw_ok; ++i)
+                        if (std::fabs(gw[i] - ref_tw[i]) > 1e-5f) tw_ok = false;
+                    expect(tw_ok, "Vulkan token_position_embedding token-weight backward parity mismatch");
+                    // Position table has S rows but the buffer may be padded; only S rows written.
+                    bool pw_ok = gpw.size() >= ref_pw.size();
+                    for (std::size_t i = 0; i < ref_pw.size() && pw_ok; ++i)
+                        if (std::fabs(gpw[i] - ref_pw[i]) > 1e-5f) pw_ok = false;
+                    expect(pw_ok, "Vulkan token_position_embedding position backward parity mismatch");
+                }
+            }
+
+            // RoPE forward + backward parity vs CPU reference (interleaved).
+            // B=2, T=2, n_head=2, head_dim=8 -> channels=16, batch*T=4 rows.
+            {
+                const std::size_t B = 2, T = 2, n_head = 2, head_dim = 8;
+                const std::size_t channels = n_head * head_dim;  // 16
+                const std::size_t rows = B * T;                  // 4
+                const float theta = 10000.0f;
+                std::vector<float> xv(rows * channels);
+                for (std::size_t i = 0; i < xv.size(); ++i)
+                    xv[i] = 0.03f * static_cast<float>(i) - 0.25f;
+                auto VX = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(rows), static_cast<int64_t>(channels)},
+                                           DType::F32, xv.data());
+                VX.set_requires_grad(true);
+                auto VY = rope(VX, static_cast<int>(n_head), static_cast<int64_t>(B),
+                               static_cast<int64_t>(T), theta, /*rotary_dim=*/0, /*token_offset=*/0);
+                const auto vy = VY.to_vector<float>();
+                // CPU reference (interleaved pair layout). Angle position is the
+                // sequence index t (kernel uses (gid/channels) % tokens), NOT the
+                // flat batch*seq row, so position resets each batch.
+                std::vector<float> ref(rows * channels);
+                for (std::size_t b = 0; b < B; ++b) {
+                    for (std::size_t t = 0; t < T; ++t) {
+                        const std::size_t token = b * T + t;
+                        for (std::size_t h = 0; h < n_head; ++h) {
+                            const std::size_t base = (token * channels) + h * head_dim;
+                            for (std::size_t pair = 0; pair < head_dim / 2; ++pair) {
+                                const std::size_t pair_d = 2 * pair;
+                                const float exponent = static_cast<float>(pair_d) / static_cast<float>(head_dim);
+                                const float angle = static_cast<float>(t) / std::pow(theta, exponent);
+                                const float cs = std::cos(angle), sn = std::sin(angle);
+                                const float even = xv[base + pair_d];
+                                const float odd = xv[base + pair_d + 1];
+                                ref[base + pair_d]     = even * cs - odd * sn;
+                                ref[base + pair_d + 1] = even * sn + odd * cs;
+                            }
+                        }
+                    }
+                }
+                bool fwd_ok = vy.size() == ref.size();
+                for (std::size_t i = 0; i < vy.size() && fwd_ok; ++i)
+                    if (std::fabs(vy[i] - ref[i]) > 1e-5f) fwd_ok = false;
+                expect(fwd_ok, "Vulkan rope forward parity mismatch vs CPU reference");
+
+                // Backward: rope is its own inverse on grad_output.
+                std::vector<float> go(rows * channels);
+                for (std::size_t i = 0; i < go.size(); ++i) go[i] = 0.02f * static_cast<float>(i % 11) - 0.1f;
+                auto VGO = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(rows), static_cast<int64_t>(channels)},
+                                            DType::F32, go.data());
+                VY.backward(VGO);
+                expect(VX.grad() != nullptr, "Vulkan rope backward must populate x gradient");
+                if (VX.grad()) {
+                    const auto gx = VX.grad()->to_vector<float>();
+                    // CPU backward ref: rotate grad_output by -angle (position = t).
+                    std::vector<float> ref_gx(rows * channels);
+                    for (std::size_t b = 0; b < B; ++b) {
+                        for (std::size_t t = 0; t < T; ++t) {
+                            const std::size_t token = b * T + t;
+                            for (std::size_t h = 0; h < n_head; ++h) {
+                                const std::size_t base = (token * channels) + h * head_dim;
+                                for (std::size_t pair = 0; pair < head_dim / 2; ++pair) {
+                                    const std::size_t pair_d = 2 * pair;
+                                    const float exponent = static_cast<float>(pair_d) / static_cast<float>(head_dim);
+                                    const float angle = -static_cast<float>(t) / std::pow(theta, exponent);
+                                    const float cs = std::cos(angle), sn = std::sin(angle);
+                                    const float even = go[base + pair_d];
+                                    const float odd = go[base + pair_d + 1];
+                                    ref_gx[base + pair_d]     = even * cs - odd * sn;
+                                    ref_gx[base + pair_d + 1] = even * sn + odd * cs;
+                                }
+                            }
+                        }
+                    }
+                    bool bw_ok = gx.size() == ref_gx.size();
+                    for (std::size_t i = 0; i < gx.size() && bw_ok; ++i)
+                        if (std::fabs(gx[i] - ref_gx[i]) > 1e-4f) bw_ok = false;
+                    expect(bw_ok, "Vulkan rope backward parity mismatch vs CPU reference");
+                }
+            }
+
+            // rope_split_half forward parity vs CPU reference (backward is the
+            // inverse-flag reuse, covered implicitly by the interleaved test).
+            {
+                const std::size_t B = 1, T = 3, n_head = 2, head_dim = 8;
+                const std::size_t channels = n_head * head_dim;
+                const std::size_t rows = B * T;
+                const float theta = 10000.0f;
+                std::vector<float> xv(rows * channels);
+                for (std::size_t i = 0; i < xv.size(); ++i)
+                    xv[i] = 0.04f * static_cast<float>(i) - 0.3f;
+                auto VX = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(rows), static_cast<int64_t>(channels)},
+                                           DType::F32, xv.data());
+                auto VY = rope_split_half(VX, static_cast<int>(n_head), static_cast<int64_t>(B),
+                                          static_cast<int64_t>(T), theta, 0, 0);
+                const auto vy = VY.to_vector<float>();
+                const std::size_t half_dim = head_dim / 2;
+                std::vector<float> ref(rows * channels, 0.0f);
+                for (std::size_t b = 0; b < B; ++b) {
+                    for (std::size_t t = 0; t < T; ++t) {
+                        const std::size_t token = b * T + t;
+                        for (std::size_t h = 0; h < n_head; ++h) {
+                            const std::size_t base = (token * channels) + h * head_dim;
+                            for (std::size_t pair = 0; pair < half_dim; ++pair) {
+                                const float exponent = static_cast<float>(2 * pair) / static_cast<float>(head_dim);
+                                const float angle = static_cast<float>(token) / std::pow(theta, exponent);
+                                const float cs = std::cos(angle), sn = std::sin(angle);
+                                const float first = xv[base + pair];
+                                const float second = xv[base + half_dim + pair];
+                                ref[base + pair] = first * cs - second * sn;
+                                ref[base + half_dim + pair] = second * cs + first * sn;
+                            }
+                        }
+                    }
+                }
+                bool ok = vy.size() == ref.size();
+                for (std::size_t i = 0; i < vy.size() && ok; ++i)
+                    if (std::fabs(vy[i] - ref[i]) > 1e-5f) ok = false;
+                expect(ok, "Vulkan rope_split_half forward parity mismatch vs CPU reference");
+            }
+
+            // rope_positions forward parity (uses per-token i32 positions table).
+            {
+                const std::size_t B = 2, T = 3, n_head = 2, head_dim = 6;
+                const std::size_t channels = n_head * head_dim;
+                const std::size_t rows = B * T;
+                const float theta = 10000.0f;
+                std::vector<float> xv(rows * channels);
+                for (std::size_t i = 0; i < xv.size(); ++i)
+                    xv[i] = 0.05f * static_cast<float>(i) - 0.4f;
+                std::vector<std::int32_t> pos = {0, 5, 2, 7, 1, 3};  // B*T entries
+                auto VX = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(rows), static_cast<int64_t>(channels)},
+                                           DType::F32, xv.data());
+                auto VP = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(B), static_cast<int64_t>(T)},
+                                           DType::I32, pos.data());
+                auto VY = rope_positions(VX, VP, static_cast<int>(n_head), static_cast<int64_t>(B),
+                                         static_cast<int64_t>(T), theta, 0);
+                const auto vy = VY.to_vector<float>();
+                std::vector<float> ref(rows * channels, 0.0f);
+                for (std::size_t b = 0; b < B; ++b) {
+                    for (std::size_t t = 0; t < T; ++t) {
+                        const std::size_t token = b * T + t;
+                        const int p = pos[token];
+                        for (std::size_t h = 0; h < n_head; ++h) {
+                            const std::size_t base = (token * channels) + h * head_dim;
+                            for (std::size_t pair = 0; pair < head_dim / 2; ++pair) {
+                                const std::size_t pair_d = 2 * pair;
+                                const float exponent = static_cast<float>(pair_d) / static_cast<float>(head_dim);
+                                const float angle = static_cast<float>(p) / std::pow(theta, exponent);
+                                const float cs = std::cos(angle), sn = std::sin(angle);
+                                const float even = xv[base + pair_d];
+                                const float odd = xv[base + pair_d + 1];
+                                ref[base + pair_d] = even * cs - odd * sn;
+                                ref[base + pair_d + 1] = even * sn + odd * cs;
+                            }
+                        }
+                    }
+                }
+                bool ok = vy.size() == ref.size();
+                for (std::size_t i = 0; i < vy.size() && ok; ++i)
+                    if (std::fabs(vy[i] - ref[i]) > 1e-5f) ok = false;
+                expect(ok, "Vulkan rope_positions forward parity mismatch vs CPU reference");
+            }
+
+            // rope_positions_split_half forward parity.
+            {
+                const std::size_t B = 1, T = 2, n_head = 1, head_dim = 8;
+                const std::size_t channels = n_head * head_dim;
+                const std::size_t rows = B * T;
+                const float theta = 10000.0f;
+                std::vector<float> xv(rows * channels);
+                for (std::size_t i = 0; i < xv.size(); ++i)
+                    xv[i] = 0.06f * static_cast<float>(i) - 0.5f;
+                std::vector<std::int32_t> pos = {3, 8};
+                auto VX = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(rows), static_cast<int64_t>(channels)},
+                                           DType::F32, xv.data());
+                auto VP = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(B), static_cast<int64_t>(T)},
+                                           DType::I32, pos.data());
+                auto VY = rope_positions_split_half(VX, VP, static_cast<int>(n_head), static_cast<int64_t>(B),
+                                                    static_cast<int64_t>(T), theta, 0);
+                const auto vy = VY.to_vector<float>();
+                const std::size_t half_dim = head_dim / 2;
+                std::vector<float> ref(rows * channels, 0.0f);
+                for (std::size_t b = 0; b < B; ++b) {
+                    for (std::size_t t = 0; t < T; ++t) {
+                        const std::size_t token = b * T + t;
+                        const int p = pos[token];
+                        for (std::size_t h = 0; h < n_head; ++h) {
+                            const std::size_t base = (token * channels) + h * head_dim;
+                            for (std::size_t pair = 0; pair < half_dim; ++pair) {
+                                const float exponent = static_cast<float>(2 * pair) / static_cast<float>(head_dim);
+                                const float angle = static_cast<float>(p) / std::pow(theta, exponent);
+                                const float cs = std::cos(angle), sn = std::sin(angle);
+                                const float first = xv[base + pair];
+                                const float second = xv[base + half_dim + pair];
+                                ref[base + pair] = first * cs - second * sn;
+                                ref[base + half_dim + pair] = second * cs + first * sn;
+                            }
+                        }
+                    }
+                }
+                bool ok = vy.size() == ref.size();
+                for (std::size_t i = 0; i < vy.size() && ok; ++i)
+                    if (std::fabs(vy[i] - ref[i]) > 1e-5f) ok = false;
+                expect(ok, "Vulkan rope_positions_split_half forward parity mismatch vs CPU reference");
+            }
+
+            // scale / mul_scalar / add_scalar forward parity — elementwise scalar
+            // ops that the backward chain (SubBackward, MulBackward, DivBackward,
+            // ScalarBackward, DropoutBackward p==0 fallback) depends on.
+            {
+                const std::size_t N = 8;
+                std::vector<float> xv(N);
+                for (std::size_t i = 0; i < N; ++i) xv[i] = 0.1f * static_cast<float>(i) - 0.4f;
+                auto VX = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(N)}, DType::F32, xv.data());
+                const float alpha = -2.5f;
+                auto VS = scale(VX, alpha);
+                const auto vs = VS.to_vector<float>();
+                bool scale_ok = vs.size() == N;
+                for (std::size_t i = 0; i < N && scale_ok; ++i)
+                    if (std::fabs(vs[i] - xv[i] * alpha) > 1e-6f) scale_ok = false;
+                expect(scale_ok, "Vulkan scale forward parity mismatch vs CPU reference");
+
+                auto VA = add_scalar(VX, 0.75f);
+                const auto va = VA.to_vector<float>();
+                bool add_ok = va.size() == N;
+                for (std::size_t i = 0; i < N && add_ok; ++i)
+                    if (std::fabs(va[i] - (xv[i] + 0.75f)) > 1e-6f) add_ok = false;
+                expect(add_ok, "Vulkan add_scalar forward parity mismatch vs CPU reference");
+            }
+
+            // sub backward with b.requires_grad=true on Vulkan — exercises the
+            // SubBackward -> scale(grad, -1) chain that previously crashed for
+            // lack of a Vulkan scale path (review C2 fix).
+            {
+                std::vector<float> av = {1.0f, 2.0f, 3.0f, 4.0f};
+                std::vector<float> bv = {0.5f, 0.5f, 0.5f, 0.5f};
+                auto VA = Tensor::from_cpu(vk_backend, {2, 2}, DType::F32, av.data());
+                auto VB = Tensor::from_cpu(vk_backend, {2, 2}, DType::F32, bv.data());
+                VA.set_requires_grad(true);
+                VB.set_requires_grad(true);
+                auto VY = sub(VA, VB);
+                std::vector<float> gv = {0.1f, 0.2f, 0.3f, 0.4f};
+                auto VG = Tensor::from_cpu(vk_backend, {2, 2}, DType::F32, gv.data());
+                VY.backward(VG);
+                expect(VA.grad() != nullptr, "Vulkan sub backward must populate a.grad");
+                expect(VB.grad() != nullptr, "Vulkan sub backward must populate b.grad (scale(-1) chain)");
+                if (VA.grad() && VB.grad()) {
+                    const auto ga = VA.grad()->to_vector<float>();
+                    const auto gb = VB.grad()->to_vector<float>();
+                    bool grad_ok = ga.size() == av.size() && gb.size() == bv.size();
+                    for (std::size_t i = 0; i < av.size() && grad_ok; ++i) {
+                        // da = +grad_out, db = -grad_out
+                        if (std::fabs(ga[i] - gv[i]) > 1e-6f) grad_ok = false;
+                        if (std::fabs(gb[i] - (-gv[i])) > 1e-6f) grad_ok = false;
+                    }
+                    expect(grad_ok, "Vulkan sub backward grad parity mismatch vs CPU reference (+/- grad_out)");
+                }
+            }
+
+            // Guard enforcement: ops that are still OpenCL-only must fail loudly
+            // (MCL_CHECK) on a Vulkan backend rather than crashing on a null
+            // OpenCL context. Catch the assertion and confirm the message.
+            auto expect_vulkan_guard = [&](const char* op_name, const std::function<void()>& body) {
+                try {
+                    body();
+                    std::cerr << "Vulkan guard missing for " << op_name << '\n';
+                    ok = false;
+                } catch (const std::exception& e) {
+                    const std::string msg = e.what();
+                    if (msg.find("Vulkan") == std::string::npos && msg.find("vulkan") == std::string::npos) {
+                        std::cerr << "Guard for " << op_name << " did not mention Vulkan: " << msg << '\n';
+                        ok = false;
+                    }
+                }
+            };
+            {
+                auto VX = Tensor::from_cpu(vk_backend, {2, 3}, DType::F32, std::vector<float>{1, 2, 3, 4, 5, 6}.data());
+                auto VB = Tensor::from_cpu(vk_backend, {3}, DType::F32, std::vector<float>{0.1f, 0.2f, 0.3f}.data());
+                auto VY = Tensor::from_cpu(vk_backend, {2, 3}, DType::F32, std::vector<float>{1, 2, 3, 4, 5, 6}.data());
+                expect_vulkan_guard("mul (binary)", [&] { mul(VX, VY); });
+                expect_vulkan_guard("div (binary)", [&] { div(VX, VY); });
+                expect_vulkan_guard("mul_rows", [&] { mul_rows(VX, VB); });
+                expect_vulkan_guard("add_bias_gelu_rows", [&] { add_bias_gelu_rows(VX, VB); });
+                expect_vulkan_guard("sum_rows", [&] { sum_rows(VX); });
+                expect_vulkan_guard("scale_inplace", [&] {
+                    Tensor t = VX;
+                    scale_inplace(t, 0.5f);
+                });
+                expect_vulkan_guard("silu", [&] { silu(VX); });
+                expect_vulkan_guard("relu", [&] { relu(VX); });
+                expect_vulkan_guard("exp", [&] { exp(VX); });
+                expect_vulkan_guard("dropout(p>0)", [&] { dropout(VX, 0.5f, true); });
+            }
+
+            // Compact-counter fused state update parity: identical seed on
+            // the OpenCL and Vulkan backends must produce bit-identical state
+            // bytes and matching scale/v rows (the SR tick is hash-seeded,
+            // not driver-random).
+            try {
+                auto cl_backend = Backend::create_opencl();
+                const int cin = 8, cout = 2, cC = 3;
+                const std::uint32_t update_seed = 777u;
+                nn::CounterStateLinear cl_layer(cl_backend, cin, cout, cC, 0.05f, 0.01f, 1.0f, 0.9f, 1.0e-8f,
+                                                42u);
+                nn::CounterStateLinear vk_layer(vk_backend, cin, cout, cC, 0.05f, 0.01f, 1.0f, 0.9f, 1.0e-8f,
+                                                42u);
+                const auto state0_cl = cl_layer.state.to_vector<std::uint8_t>();
+                const auto state0_vk = vk_layer.state.to_vector<std::uint8_t>();
+                expect(state0_cl == state0_vk,
+                       "counter layers with the same seed must start from identical state");
+
+                std::vector<float> cx(2 * cin), cgo(2 * cout);
+                for (std::size_t i = 0; i < cx.size(); ++i) cx[i] = 0.2f * static_cast<float>(i % 5) - 0.4f;
+                for (std::size_t i = 0; i < cgo.size(); ++i) cgo[i] = 0.3f * static_cast<float>(i % 3) - 0.3f;
+                auto CLX = Tensor::from_cpu(cl_backend, {2, cin}, DType::F32, cx.data());
+                auto CLG = Tensor::from_cpu(cl_backend, {2, cout}, DType::F32, cgo.data());
+                auto VKX = Tensor::from_cpu(vk_backend, {2, cin}, DType::F32, cx.data());
+                auto VKG = Tensor::from_cpu(vk_backend, {2, cout}, DType::F32, cgo.data());
+
+                cl_layer.apply_update_backward(CLG, CLX, update_seed);
+                vk_layer.apply_update_backward(VKG, VKX, update_seed);
+                cl_backend.finish();
+
+                const auto state_cl = cl_layer.state.to_vector<std::uint8_t>();
+                const auto state_vk = vk_layer.state.to_vector<std::uint8_t>();
+                expect(state_cl == state_vk,
+                       "Vulkan fused counter update state bytes must match OpenCL for the same seed");
+                const auto scale_cl = cl_layer.scale.to_vector<float>();
+                const auto scale_vk = vk_layer.scale.to_vector<float>();
+                const auto v_cl = cl_layer.v.to_vector<float>();
+                const auto v_vk = vk_layer.v.to_vector<float>();
+                bool rows_ok = scale_cl.size() == scale_vk.size() && v_cl.size() == v_vk.size();
+                for (std::size_t i = 0; rows_ok && i < scale_cl.size(); ++i) {
+                    if (std::fabs(scale_cl[i] - scale_vk[i]) > 1e-6f) rows_ok = false;
+                    if (std::fabs(v_cl[i] - v_vk[i]) > 1e-6f) rows_ok = false;
+                }
+                expect(rows_ok, "Vulkan fused counter update scale/v rows must match OpenCL");
+            } catch (const std::exception& e) {
+                std::cout << "counter fused update parity skipped (OpenCL unavailable): " << e.what()
+                          << '\n';
+            }
+
+            // GQA backward parity (non-causal, batch=1, default 1/sqrt(hd)
+            // scale) against a full CPU attention-backward reference.
+            // kt=70 crosses the 64-lane stride; nh=4/nkh=2 exercises grouped
+            // KV accumulation. Tolerance 1e-4 absolute.
+            {
+                const std::size_t bqt = 5, bkt = 70, bnh = 4, bnkh = 2, bhd = 16;
+                const float scale = 1.0f / std::sqrt(static_cast<float>(bhd));
+                std::vector<float> bq(bqt * bnh * bhd), bk(bkt * bnkh * bhd), bv(bkt * bnkh * bhd);
+                std::vector<float> bg(bqt * bnh * bhd);
+                auto fill = [](std::vector<float>& v, std::uint32_t seed) {
+                    std::uint32_t s = seed | 1u;
+                    for (auto& x : v) {
+                        s ^= s << 13;
+                        s ^= s >> 17;
+                        s ^= s << 5;
+                        x = static_cast<float>(static_cast<std::int32_t>(s % 1001) - 500) / 500.0f;
+                    }
+                };
+                fill(bq, 0x1201u);
+                fill(bk, 0x2302u);
+                fill(bv, 0x3403u);
+                fill(bg, 0x4504u);
+
+                auto BQ = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(bqt), static_cast<int64_t>(bnh * bhd)},
+                                           DType::F32, bq.data());
+                auto BK = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(bkt), static_cast<int64_t>(bnkh * bhd)},
+                                           DType::F32, bk.data());
+                auto BV = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(bkt), static_cast<int64_t>(bnkh * bhd)},
+                                           DType::F32, bv.data());
+                BQ.set_requires_grad(true);
+                BK.set_requires_grad(true);
+                BV.set_requires_grad(true);
+                auto BY = grouped_query_attention(BQ, BK, BV, static_cast<int>(bnh), static_cast<int>(bnkh),
+                                                  false, 1, static_cast<int64_t>(bqt), static_cast<int64_t>(bkt),
+                                                  0, 0.0f);
+                auto BG = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(bqt), static_cast<int64_t>(bnh * bhd)},
+                                           DType::F32, bg.data());
+                BY.backward(BG);
+                expect(BQ.grad() != nullptr && BK.grad() != nullptr && BV.grad() != nullptr,
+                       "Vulkan GQA backward must populate q/k/v gradients");
+                if (BQ.grad() && BK.grad() && BV.grad()) {
+                    const auto gq = BQ.grad()->to_vector<float>();
+                    const auto gk = BK.grad()->to_vector<float>();
+                    const auto gv = BV.grad()->to_vector<float>();
+                    std::vector<float> ref_dq(bq.size(), 0.0f), ref_dk(bk.size(), 0.0f), ref_dv(bv.size(), 0.0f);
+                    const std::size_t qs = bnh * bhd;
+                    const std::size_t kvs = bnkh * bhd;
+                    const std::size_t gs = bnh / bnkh;
+                    for (std::size_t h = 0; h < bnh; ++h) {
+                        const std::size_t g = h / gs;
+                        for (std::size_t tq2 = 0; tq2 < bqt; ++tq2) {
+                            std::vector<float> sc(bkt);
+                            float maxv = -3.4e38f;
+                            for (std::size_t tk2 = 0; tk2 < bkt; ++tk2) {
+                                float dot = 0.0f;
+                                for (std::size_t d = 0; d < bhd; ++d) {
+                                    dot += bq[tq2 * qs + h * bhd + d] * bk[tk2 * kvs + g * bhd + d];
+                                }
+                                sc[tk2] = dot * scale;
+                                maxv = std::max(maxv, sc[tk2]);
+                            }
+                            float sum = 0.0f;
+                            for (auto& s2 : sc) {
+                                s2 = std::exp(s2 - maxv);
+                                sum += s2;
+                            }
+                            for (auto& s2 : sc) s2 /= sum;
+                            std::vector<float> dp(bkt, 0.0f);
+                            float dot_dp_p = 0.0f;
+                            for (std::size_t tk2 = 0; tk2 < bkt; ++tk2) {
+                                for (std::size_t d = 0; d < bhd; ++d) {
+                                    dp[tk2] += bg[tq2 * qs + h * bhd + d] * bv[tk2 * kvs + g * bhd + d];
+                                }
+                                dot_dp_p += dp[tk2] * sc[tk2];
+                            }
+                            for (std::size_t tk2 = 0; tk2 < bkt; ++tk2) {
+                                const float ds2 = sc[tk2] * (dp[tk2] - dot_dp_p);
+                                for (std::size_t d = 0; d < bhd; ++d) {
+                                    ref_dq[tq2 * qs + h * bhd + d] += scale * ds2 * bk[tk2 * kvs + g * bhd + d];
+                                    ref_dk[tk2 * kvs + g * bhd + d] += scale * ds2 * bq[tq2 * qs + h * bhd + d];
+                                    ref_dv[tk2 * kvs + g * bhd + d] += sc[tk2] * bg[tq2 * qs + h * bhd + d];
+                                }
+                            }
+                        }
+                    }
+                    auto max_err = [](const std::vector<float>& a2, const std::vector<float>& b2) {
+                        float m = 0.0f;
+                        for (std::size_t i = 0; i < a2.size(); ++i) m = std::max(m, std::fabs(a2[i] - b2[i]));
+                        return m;
+                    };
+                    expect(gq.size() == ref_dq.size() && max_err(gq, ref_dq) <= 1e-4f,
+                           "Vulkan GQA backward dQ parity mismatch vs CPU reference");
+                    expect(gk.size() == ref_dk.size() && max_err(gk, ref_dk) <= 1e-4f,
+                           "Vulkan GQA backward dK parity mismatch vs CPU reference");
+                    expect(gv.size() == ref_dv.size() && max_err(gv, ref_dv) <= 1e-4f,
+                           "Vulkan GQA backward dV parity mismatch vs CPU reference");
+                }
+            }
+
+            // === Slice Q2: quant inference (Tensor-level) ===
+
+            // 1. quantize_q8_symmetric_rows parity vs host emulation (bit-identical)
+            {
+                const std::size_t M = 3, K = 47;
+                std::vector<float> x(M * K);
+                for (std::size_t i = 0; i < x.size(); ++i)
+                    x[i] = std::sin(static_cast<float>(i) * 0.37f) * 3.0f;
+                auto X = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(M), static_cast<int64_t>(K)},
+                                          DType::F32, x.data());
+                auto Q = quantize_q8_symmetric_rows(X);
+                expect(Q.dtype() == DType::Q8_0 && Q.has_quant_scales() && Q.quant_scale_axis() == 0,
+                       "Vulkan quantize_q8_symmetric_rows must produce Q8_0 with row scales");
+
+                // Host reference
+                std::vector<std::int8_t> host_q(M * K);
+                std::vector<float> host_scales(M);
+                for (std::size_t row = 0; row < M; ++row) {
+                    float max_abs = 0.0f;
+                    for (std::size_t c = 0; c < K; ++c)
+                        max_abs = std::max(max_abs, std::fabs(x[row * K + c]));
+                    host_scales[row] = max_abs <= 0.0f ? 1.0f : max_abs / 127.0f;
+                    for (std::size_t c = 0; c < K; ++c) {
+                        int q = static_cast<int>(std::nearbyint(x[row * K + c] / host_scales[row]));
+                        q = std::min(127, std::max(-127, q));
+                        host_q[row * K + c] = static_cast<std::int8_t>(q);
+                    }
+                }
+                auto dev_q = Q.to_vector<std::int8_t>();
+                expect(dev_q == host_q, "Vulkan quantize_q8_symmetric_rows int8 output must be bit-identical to host");
+
+                auto dev_scales = Q.quant_scales().to_vector<float>();
+                bool scales_ok = dev_scales.size() == host_scales.size();
+                for (std::size_t i = 0; i < dev_scales.size() && scales_ok; ++i)
+                    if (std::fabs(dev_scales[i] - host_scales[i]) > 1e-7f) scales_ok = false;
+                expect(scales_ok, "Vulkan quantize_q8_symmetric_rows scales must match host");
+
+                // Zero row test
+                std::vector<float> zero_x(M * K, 0.0f);
+                zero_x[0] = 2.0f; // non-zero first row, zero second/third
+                auto ZX = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(M), static_cast<int64_t>(K)},
+                                           DType::F32, zero_x.data());
+                auto ZQ = quantize_q8_symmetric_rows(ZX);
+                auto zq = ZQ.to_vector<std::int8_t>();
+                auto zs = ZQ.quant_scales().to_vector<float>();
+                expect(std::fabs(zs[1] - 1.0f) <= 1e-7f && std::fabs(zs[2] - 1.0f) <= 1e-7f,
+                       "Vulkan quantize_q8_symmetric_rows zero row must produce scale=1");
+            }
+
+            // 2. matmul(q8_rows, q8/q4_cols) parity
+            for (bool q4_rhs : {false, true}) {
+                const std::size_t M = 33, K = 47, N = 65;
+                std::vector<float> a_f32(M * K), b_f32(K * N);
+                for (std::size_t i = 0; i < a_f32.size(); ++i) a_f32[i] = std::sin(static_cast<float>(i) * 0.23f) * 2.5f;
+                for (std::size_t i = 0; i < b_f32.size(); ++i) b_f32[i] = std::cos(static_cast<float>(i) * 0.17f) * 3.0f;
+
+                auto A = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(M), static_cast<int64_t>(K)},
+                                          DType::F32, a_f32.data());
+                auto B = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(K), static_cast<int64_t>(N)},
+                                          DType::F32, b_f32.data());
+
+                auto QA = quantize_q8_symmetric_rows(A);
+                Tensor QB;
+                if (q4_rhs) {
+                    QB = quantize_q4_symmetric_cols(B);
+                    expect(QB.dtype() == DType::Q4_0, "quantize_q4_symmetric_cols on Vulkan must produce Q4_0");
+                } else {
+                    QB = quantize_q8_symmetric_cols(B);
+                    expect(QB.dtype() == DType::Q8_0, "quantize_q8_symmetric_cols on Vulkan must produce Q8_0");
+                }
+                expect(QB.has_quant_scales() && QB.quant_scale_axis() == 1,
+                       q4_rhs ? "Vulkan q4 col quant must have col scales"
+                              : "Vulkan q8 col quant must have col scales");
+
+                auto C = matmul(QA, QB);
+                expect(C.dtype() == DType::F32, "Vulkan quant matmul must produce f32 output");
+                auto c = C.to_vector<float>();
+
+                // Host reference: replicate quant + dequant + matmul using original f32 data
+                // Row scales for A: per-row max|A|/127
+                std::vector<float> host_as(M);
+                for (std::size_t r = 0; r < M; ++r) {
+                    float max_abs = 0.0f;
+                    for (std::size_t k2 = 0; k2 < K; ++k2) max_abs = std::max(max_abs, std::fabs(a_f32[r * K + k2]));
+                    host_as[r] = max_abs <= 0.0f ? 1.0f : max_abs / 127.0f;
+                }
+                // Col scales for B: per-col max|B|/qmax
+                float qmax = q4_rhs ? 7.0f : 127.0f;
+                std::vector<float> host_bs(N);
+                for (std::size_t c2 = 0; c2 < N; ++c2) {
+                    float max_abs = 0.0f;
+                    for (std::size_t k2 = 0; k2 < K; ++k2) max_abs = std::max(max_abs, std::fabs(b_f32[k2 * N + c2]));
+                    host_bs[c2] = max_abs <= 0.0f ? 1.0f : max_abs / qmax;
+                }
+                // Host reference matmul
+                std::vector<float> ref(M * N, 0.0f);
+                for (std::size_t m = 0; m < M; ++m) {
+                    for (std::size_t n2 = 0; n2 < N; ++n2) {
+                        float acc = 0.0f;
+                        for (std::size_t k2 = 0; k2 < K; ++k2) {
+                            int aq_val = static_cast<int>(std::nearbyint(a_f32[m * K + k2] / host_as[m]));
+                            aq_val = std::min(127, std::max(-127, aq_val));
+                            int bq_val = static_cast<int>(std::nearbyint(b_f32[k2 * N + n2] / host_bs[n2]));
+                            if (q4_rhs) bq_val = std::min(7, std::max(-7, bq_val));
+                            else bq_val = std::min(127, std::max(-127, bq_val));
+                            acc += static_cast<float>(aq_val) * static_cast<float>(bq_val);
+                        }
+                        ref[m * N + n2] = acc * host_as[m] * host_bs[n2];
+                    }
+                }
+
+                float max_diff = 0.0f;
+                for (std::size_t i = 0; i < ref.size(); ++i)
+                    max_diff = std::max(max_diff, std::fabs(c[i] - ref[i]));
+                float tol = q4_rhs ? 0.5f : 0.35f;
+                expect(max_diff <= tol,
+                       (std::string("Vulkan quant matmul M=33,K=47,N=65 ") +
+                        (q4_rhs ? "q8xq4" : "q8xq8") + " parity mismatch, max_diff=" +
+                        std::to_string(max_diff)).c_str());
+
+                // M=1 shape (q8xq8 only)
+                if (!q4_rhs) {
+                    const std::size_t M1 = 1, K1 = 128, N1 = 96;
+                    std::vector<float> a1_f32(M1 * K1), b1_f32(K1 * N1);
+                    for (std::size_t i = 0; i < a1_f32.size(); ++i) a1_f32[i] = std::sin(static_cast<float>(i) * 0.13f) * 4.0f;
+                    for (std::size_t i = 0; i < b1_f32.size(); ++i) b1_f32[i] = std::cos(static_cast<float>(i) * 0.09f) * 2.0f;
+                    auto A1 = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(M1), static_cast<int64_t>(K1)},
+                                               DType::F32, a1_f32.data());
+                    auto B1 = Tensor::from_cpu(vk_backend, {static_cast<int64_t>(K1), static_cast<int64_t>(N1)},
+                                               DType::F32, b1_f32.data());
+                    auto QA1 = quantize_q8_symmetric_rows(A1);
+                    auto QB1 = quantize_q8_symmetric_cols(B1);
+                    auto C1 = matmul(QA1, QB1);
+                    auto c1 = C1.to_vector<float>();
+                    // host ref
+                    std::vector<float> as1(M1), bs1(N1);
+                    for (std::size_t k2 = 0; k2 < K1; ++k2) as1[0] = std::max(as1[0], std::fabs(a1_f32[k2]));
+                    as1[0] = as1[0] <= 0.0f ? 1.0f : as1[0] / 127.0f;
+                    for (std::size_t c2 = 0; c2 < N1; ++c2) {
+                        float max_abs = 0.0f;
+                        for (std::size_t k2 = 0; k2 < K1; ++k2) max_abs = std::max(max_abs, std::fabs(b1_f32[k2 * N1 + c2]));
+                        bs1[c2] = max_abs <= 0.0f ? 1.0f : max_abs / 127.0f;
+                    }
+                    std::vector<float> ref1(N1, 0.0f);
+                    for (std::size_t n2 = 0; n2 < N1; ++n2) {
+                        float acc = 0.0f;
+                        for (std::size_t k2 = 0; k2 < K1; ++k2) {
+                            int aq = static_cast<int>(std::nearbyint(a1_f32[k2] / as1[0]));
+                            aq = std::min(127, std::max(-127, aq));
+                            int bq = static_cast<int>(std::nearbyint(b1_f32[k2 * N1 + n2] / bs1[n2]));
+                            bq = std::min(127, std::max(-127, bq));
+                            acc += static_cast<float>(aq) * static_cast<float>(bq);
+                        }
+                        ref1[n2] = acc * as1[0] * bs1[n2];
+                    }
+                    float md1 = 0.0f;
+                    for (std::size_t i = 0; i < ref1.size(); ++i)
+                        md1 = std::max(md1, std::fabs(c1[i] - ref1[i]));
+                    expect(md1 <= 0.35f,
+                           (std::string("Vulkan quant matmul M=1,K=128,N=96 parity mismatch, max_diff=") +
+                            std::to_string(md1)).c_str());
+                }
+            }
+
+            // 4. Linear end-to-end
+            {
+                const int64_t in_f = 47, out_f = 65, B = 5;
+                std::vector<float> x_data(static_cast<std::size_t>(B * in_f));
+                for (std::size_t i = 0; i < x_data.size(); ++i)
+                    x_data[i] = std::sin(static_cast<float>(i) * 0.31f) * 2.0f;
+                auto X = Tensor::from_cpu(vk_backend, {B, in_f}, DType::F32, x_data.data());
+
+                for (bool use_bias : {false, true}) {
+                    nn::Linear linear(vk_backend, static_cast<int>(in_f), static_cast<int>(out_f), use_bias);
+                    auto f32_y = linear.forward(X);
+                    auto f32_vec = f32_y.to_vector<float>();
+
+                    for (DType qdtype : {DType::Q8_0, DType::Q4_0}) {
+                        linear.disable_quantized_inference();
+                        linear.enable_quantized_inference(qdtype);
+                        auto qy = linear.forward(X);
+                        auto qy_vec = qy.to_vector<float>();
+                        float max_rerr = 0.0f;
+                        for (std::size_t i = 0; i < qy_vec.size(); ++i) {
+                            float denom = std::max(std::fabs(f32_vec[i]), 1e-8f);
+                            max_rerr = std::max(max_rerr, std::fabs(qy_vec[i] - f32_vec[i]) / denom);
+                        }
+                        float abs_md = 0.0f;
+                        for (std::size_t i = 0; i < qy_vec.size(); ++i)
+                            abs_md = std::max(abs_md, std::fabs(qy_vec[i] - f32_vec[i]));
+                        // Allow up to 5% relative error from quantization
+                        expect(max_rerr <= 0.05f,
+                               (std::string("Vulkan Linear ") + (qdtype == DType::Q8_0 ? "Q8_0" : "Q4_0") +
+                                (use_bias ? " bias" : " nobias") + " end-to-end relative error, max=" +
+                                std::to_string(max_rerr) + " abs_max_diff=" + std::to_string(abs_md)).c_str());
+                    }
+                }
+            }
+
+            // 4b. M=1 decode path: Linear forward batch=1 -> Q4_0 decode kernel
+            // NOTE: autograd graph capture cannot be used for path verification
+            // because linear.cpp:32 bypasses quantized inference when autograd is
+            // enabled. Path is confirmed by shape condition (F32 x Q4_0, M=1,
+            // Vulkan backend) — the numeric result confirms the decode kernel ran
+            // correctly.
+            {
+                const int64_t in_f = 128, out_f = 96, B = 1;
+                std::vector<float> x_data(static_cast<std::size_t>(B * in_f));
+                for (std::size_t i = 0; i < x_data.size(); ++i)
+                    x_data[i] = std::sin(static_cast<float>(i) * 0.31f) * 2.0f;
+                auto X = Tensor::from_cpu(vk_backend, {B, in_f}, DType::F32, x_data.data());
+
+                nn::Linear linear(vk_backend, static_cast<int>(in_f), static_cast<int>(out_f), false);
+                auto f32_y = linear.forward(X);
+                auto f32_vec = f32_y.to_vector<float>();
+
+                linear.disable_quantized_inference();
+                linear.enable_quantized_inference(DType::Q4_0);
+                auto qy = linear.forward(X);
+                auto qy_vec = qy.to_vector<float>();
+                float max_rerr = 0.0f;
+                for (std::size_t i = 0; i < qy_vec.size(); ++i) {
+                    float denom = std::max(std::fabs(f32_vec[i]), 1e-8f);
+                    max_rerr = std::max(max_rerr, std::fabs(qy_vec[i] - f32_vec[i]) / denom);
+                }
+                float abs_md = 0.0f;
+                for (std::size_t i = 0; i < qy_vec.size(); ++i)
+                    abs_md = std::max(abs_md, std::fabs(qy_vec[i] - f32_vec[i]));
+                expect(max_rerr <= 0.05f,
+                       (std::string("Vulkan Linear Q4_0 M=1 decode relative error, max=") +
+                        std::to_string(max_rerr) + " abs_max_diff=" + std::to_string(abs_md)).c_str());
+            }
+
+            // 5. Negative: quant matmul with axis=2 scales on Vulkan -> error
+            {
+                std::vector<float> scales_data(3, 1.0f);
+                auto scales_bad = Tensor::from_cpu(vk_backend, {3}, DType::F32, scales_data.data());
+                auto A = Tensor::from_cpu(vk_backend, {2, 3}, DType::F32,
+                                          std::vector<float>(6, 1.0f).data());
+                auto QA = quantize_q8_symmetric_rows(A);
+                auto QB = Tensor::empty(vk_backend, {3, 3}, DType::Q8_0);
+                QB._set_quant_scales(scales_bad, 2, 3); // axis=2 blocked in matmul dispatch
+                bool caught = false;
+                try {
+                    auto bad = matmul(QA, QB);
+                    (void)bad;
+                } catch (const motifcl::Error&) {
+                    caught = true;
+                }
+                expect(caught, "Vulkan quant matmul with axis=2 scales must throw MCL error");
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Vulkan-native Tensor smoke failed: " << e.what() << '\n';
+            ok = false;
         }
 
         set_env("MOTIFCL_MATMUL_BACKEND", "vulkan");

@@ -1,0 +1,2083 @@
+train records=2009354 val records=20210 tokens/step=4096
+ternary15m pretrain: steps=160000 B=16 T=256 lr=0.004 lr_fp=0.006 start=0
+step 100 loss 7.6943 ema 9.8141 lr 0.00013  3726 tok/s  eta 48.8 h
+step 200 loss 5.9556 ema 7.5441 lr 0.00025  3864 tok/s  eta 47.1 h
+step 300 loss 4.5402 ema 6.0587 lr 0.00038  3816 tok/s  eta 47.6 h
+step 400 loss 3.9761 ema 4.9256 lr 0.00050  4162 tok/s  eta 43.6 h
+step 500 loss 3.8863 ema 4.2705 lr 0.00062  4292 tok/s  eta 42.3 h
+step 500 VAL loss 3.6017
+step 600 loss 3.7081 ema 3.9067 lr 0.00075  4225 tok/s  eta 42.9 h
+step 700 loss 3.5538 ema 3.6755 lr 0.00088  4288 tok/s  eta 42.3 h
+step 800 loss 3.4715 ema 3.5102 lr 0.00100  4271 tok/s  eta 42.4 h
+step 900 loss 3.4952 ema 3.3863 lr 0.00113  4284 tok/s  eta 42.3 h
+step 1000 loss 3.2966 ema 3.2904 lr 0.00125  4302 tok/s  eta 42.1 h
+step 1000 VAL loss 2.9708
+step 1000 checkpoint saved
+step 1100 loss 3.0707 ema 3.1961 lr 0.00137  4314 tok/s  eta 41.9 h
+step 1200 loss 3.1961 ema 3.1089 lr 0.00150  4284 tok/s  eta 42.2 h
+step 1300 loss 3.0863 ema 3.0414 lr 0.00163  4269 tok/s  eta 42.3 h
+step 1400 loss 3.0504 ema 2.9743 lr 0.00175  4250 tok/s  eta 42.5 h
+step 1500 loss 2.8464 ema 2.9192 lr 0.00188  4284 tok/s  eta 42.1 h
+step 1500 VAL loss 2.6528
+step 1600 loss 2.9335 ema 2.8838 lr 0.00200  4263 tok/s  eta 42.3 h
+step 1700 loss 2.8947 ema 2.8490 lr 0.00213  4268 tok/s  eta 42.2 h
+step 1800 loss 2.8055 ema 2.8335 lr 0.00225  4287 tok/s  eta 42.0 h
+step 1900 loss 2.7227 ema 2.7733 lr 0.00238  4317 tok/s  eta 41.7 h
+step 2000 loss 2.8476 ema 2.7699 lr 0.00250  4291 tok/s  eta 41.9 h
+step 2000 VAL loss 2.4886
+step 2000 checkpoint saved
+step 2100 loss 2.6073 ema 2.7288 lr 0.00263  4258 tok/s  eta 42.2 h
+step 2200 loss 2.8922 ema 2.7117 lr 0.00275  4267 tok/s  eta 42.1 h
+step 2300 loss 2.7291 ema 2.7097 lr 0.00288  4288 tok/s  eta 41.8 h
+step 2400 loss 2.6427 ema 2.6936 lr 0.00300  4261 tok/s  eta 42.1 h
+step 2500 loss 2.6980 ema 2.6852 lr 0.00313  4280 tok/s  eta 41.9 h
+step 2500 VAL loss 2.3925
+step 2600 loss 2.6138 ema 2.6582 lr 0.00325  4257 tok/s  eta 42.1 h
+step 2700 loss 2.5881 ema 2.6314 lr 0.00338  4271 tok/s  eta 41.9 h
+step 2800 loss 2.6847 ema 2.6078 lr 0.00350  4267 tok/s  eta 41.9 h
+step 2900 loss 2.6081 ema 2.6084 lr 0.00363  4262 tok/s  eta 41.9 h
+step 3000 loss 2.7405 ema 2.5971 lr 0.00375  4278 tok/s  eta 41.8 h
+step 3000 VAL loss 2.3030
+step 3000 checkpoint saved
+step 3100 loss 2.6710 ema 2.5944 lr 0.00388  4277 tok/s  eta 41.7 h
+step 3200 loss 2.5736 ema 2.5984 lr 0.00400  4286 tok/s  eta 41.6 h
+step 3300 loss 2.6243 ema 2.5859 lr 0.00400  4283 tok/s  eta 41.6 h
+step 3400 loss 2.6155 ema 2.5594 lr 0.00400  4243 tok/s  eta 42.0 h
+step 3500 loss 2.4106 ema 2.5422 lr 0.00400  4252 tok/s  eta 41.9 h
+step 3500 VAL loss 2.2444
+step 3600 loss 2.5501 ema 2.5270 lr 0.00400  4270 tok/s  eta 41.7 h
+step 3700 loss 2.6224 ema 2.5038 lr 0.00400  4272 tok/s  eta 41.6 h
+step 3800 loss 2.3680 ema 2.4950 lr 0.00400  4261 tok/s  eta 41.7 h
+step 3900 loss 2.5415 ema 2.5055 lr 0.00400  4257 tok/s  eta 41.7 h
+step 4000 loss 2.3423 ema 2.4806 lr 0.00400  4277 tok/s  eta 41.5 h
+step 4000 VAL loss 2.2071
+step 4000 checkpoint saved
+step 4100 loss 2.2270 ema 2.4653 lr 0.00400  4236 tok/s  eta 41.9 h
+step 4200 loss 2.5428 ema 2.4403 lr 0.00400  4247 tok/s  eta 41.7 h
+step 4300 loss 2.5135 ema 2.4467 lr 0.00400  4265 tok/s  eta 41.5 h
+step 4400 loss 2.6561 ema 2.4591 lr 0.00400  4276 tok/s  eta 41.4 h
+step 4500 loss 2.5076 ema 2.4470 lr 0.00400  4271 tok/s  eta 41.4 h
+step 4500 VAL loss 2.1768
+step 4600 loss 2.5562 ema 2.4394 lr 0.00400  4272 tok/s  eta 41.4 h
+step 4700 loss 2.4912 ema 2.4342 lr 0.00400  4273 tok/s  eta 41.4 h
+step 4800 loss 2.2498 ema 2.4238 lr 0.00400  4277 tok/s  eta 41.3 h
+step 4900 loss 2.4080 ema 2.4251 lr 0.00400  4181 tok/s  eta 42.2 h
+step 5000 loss 2.5056 ema 2.4224 lr 0.00400  4342 tok/s  eta 40.6 h
+step 5000 VAL loss 2.1447
+step 5000 checkpoint saved
+step 5100 loss 2.3350 ema 2.4158 lr 0.00400  4290 tok/s  eta 41.1 h
+step 5200 loss 2.2290 ema 2.4135 lr 0.00400  4280 tok/s  eta 41.1 h
+step 5300 loss 2.2620 ema 2.4002 lr 0.00400  4237 tok/s  eta 41.5 h
+step 5400 loss 2.3499 ema 2.3908 lr 0.00400  4240 tok/s  eta 41.5 h
+step 5500 loss 2.4573 ema 2.3887 lr 0.00400  4347 tok/s  eta 40.4 h
+step 5500 VAL loss 2.1245
+step 5600 loss 2.4337 ema 2.3861 lr 0.00400  4223 tok/s  eta 41.6 h
+step 5700 loss 2.4551 ema 2.3700 lr 0.00400  4312 tok/s  eta 40.7 h
+step 5800 loss 2.3415 ema 2.3753 lr 0.00400  4370 tok/s  eta 40.1 h
+step 5900 loss 2.3946 ema 2.3634 lr 0.00400  4246 tok/s  eta 41.3 h
+step 6000 loss 2.2265 ema 2.3679 lr 0.00400  4201 tok/s  eta 41.7 h
+step 6000 VAL loss 2.0911
+step 6000 checkpoint saved
+step 6100 loss 2.3516 ema 2.3712 lr 0.00400  3974 tok/s  eta 44.1 h
+step 6200 loss 2.2713 ema 2.3673 lr 0.00400  4258 tok/s  eta 41.1 h
+step 6300 loss 2.3233 ema 2.3550 lr 0.00400  4211 tok/s  eta 41.5 h
+step 6400 loss 2.3014 ema 2.3557 lr 0.00400  4247 tok/s  eta 41.1 h
+step 6500 loss 2.2566 ema 2.3410 lr 0.00400  4309 tok/s  eta 40.5 h
+step 6500 VAL loss 2.0691
+step 6600 loss 2.4659 ema 2.3533 lr 0.00400  4227 tok/s  eta 41.3 h
+step 6700 loss 2.2974 ema 2.3484 lr 0.00400  4208 tok/s  eta 41.5 h
+step 6800 loss 2.3042 ema 2.3563 lr 0.00400  4188 tok/s  eta 41.6 h
+step 6900 loss 2.3496 ema 2.3397 lr 0.00400  4204 tok/s  eta 41.4 h
+step 7000 loss 2.4155 ema 2.3438 lr 0.00399  4215 tok/s  eta 41.3 h
+step 7000 VAL loss 2.0836
+step 7000 checkpoint saved
+step 7100 loss 2.3974 ema 2.3503 lr 0.00399  4183 tok/s  eta 41.6 h
+step 7200 loss 2.3961 ema 2.3469 lr 0.00399  4218 tok/s  eta 41.2 h
+step 7300 loss 2.3202 ema 2.3441 lr 0.00399  4210 tok/s  eta 41.3 h
+step 7400 loss 2.2981 ema 2.3390 lr 0.00399  4208 tok/s  eta 41.3 h
+step 7500 loss 2.2652 ema 2.3532 lr 0.00399  4207 tok/s  eta 41.2 h
+step 7500 VAL loss 2.0533
+step 7600 loss 2.4244 ema 2.3432 lr 0.00399  4233 tok/s  eta 41.0 h
+step 7700 loss 2.3826 ema 2.3207 lr 0.00399  4228 tok/s  eta 41.0 h
+step 7800 loss 2.2836 ema 2.3219 lr 0.00399  4198 tok/s  eta 41.3 h
+step 7900 loss 2.3283 ema 2.3300 lr 0.00399  4208 tok/s  eta 41.1 h
+step 8000 loss 2.3458 ema 2.3331 lr 0.00399  4195 tok/s  eta 41.2 h
+step 8000 VAL loss 2.0489
+step 8000 checkpoint saved
+step 8100 loss 2.1845 ema 2.3289 lr 0.00399  4197 tok/s  eta 41.2 h
+step 8200 loss 2.2644 ema 2.3249 lr 0.00399  4178 tok/s  eta 41.3 h
+step 8300 loss 2.3582 ema 2.3132 lr 0.00399  4208 tok/s  eta 41.0 h
+step 8400 loss 2.2331 ema 2.3009 lr 0.00399  4197 tok/s  eta 41.1 h
+step 8500 loss 2.4834 ema 2.3105 lr 0.00399  4180 tok/s  eta 41.2 h
+step 8500 VAL loss 2.0486
+step 8600 loss 2.4384 ema 2.3145 lr 0.00399  4208 tok/s  eta 40.9 h
+step 8700 loss 2.2725 ema 2.3092 lr 0.00399  4198 tok/s  eta 41.0 h
+step 8800 loss 2.4149 ema 2.3143 lr 0.00399  4180 tok/s  eta 41.2 h
+step 8900 loss 2.2772 ema 2.3072 lr 0.00399  4202 tok/s  eta 40.9 h
+step 9000 loss 2.1939 ema 2.3060 lr 0.00399  4202 tok/s  eta 40.9 h
+step 9000 VAL loss 2.0275
+step 9000 checkpoint saved
+step 9100 loss 2.3723 ema 2.3008 lr 0.00399  4205 tok/s  eta 40.8 h
+step 9200 loss 2.3831 ema 2.3018 lr 0.00399  4212 tok/s  eta 40.7 h
+step 9300 loss 2.2034 ema 2.2966 lr 0.00399  4212 tok/s  eta 40.7 h
+step 9400 loss 2.3079 ema 2.2910 lr 0.00399  4215 tok/s  eta 40.7 h
+step 9500 loss 2.5782 ema 2.2919 lr 0.00399  4212 tok/s  eta 40.7 h
+step 9500 VAL loss 2.0291
+step 9600 loss 2.2481 ema 2.2917 lr 0.00399  4182 tok/s  eta 40.9 h
+step 9700 loss 2.2886 ema 2.2977 lr 0.00398  4195 tok/s  eta 40.8 h
+step 9800 loss 2.2990 ema 2.2937 lr 0.00398  4159 tok/s  eta 41.1 h
+step 9900 loss 2.3219 ema 2.3016 lr 0.00398  4174 tok/s  eta 40.9 h
+step 10000 loss 2.1539 ema 2.2997 lr 0.00398  4247 tok/s  eta 40.2 h
+step 10000 VAL loss 2.0096
+step 10000 checkpoint saved
+step 10100 loss 2.2423 ema 2.2926 lr 0.00398  4176 tok/s  eta 40.8 h
+step 10200 loss 2.4238 ema 2.2922 lr 0.00398  4192 tok/s  eta 40.7 h
+step 10300 loss 2.3664 ema 2.2928 lr 0.00398  4192 tok/s  eta 40.6 h
+step 10400 loss 2.4890 ema 2.3038 lr 0.00398  4169 tok/s  eta 40.8 h
+step 10500 loss 2.2971 ema 2.2869 lr 0.00398  4213 tok/s  eta 40.4 h
+step 10500 VAL loss 2.0100
+step 10600 loss 2.2127 ema 2.2897 lr 0.00398  4161 tok/s  eta 40.9 h
+step 10700 loss 2.4277 ema 2.2806 lr 0.00398  4165 tok/s  eta 40.8 h
+step 10800 loss 2.2161 ema 2.2936 lr 0.00398  4141 tok/s  eta 41.0 h
+step 10900 loss 2.4135 ema 2.2891 lr 0.00398  4164 tok/s  eta 40.7 h
+step 11000 loss 2.2548 ema 2.2794 lr 0.00398  4199 tok/s  eta 40.4 h
+step 11000 VAL loss 1.9968
+step 11000 checkpoint saved
+step 11100 loss 2.3157 ema 2.2818 lr 0.00398  4139 tok/s  eta 40.9 h
+step 11200 loss 2.1863 ema 2.2875 lr 0.00398  4146 tok/s  eta 40.8 h
+step 11300 loss 2.3806 ema 2.2820 lr 0.00398  4131 tok/s  eta 41.0 h
+step 11400 loss 2.3960 ema 2.2815 lr 0.00398  4130 tok/s  eta 40.9 h
+step 11500 loss 2.3657 ema 2.2771 lr 0.00398  4158 tok/s  eta 40.6 h
+step 11500 VAL loss 1.9883
+step 11600 loss 2.3589 ema 2.2739 lr 0.00397  4171 tok/s  eta 40.5 h
+step 11700 loss 2.2172 ema 2.2691 lr 0.00397  4244 tok/s  eta 39.8 h
+step 11800 loss 2.1884 ema 2.2639 lr 0.00397  4311 tok/s  eta 39.1 h
+step 11900 loss 2.3138 ema 2.2772 lr 0.00397  4212 tok/s  eta 40.0 h
+step 12000 loss 2.2912 ema 2.2590 lr 0.00397  4201 tok/s  eta 40.1 h
+step 12000 VAL loss 1.9930
+step 12000 checkpoint saved
+step 12100 loss 2.4330 ema 2.2811 lr 0.00397  4202 tok/s  eta 40.0 h
+step 12200 loss 2.3214 ema 2.2812 lr 0.00397  4184 tok/s  eta 40.2 h
+step 12300 loss 2.2730 ema 2.2617 lr 0.00397  4203 tok/s  eta 40.0 h
+step 12400 loss 2.3667 ema 2.2715 lr 0.00397  4169 tok/s  eta 40.3 h
+step 12500 loss 2.4363 ema 2.2715 lr 0.00397  4211 tok/s  eta 39.9 h
+step 12500 VAL loss 1.9844
+step 12600 loss 2.3168 ema 2.2757 lr 0.00397  4207 tok/s  eta 39.9 h
+step 12700 loss 2.2359 ema 2.2675 lr 0.00397  4165 tok/s  eta 40.2 h
+step 12800 loss 2.2934 ema 2.2834 lr 0.00397  4165 tok/s  eta 40.2 h
+step 12900 loss 2.2386 ema 2.2677 lr 0.00397  4185 tok/s  eta 40.0 h
+step 13000 loss 2.1052 ema 2.2588 lr 0.00397  4183 tok/s  eta 40.0 h
+step 13000 VAL loss 1.9811
+step 13000 checkpoint saved
+step 13100 loss 2.2330 ema 2.2729 lr 0.00396  4188 tok/s  eta 39.9 h
+step 13200 loss 2.3352 ema 2.2697 lr 0.00396  4164 tok/s  eta 40.1 h
+step 13300 loss 2.2515 ema 2.2655 lr 0.00396  4160 tok/s  eta 40.1 h
+step 13400 loss 2.1886 ema 2.2710 lr 0.00396  4207 tok/s  eta 39.6 h
+step 13500 loss 2.2850 ema 2.2580 lr 0.00396  4213 tok/s  eta 39.6 h
+step 13500 VAL loss 1.9924
+step 13600 loss 2.3085 ema 2.2539 lr 0.00396  4210 tok/s  eta 39.6 h
+step 13700 loss 2.2832 ema 2.2539 lr 0.00396  4202 tok/s  eta 39.6 h
+step 13800 loss 2.2415 ema 2.2494 lr 0.00396  4157 tok/s  eta 40.0 h
+step 13900 loss 2.2888 ema 2.2660 lr 0.00396  4167 tok/s  eta 39.9 h
+step 14000 loss 2.2446 ema 2.2586 lr 0.00396  4175 tok/s  eta 39.8 h
+step 14000 VAL loss 1.9746
+step 14000 checkpoint saved
+step 14100 loss 2.3113 ema 2.2542 lr 0.00396  4183 tok/s  eta 39.7 h
+step 14200 loss 2.0982 ema 2.2554 lr 0.00396  4178 tok/s  eta 39.7 h
+step 14300 loss 2.1843 ema 2.2611 lr 0.00396  4178 tok/s  eta 39.7 h
+step 14400 loss 2.2403 ema 2.2519 lr 0.00395  4195 tok/s  eta 39.5 h
+step 14500 loss 2.1436 ema 2.2464 lr 0.00395  4167 tok/s  eta 39.7 h
+step 14500 VAL loss 1.9822
+step 14600 loss 2.2322 ema 2.2537 lr 0.00395  4169 tok/s  eta 39.7 h
+step 14700 loss 2.2034 ema 2.2515 lr 0.00395  4177 tok/s  eta 39.6 h
+step 14800 loss 2.2045 ema 2.2551 lr 0.00395  4187 tok/s  eta 39.5 h
+step 14900 loss 2.3048 ema 2.2497 lr 0.00395  4285 tok/s  eta 38.5 h
+step 15000 loss 2.2578 ema 2.2509 lr 0.00395  4297 tok/s  eta 38.4 h
+step 15000 VAL loss 1.9978
+step 15000 checkpoint saved
+step 15100 loss 2.3176 ema 2.2531 lr 0.00395  4282 tok/s  eta 38.5 h
+step 15200 loss 2.2402 ema 2.2493 lr 0.00395  4274 tok/s  eta 38.6 h
+step 15300 loss 2.2739 ema 2.2619 lr 0.00395  4167 tok/s  eta 39.5 h
+step 15400 loss 2.2398 ema 2.2495 lr 0.00395  4170 tok/s  eta 39.5 h
+step 15500 loss 2.4135 ema 2.2525 lr 0.00395  4038 tok/s  eta 40.7 h
+step 15500 VAL loss 1.9728
+step 15600 loss 2.2506 ema 2.2460 lr 0.00394  3308 tok/s  eta 49.7 h
+step 15700 loss 2.1188 ema 2.2337 lr 0.00394  3571 tok/s  eta 46.0 h
+step 15800 loss 2.3905 ema 2.2400 lr 0.00394  3874 tok/s  eta 42.4 h
+step 15900 loss 2.0834 ema 2.2507 lr 0.00394  3661 tok/s  eta 44.8 h
+step 16000 loss 2.3157 ema 2.2399 lr 0.00394  4152 tok/s  eta 39.5 h
+step 16000 VAL loss 1.9793
+step 16000 checkpoint saved
+step 16100 loss 2.0620 ema 2.2462 lr 0.00394  4187 tok/s  eta 39.1 h
+step 16200 loss 2.1695 ema 2.2520 lr 0.00394  4202 tok/s  eta 38.9 h
+step 16300 loss 2.2821 ema 2.2492 lr 0.00394  4161 tok/s  eta 39.3 h
+step 16400 loss 2.1733 ema 2.2560 lr 0.00394  4069 tok/s  eta 40.2 h
+step 16500 loss 2.2938 ema 2.2482 lr 0.00394  4116 tok/s  eta 39.7 h
+step 16500 VAL loss 1.9630
+step 16600 loss 2.3578 ema 2.2392 lr 0.00394  4077 tok/s  eta 40.0 h
+step 16700 loss 2.0034 ema 2.2436 lr 0.00393  4050 tok/s  eta 40.3 h
+step 16800 loss 2.3141 ema 2.2389 lr 0.00393  4122 tok/s  eta 39.5 h
+step 16900 loss 2.1628 ema 2.2357 lr 0.00393  4154 tok/s  eta 39.2 h
+step 17000 loss 2.1065 ema 2.2340 lr 0.00393  4162 tok/s  eta 39.1 h
+step 17000 VAL loss 1.9685
+step 17000 checkpoint saved
+step 17100 loss 2.2312 ema 2.2269 lr 0.00393  4143 tok/s  eta 39.2 h
+step 17200 loss 2.2121 ema 2.2454 lr 0.00393  4157 tok/s  eta 39.1 h
+step 17300 loss 2.3393 ema 2.2527 lr 0.00393  4162 tok/s  eta 39.0 h
+step 17400 loss 2.1431 ema 2.2472 lr 0.00393  4191 tok/s  eta 38.7 h
+step 17500 loss 2.3941 ema 2.2428 lr 0.00393  4220 tok/s  eta 38.4 h
+step 17500 VAL loss 1.9602
+step 17600 loss 2.1395 ema 2.2442 lr 0.00393  4204 tok/s  eta 38.5 h
+step 17700 loss 2.2238 ema 2.2423 lr 0.00392  4128 tok/s  eta 39.2 h
+step 17800 loss 2.0712 ema 2.2442 lr 0.00392  4139 tok/s  eta 39.1 h
+step 17900 loss 2.4954 ema 2.2376 lr 0.00392  4150 tok/s  eta 39.0 h
+step 18000 loss 2.1989 ema 2.2297 lr 0.00392  4144 tok/s  eta 39.0 h
+step 18000 VAL loss 1.9725
+step 18000 checkpoint saved
+step 18100 loss 2.1986 ema 2.2369 lr 0.00392  4112 tok/s  eta 39.3 h
+step 18200 loss 2.3812 ema 2.2391 lr 0.00392  4167 tok/s  eta 38.7 h
+step 18300 loss 2.1367 ema 2.2392 lr 0.00392  4152 tok/s  eta 38.8 h
+step 18400 loss 2.1205 ema 2.2515 lr 0.00392  4160 tok/s  eta 38.7 h
+step 18500 loss 2.3046 ema 2.2446 lr 0.00392  4154 tok/s  eta 38.8 h
+step 18500 VAL loss 1.9645
+step 18600 loss 2.3402 ema 2.2468 lr 0.00392  4186 tok/s  eta 38.4 h
+step 18700 loss 2.0115 ema 2.2416 lr 0.00391  4130 tok/s  eta 38.9 h
+step 18800 loss 2.2721 ema 2.2342 lr 0.00391  4129 tok/s  eta 38.9 h
+step 18900 loss 2.3043 ema 2.2494 lr 0.00391  4145 tok/s  eta 38.7 h
+step 19000 loss 2.3326 ema 2.2335 lr 0.00391  4146 tok/s  eta 38.7 h
+step 19000 VAL loss 1.9555
+step 19000 checkpoint saved
+step 19100 loss 2.2426 ema 2.2405 lr 0.00391  4128 tok/s  eta 38.8 h
+step 19200 loss 2.2657 ema 2.2413 lr 0.00391  4177 tok/s  eta 38.4 h
+step 19300 loss 2.1517 ema 2.2483 lr 0.00391  4151 tok/s  eta 38.6 h
+step 19400 loss 2.1336 ema 2.2433 lr 0.00391  4162 tok/s  eta 38.4 h
+step 19500 loss 2.2101 ema 2.2372 lr 0.00390  4140 tok/s  eta 38.6 h
+step 19500 VAL loss 1.9599
+step 19600 loss 2.2780 ema 2.2375 lr 0.00390  4151 tok/s  eta 38.5 h
+step 19700 loss 2.1594 ema 2.2319 lr 0.00390  4154 tok/s  eta 38.4 h
+step 19800 loss 2.3384 ema 2.2421 lr 0.00390  4112 tok/s  eta 38.8 h
+step 19900 loss 2.2583 ema 2.2377 lr 0.00390  4127 tok/s  eta 38.6 h
+step 20000 loss 2.2261 ema 2.2351 lr 0.00390  4163 tok/s  eta 38.3 h
+step 20000 VAL loss 1.9634
+step 20000 checkpoint saved
+step 20100 loss 2.3242 ema 2.2279 lr 0.00390  4160 tok/s  eta 38.3 h
+step 20200 loss 2.3278 ema 2.2198 lr 0.00390  4131 tok/s  eta 38.5 h
+step 20300 loss 2.3276 ema 2.2290 lr 0.00390  4148 tok/s  eta 38.3 h
+step 20400 loss 2.3771 ema 2.2146 lr 0.00389  4171 tok/s  eta 38.1 h
+step 20500 loss 2.3172 ema 2.2231 lr 0.00389  4165 tok/s  eta 38.1 h
+step 20500 VAL loss 1.9501
+step 20600 loss 2.3653 ema 2.2251 lr 0.00389  4171 tok/s  eta 38.0 h
+step 20700 loss 2.2461 ema 2.2286 lr 0.00389  4148 tok/s  eta 38.2 h
+step 20800 loss 2.3626 ema 2.2238 lr 0.00389  4203 tok/s  eta 37.7 h
+step 20900 loss 2.2077 ema 2.2276 lr 0.00389  4211 tok/s  eta 37.6 h
+step 21000 loss 2.3511 ema 2.2175 lr 0.00389  4185 tok/s  eta 37.8 h
+step 21000 VAL loss 1.9593
+step 21000 checkpoint saved
+step 21100 loss 2.0536 ema 2.2326 lr 0.00389  4175 tok/s  eta 37.9 h
+step 21200 loss 2.2694 ema 2.2330 lr 0.00388  4158 tok/s  eta 38.0 h
+step 21300 loss 2.3470 ema 2.2278 lr 0.00388  4152 tok/s  eta 38.0 h
+step 21400 loss 2.3562 ema 2.2315 lr 0.00388  4175 tok/s  eta 37.8 h
+step 21500 loss 2.0534 ema 2.2210 lr 0.00388  4143 tok/s  eta 38.0 h
+step 21500 VAL loss 1.9523
+step 21600 loss 2.2524 ema 2.2208 lr 0.00388  4157 tok/s  eta 37.9 h
+step 21700 loss 2.3814 ema 2.2252 lr 0.00388  4209 tok/s  eta 37.4 h
+step 21800 loss 2.2756 ema 2.2276 lr 0.00388  4164 tok/s  eta 37.8 h
+step 21900 loss 2.4291 ema 2.2265 lr 0.00388  4167 tok/s  eta 37.7 h
+step 22000 loss 2.2352 ema 2.2214 lr 0.00387  4192 tok/s  eta 37.5 h
+step 22000 VAL loss 1.9543
+step 22000 checkpoint saved
+step 22100 loss 2.2414 ema 2.2305 lr 0.00387  4150 tok/s  eta 37.8 h
+step 22200 loss 2.3714 ema 2.2233 lr 0.00387  4166 tok/s  eta 37.6 h
+step 22300 loss 2.3868 ema 2.2261 lr 0.00387  4165 tok/s  eta 37.6 h
+step 22400 loss 2.3528 ema 2.2216 lr 0.00387  4148 tok/s  eta 37.7 h
+step 22500 loss 2.0961 ema 2.2183 lr 0.00387  4216 tok/s  eta 37.1 h
+step 22500 VAL loss 1.9486
+step 22600 loss 2.1551 ema 2.2294 lr 0.00387  4145 tok/s  eta 37.7 h
+step 22700 loss 2.1521 ema 2.2237 lr 0.00386  4173 tok/s  eta 37.4 h
+step 22800 loss 2.2520 ema 2.2152 lr 0.00386  4193 tok/s  eta 37.2 h
+step 22900 loss 2.2158 ema 2.2230 lr 0.00386  4185 tok/s  eta 37.3 h
+step 23000 loss 2.2731 ema 2.2186 lr 0.00386  4160 tok/s  eta 37.5 h
+step 23000 VAL loss 1.9525
+step 23000 checkpoint saved
+step 23100 loss 2.2535 ema 2.2222 lr 0.00386  4159 tok/s  eta 37.4 h
+step 23200 loss 2.1732 ema 2.2200 lr 0.00386  4046 tok/s  eta 38.5 h
+step 23300 loss 2.1811 ema 2.2135 lr 0.00386  4139 tok/s  eta 37.6 h
+step 23400 loss 2.1445 ema 2.2293 lr 0.00385  4198 tok/s  eta 37.0 h
+step 23500 loss 2.1493 ema 2.2175 lr 0.00385  4304 tok/s  eta 36.1 h
+step 23500 VAL loss 1.9594
+step 23600 loss 2.2404 ema 2.2204 lr 0.00385  4304 tok/s  eta 36.1 h
+step 23700 loss 2.2261 ema 2.2150 lr 0.00385  4318 tok/s  eta 35.9 h
+step 23800 loss 2.1772 ema 2.2096 lr 0.00385  4133 tok/s  eta 37.5 h
+step 23900 loss 2.2896 ema 2.2215 lr 0.00385  4155 tok/s  eta 37.3 h
+step 24000 loss 2.0507 ema 2.2297 lr 0.00385  4256 tok/s  eta 36.4 h
+step 24000 VAL loss 1.9511
+step 24000 checkpoint saved
+step 24100 loss 2.3379 ema 2.2224 lr 0.00384  4283 tok/s  eta 36.1 h
+step 24200 loss 2.3034 ema 2.2131 lr 0.00384  4277 tok/s  eta 36.1 h
+step 24300 loss 2.1299 ema 2.2162 lr 0.00384  4266 tok/s  eta 36.2 h
+step 24400 loss 2.2693 ema 2.2151 lr 0.00384  4283 tok/s  eta 36.0 h
+step 24500 loss 2.3486 ema 2.2222 lr 0.00384  4264 tok/s  eta 36.2 h
+step 24500 VAL loss 1.9470
+step 24600 loss 2.2760 ema 2.2150 lr 0.00384  4297 tok/s  eta 35.9 h
+step 24700 loss 2.0602 ema 2.2247 lr 0.00384  4279 tok/s  eta 36.0 h
+step 24800 loss 2.2833 ema 2.2343 lr 0.00383  4256 tok/s  eta 36.1 h
+step 24900 loss 2.1109 ema 2.2234 lr 0.00383  4281 tok/s  eta 35.9 h
+step 25000 loss 2.1692 ema 2.2123 lr 0.00383  4258 tok/s  eta 36.1 h
+step 25000 VAL loss 1.9444
+step 25000 checkpoint saved
+step 25100 loss 2.1652 ema 2.2142 lr 0.00383  4290 tok/s  eta 35.8 h
+step 25200 loss 2.3044 ema 2.2290 lr 0.00383  4273 tok/s  eta 35.9 h
+step 25300 loss 2.2626 ema 2.2222 lr 0.00383  4297 tok/s  eta 35.7 h
+step 25400 loss 2.1923 ema 2.2199 lr 0.00382  4247 tok/s  eta 36.1 h
+step 25500 loss 2.3148 ema 2.2145 lr 0.00382  4208 tok/s  eta 36.4 h
+step 25500 VAL loss 1.9506
+step 25600 loss 2.1421 ema 2.2218 lr 0.00382  4158 tok/s  eta 36.8 h
+step 25700 loss 2.1505 ema 2.2225 lr 0.00382  4032 tok/s  eta 37.9 h
+step 25800 loss 2.3864 ema 2.2214 lr 0.00382  4292 tok/s  eta 35.6 h
+step 25900 loss 2.1497 ema 2.2200 lr 0.00382  4283 tok/s  eta 35.6 h
+step 26000 loss 2.2807 ema 2.2316 lr 0.00382  4335 tok/s  eta 35.2 h
+step 26000 VAL loss 1.9510
+step 26000 checkpoint saved
+step 26100 loss 2.1775 ema 2.2211 lr 0.00381  4362 tok/s  eta 34.9 h
+step 26200 loss 2.1339 ema 2.2100 lr 0.00381  4322 tok/s  eta 35.2 h
+step 26300 loss 2.2823 ema 2.2103 lr 0.00381  4293 tok/s  eta 35.4 h
+step 26400 loss 2.2073 ema 2.2215 lr 0.00381  4309 tok/s  eta 35.3 h
+step 26500 loss 2.1159 ema 2.2079 lr 0.00381  4273 tok/s  eta 35.5 h
+step 26500 VAL loss 1.9510
+step 26600 loss 2.1582 ema 2.1994 lr 0.00381  4333 tok/s  eta 35.0 h
+step 26700 loss 2.2768 ema 2.2071 lr 0.00380  4290 tok/s  eta 35.4 h
+step 26800 loss 2.3031 ema 2.2006 lr 0.00380  4305 tok/s  eta 35.2 h
+step 26900 loss 2.0431 ema 2.2129 lr 0.00380  4309 tok/s  eta 35.1 h
+step 27000 loss 2.1759 ema 2.2134 lr 0.00380  4330 tok/s  eta 34.9 h
+step 27000 VAL loss 1.9252
+step 27000 checkpoint saved
+step 27100 loss 2.1367 ema 2.2048 lr 0.00380  4346 tok/s  eta 34.8 h
+step 27200 loss 2.3410 ema 2.2088 lr 0.00380  4297 tok/s  eta 35.2 h
+step 27300 loss 2.3007 ema 2.2113 lr 0.00379  4334 tok/s  eta 34.8 h
+step 27400 loss 2.2485 ema 2.2170 lr 0.00379  4364 tok/s  eta 34.6 h
+step 27500 loss 2.2068 ema 2.2193 lr 0.00379  4318 tok/s  eta 34.9 h
+step 27500 VAL loss 1.9300
+step 27600 loss 2.1271 ema 2.2105 lr 0.00379  4308 tok/s  eta 35.0 h
+step 27700 loss 2.1147 ema 2.2078 lr 0.00379  4284 tok/s  eta 35.1 h
+step 27800 loss 2.2699 ema 2.2035 lr 0.00379  4293 tok/s  eta 35.0 h
+step 27900 loss 2.2325 ema 2.2008 lr 0.00378  4319 tok/s  eta 34.8 h
+step 28000 loss 2.3664 ema 2.2053 lr 0.00378  4305 tok/s  eta 34.9 h
+step 28000 VAL loss 1.9526
+step 28000 checkpoint saved
+step 28100 loss 2.2101 ema 2.1993 lr 0.00378  4341 tok/s  eta 34.6 h
+step 28200 loss 2.2181 ema 2.2109 lr 0.00378  4348 tok/s  eta 34.5 h
+step 28300 loss 2.1206 ema 2.2081 lr 0.00378  4326 tok/s  eta 34.6 h
+step 28400 loss 2.2046 ema 2.1995 lr 0.00378  4301 tok/s  eta 34.8 h
+step 28500 loss 2.2301 ema 2.2018 lr 0.00377  4321 tok/s  eta 34.6 h
+step 28500 VAL loss 1.9398
+step 28600 loss 2.2876 ema 2.2050 lr 0.00377  4319 tok/s  eta 34.6 h
+step 28700 loss 2.2023 ema 2.2104 lr 0.00377  4308 tok/s  eta 34.7 h
+step 28800 loss 2.1219 ema 2.2057 lr 0.00377  4328 tok/s  eta 34.5 h
+step 28900 loss 2.1859 ema 2.2062 lr 0.00377  4298 tok/s  eta 34.7 h
+step 29000 loss 2.2761 ema 2.2114 lr 0.00376  4331 tok/s  eta 34.4 h
+step 29000 VAL loss 1.9342
+step 29000 checkpoint saved
+step 29100 loss 2.1651 ema 2.2093 lr 0.00376  4253 tok/s  eta 35.0 h
+step 29200 loss 2.1907 ema 2.2176 lr 0.00376  4137 tok/s  eta 36.0 h
+step 29300 loss 2.1886 ema 2.2213 lr 0.00376  4112 tok/s  eta 36.2 h
+step 29400 loss 1.9379 ema 2.2032 lr 0.00376  4138 tok/s  eta 35.9 h
+step 29500 loss 2.0531 ema 2.2160 lr 0.00376  4131 tok/s  eta 35.9 h
+step 29500 VAL loss 1.9343
+step 29600 loss 2.2321 ema 2.2164 lr 0.00375  4140 tok/s  eta 35.8 h
+step 29700 loss 2.3238 ema 2.2103 lr 0.00375  4186 tok/s  eta 35.4 h
+step 29800 loss 2.2239 ema 2.2194 lr 0.00375  4139 tok/s  eta 35.8 h
+step 29900 loss 2.1890 ema 2.2167 lr 0.00375  4150 tok/s  eta 35.7 h
+step 30000 loss 2.2651 ema 2.2168 lr 0.00375  4171 tok/s  eta 35.5 h
+step 30000 VAL loss 1.9567
+step 30000 checkpoint saved
+step 30100 loss 2.2546 ema 2.1956 lr 0.00374  4171 tok/s  eta 35.4 h
+step 30200 loss 2.0534 ema 2.2155 lr 0.00374  4240 tok/s  eta 34.8 h
+step 30300 loss 2.2052 ema 2.2191 lr 0.00374  4233 tok/s  eta 34.9 h
+step 30400 loss 2.0638 ema 2.2135 lr 0.00374  4260 tok/s  eta 34.6 h
+step 30500 loss 2.2485 ema 2.2113 lr 0.00374  4278 tok/s  eta 34.4 h
+step 30500 VAL loss 1.9482
+step 30600 loss 2.2123 ema 2.2239 lr 0.00374  4288 tok/s  eta 34.3 h
+step 30700 loss 2.2095 ema 2.2137 lr 0.00373  4207 tok/s  eta 35.0 h
+step 30800 loss 2.0971 ema 2.2089 lr 0.00373  4172 tok/s  eta 35.2 h
+step 30900 loss 2.1420 ema 2.2143 lr 0.00373  4160 tok/s  eta 35.3 h
+step 31000 loss 2.2074 ema 2.2036 lr 0.00373  4210 tok/s  eta 34.9 h
+step 31000 VAL loss 1.9314
+step 31000 checkpoint saved
+step 31100 loss 2.1446 ema 2.2157 lr 0.00373  4210 tok/s  eta 34.8 h
+step 31200 loss 2.0262 ema 2.2114 lr 0.00372  4264 tok/s  eta 34.4 h
+step 31300 loss 2.2041 ema 2.2089 lr 0.00372  4221 tok/s  eta 34.7 h
+step 31400 loss 2.2656 ema 2.2002 lr 0.00372  4264 tok/s  eta 34.3 h
+step 31500 loss 2.2192 ema 2.2062 lr 0.00372  4232 tok/s  eta 34.6 h
+step 31500 VAL loss 1.9264
+step 31600 loss 1.8709 ema 2.1975 lr 0.00372  4283 tok/s  eta 34.1 h
+step 31700 loss 2.1834 ema 2.2163 lr 0.00371  4281 tok/s  eta 34.1 h
+step 31800 loss 2.4136 ema 2.2151 lr 0.00371  4228 tok/s  eta 34.5 h
+step 31900 loss 2.1413 ema 2.2025 lr 0.00371  4150 tok/s  eta 35.1 h
+step 32000 loss 2.3166 ema 2.1987 lr 0.00371  4085 tok/s  eta 35.6 h
+step 32000 VAL loss 1.9385
+step 32000 checkpoint saved
+step 32100 loss 2.3298 ema 2.2202 lr 0.00371  4088 tok/s  eta 35.6 h
+step 32200 loss 2.2317 ema 2.2124 lr 0.00370  4081 tok/s  eta 35.6 h
+step 32300 loss 2.3997 ema 2.2179 lr 0.00370  4076 tok/s  eta 35.6 h
+step 32400 loss 2.0818 ema 2.2078 lr 0.00370  4055 tok/s  eta 35.8 h
+step 32500 loss 2.2097 ema 2.2083 lr 0.00370  4106 tok/s  eta 35.3 h
+step 32500 VAL loss 1.9318
+step 32600 loss 2.1828 ema 2.1998 lr 0.00370  4080 tok/s  eta 35.5 h
+step 32700 loss 2.3339 ema 2.1981 lr 0.00369  4070 tok/s  eta 35.6 h
+step 32800 loss 2.2767 ema 2.2090 lr 0.00369  4096 tok/s  eta 35.3 h
+step 32900 loss 2.1391 ema 2.2158 lr 0.00369  4061 tok/s  eta 35.6 h
+step 33000 loss 2.0347 ema 2.2018 lr 0.00369  4081 tok/s  eta 35.4 h
+step 33000 VAL loss 1.9320
+step 33000 checkpoint saved
+step 33100 loss 2.2385 ema 2.1960 lr 0.00369  4085 tok/s  eta 35.3 h
+step 33200 loss 2.1518 ema 2.2080 lr 0.00368  4076 tok/s  eta 35.4 h
+step 33300 loss 2.1783 ema 2.1976 lr 0.00368  4039 tok/s  eta 35.7 h
+step 33400 loss 2.2165 ema 2.2056 lr 0.00368  4074 tok/s  eta 35.4 h
+step 33500 loss 2.2985 ema 2.2066 lr 0.00368  4078 tok/s  eta 35.3 h
+step 33500 VAL loss 1.9074
+step 33600 loss 2.1922 ema 2.2055 lr 0.00368  4084 tok/s  eta 35.2 h
+step 33700 loss 2.2642 ema 2.1964 lr 0.00367  4098 tok/s  eta 35.1 h
+step 33800 loss 2.0686 ema 2.2025 lr 0.00367  4068 tok/s  eta 35.3 h
+step 33900 loss 2.0507 ema 2.2041 lr 0.00367  4075 tok/s  eta 35.2 h
+step 34000 loss 2.2533 ema 2.2050 lr 0.00367  4088 tok/s  eta 35.1 h
+step 34000 VAL loss 1.9253
+step 34000 checkpoint saved
+step 34100 loss 2.2231 ema 2.2126 lr 0.00367  4071 tok/s  eta 35.2 h
+step 34200 loss 2.2309 ema 2.2003 lr 0.00366  4067 tok/s  eta 35.2 h
+step 34300 loss 2.3308 ema 2.2021 lr 0.00366  4067 tok/s  eta 35.2 h
+step 34400 loss 2.2470 ema 2.2050 lr 0.00366  4093 tok/s  eta 34.9 h
+step 34500 loss 2.2098 ema 2.1990 lr 0.00366  4073 tok/s  eta 35.1 h
+step 34500 VAL loss 1.9299
+step 34600 loss 2.2603 ema 2.2137 lr 0.00366  4062 tok/s  eta 35.1 h
+step 34700 loss 2.1795 ema 2.2099 lr 0.00365  4072 tok/s  eta 35.0 h
+step 34800 loss 2.3275 ema 2.2097 lr 0.00365  4065 tok/s  eta 35.0 h
+step 34900 loss 2.1889 ema 2.2008 lr 0.00365  4061 tok/s  eta 35.1 h
+step 35000 loss 2.1862 ema 2.1947 lr 0.00365  4059 tok/s  eta 35.0 h
+step 35000 VAL loss 1.9277
+step 35000 checkpoint saved
+step 35100 loss 2.3563 ema 2.2077 lr 0.00364  4091 tok/s  eta 34.7 h
+step 35200 loss 2.1491 ema 2.2023 lr 0.00364  4078 tok/s  eta 34.8 h
+step 35300 loss 2.2877 ema 2.2015 lr 0.00364  4106 tok/s  eta 34.6 h
+step 35400 loss 2.2317 ema 2.2027 lr 0.00364  4067 tok/s  eta 34.9 h
+step 35500 loss 2.2447 ema 2.2112 lr 0.00364  4072 tok/s  eta 34.8 h
+step 35500 VAL loss 1.9279
+step 35600 loss 2.1319 ema 2.2072 lr 0.00363  4045 tok/s  eta 35.0 h
+step 35700 loss 2.1261 ema 2.1910 lr 0.00363  4056 tok/s  eta 34.9 h
+step 35800 loss 2.1685 ema 2.2012 lr 0.00363  4041 tok/s  eta 35.0 h
+step 35900 loss 2.1479 ema 2.1962 lr 0.00363  4054 tok/s  eta 34.8 h
+step 36000 loss 2.4251 ema 2.1972 lr 0.00363  4095 tok/s  eta 34.5 h
+step 36000 VAL loss 1.9250
+step 36000 checkpoint saved
+step 36100 loss 2.0714 ema 2.1906 lr 0.00362  4079 tok/s  eta 34.6 h
+step 36200 loss 2.1825 ema 2.1966 lr 0.00362  4084 tok/s  eta 34.5 h
+step 36300 loss 2.3234 ema 2.1957 lr 0.00362  4065 tok/s  eta 34.6 h
+step 36400 loss 2.1377 ema 2.1995 lr 0.00362  4053 tok/s  eta 34.7 h
+step 36500 loss 2.1178 ema 2.1908 lr 0.00361  4085 tok/s  eta 34.4 h
+step 36500 VAL loss 1.9206
+step 36600 loss 2.3573 ema 2.2021 lr 0.00361  4066 tok/s  eta 34.5 h
+step 36700 loss 2.2585 ema 2.2119 lr 0.00361  4052 tok/s  eta 34.6 h
+step 36800 loss 2.3487 ema 2.2144 lr 0.00361  4071 tok/s  eta 34.4 h
+step 36900 loss 2.1478 ema 2.2062 lr 0.00361  4032 tok/s  eta 34.7 h
+step 37000 loss 2.1914 ema 2.2083 lr 0.00360  4066 tok/s  eta 34.4 h
+step 37000 VAL loss 1.9226
+step 37000 checkpoint saved
+step 37100 loss 2.0875 ema 2.1865 lr 0.00360  4078 tok/s  eta 34.3 h
+step 37200 loss 2.1114 ema 2.1896 lr 0.00360  4082 tok/s  eta 34.2 h
+step 37300 loss 2.2117 ema 2.1981 lr 0.00360  4054 tok/s  eta 34.4 h
+step 37400 loss 2.2113 ema 2.1898 lr 0.00359  4082 tok/s  eta 34.2 h
+step 37500 loss 2.1224 ema 2.1979 lr 0.00359  4054 tok/s  eta 34.4 h
+step 37500 VAL loss 1.9313
+step 37600 loss 2.1005 ema 2.2016 lr 0.00359  4062 tok/s  eta 34.3 h
+step 37700 loss 2.0527 ema 2.1977 lr 0.00359  4055 tok/s  eta 34.3 h
+step 37800 loss 2.2208 ema 2.2023 lr 0.00358  4060 tok/s  eta 34.2 h
+step 37900 loss 2.2734 ema 2.1978 lr 0.00358  4052 tok/s  eta 34.3 h
+step 38000 loss 2.3088 ema 2.1949 lr 0.00358  4037 tok/s  eta 34.4 h
+step 38000 VAL loss 1.9240
+step 38000 checkpoint saved
+step 38100 loss 2.0930 ema 2.1909 lr 0.00358  4052 tok/s  eta 34.2 h
+step 38200 loss 2.2560 ema 2.1985 lr 0.00358  4029 tok/s  eta 34.4 h
+step 38300 loss 2.3251 ema 2.1968 lr 0.00357  4046 tok/s  eta 34.2 h
+step 38400 loss 2.1887 ema 2.1914 lr 0.00357  4049 tok/s  eta 34.2 h
+step 38500 loss 2.2155 ema 2.2019 lr 0.00357  4047 tok/s  eta 34.2 h
+step 38500 VAL loss 1.9300
+step 38600 loss 2.1857 ema 2.2018 lr 0.00357  4072 tok/s  eta 33.9 h
+step 38700 loss 2.1433 ema 2.1874 lr 0.00356  4054 tok/s  eta 34.0 h
+step 38800 loss 2.3903 ema 2.1959 lr 0.00356  4052 tok/s  eta 34.0 h
+step 38900 loss 2.2259 ema 2.1984 lr 0.00356  4039 tok/s  eta 34.1 h
+step 39000 loss 2.0649 ema 2.1872 lr 0.00356  4050 tok/s  eta 34.0 h
+step 39000 VAL loss 1.9245
+step 39000 checkpoint saved
+step 39100 loss 2.2193 ema 2.2137 lr 0.00355  4059 tok/s  eta 33.9 h
+step 39200 loss 2.1202 ema 2.2068 lr 0.00355  4036 tok/s  eta 34.1 h
+step 39300 loss 2.1268 ema 2.1965 lr 0.00355  4055 tok/s  eta 33.9 h
+step 39400 loss 2.3054 ema 2.2115 lr 0.00355  4062 tok/s  eta 33.8 h
+step 39500 loss 2.2399 ema 2.1926 lr 0.00354  4062 tok/s  eta 33.8 h
+step 39500 VAL loss 1.9176
+step 39600 loss 2.0551 ema 2.2013 lr 0.00354  4058 tok/s  eta 33.8 h
+step 39700 loss 2.3157 ema 2.2175 lr 0.00354  4035 tok/s  eta 33.9 h
+step 39800 loss 2.0395 ema 2.2168 lr 0.00354  4035 tok/s  eta 33.9 h
+step 39900 loss 2.2516 ema 2.2039 lr 0.00353  4065 tok/s  eta 33.6 h
+step 40000 loss 2.2003 ema 2.1811 lr 0.00353  4045 tok/s  eta 33.8 h
+step 40000 VAL loss 1.9188
+step 40000 checkpoint saved
+step 40100 loss 2.1293 ema 2.1871 lr 0.00353  4062 tok/s  eta 33.6 h
+step 40200 loss 2.1972 ema 2.1969 lr 0.00353  4051 tok/s  eta 33.6 h
+step 40300 loss 2.1890 ema 2.1907 lr 0.00353  4038 tok/s  eta 33.7 h
+step 40400 loss 2.0763 ema 2.1944 lr 0.00352  4051 tok/s  eta 33.6 h
+step 40500 loss 2.1862 ema 2.1928 lr 0.00352  4073 tok/s  eta 33.4 h
+step 40500 VAL loss 1.9211
+step 40600 loss 2.0692 ema 2.1997 lr 0.00352  4068 tok/s  eta 33.4 h
+step 40700 loss 2.1611 ema 2.1977 lr 0.00352  4072 tok/s  eta 33.3 h
+step 40800 loss 2.2715 ema 2.2027 lr 0.00351  4048 tok/s  eta 33.5 h
+step 40900 loss 2.0943 ema 2.1880 lr 0.00351  4095 tok/s  eta 33.1 h
+step 41000 loss 2.2208 ema 2.1918 lr 0.00351  4058 tok/s  eta 33.4 h
+step 41000 VAL loss 1.9130
+step 41000 checkpoint saved
+step 41100 loss 2.1942 ema 2.1850 lr 0.00351  4053 tok/s  eta 33.4 h
+step 41200 loss 2.1031 ema 2.1910 lr 0.00350  4062 tok/s  eta 33.3 h
+step 41300 loss 2.2143 ema 2.1906 lr 0.00350  4037 tok/s  eta 33.5 h
+step 41400 loss 2.0334 ema 2.1931 lr 0.00350  4050 tok/s  eta 33.3 h
+step 41500 loss 2.0733 ema 2.1911 lr 0.00350  4018 tok/s  eta 33.6 h
+step 41500 VAL loss 1.9051
+step 41600 loss 2.1714 ema 2.1862 lr 0.00349  4073 tok/s  eta 33.1 h
+step 41700 loss 2.1137 ema 2.1965 lr 0.00349  4041 tok/s  eta 33.3 h
+step 41800 loss 2.1716 ema 2.1959 lr 0.00349  4063 tok/s  eta 33.1 h
+step 41900 loss 2.1903 ema 2.1925 lr 0.00349  4040 tok/s  eta 33.3 h
+step 42000 loss 2.2297 ema 2.1939 lr 0.00348  4087 tok/s  eta 32.8 h
+step 42000 VAL loss 1.9129
+step 42000 checkpoint saved
+step 42100 loss 2.1276 ema 2.1923 lr 0.00348  4048 tok/s  eta 33.1 h
+step 42200 loss 2.2920 ema 2.1885 lr 0.00348  4063 tok/s  eta 33.0 h
+step 42300 loss 2.5138 ema 2.2000 lr 0.00348  4034 tok/s  eta 33.2 h
+step 42400 loss 2.2472 ema 2.1993 lr 0.00347  4044 tok/s  eta 33.1 h
+step 42500 loss 2.1182 ema 2.1898 lr 0.00347  4087 tok/s  eta 32.7 h
+step 42500 VAL loss 1.9221
+step 42600 loss 2.1967 ema 2.1919 lr 0.00347  4048 tok/s  eta 33.0 h
+step 42700 loss 2.3248 ema 2.1958 lr 0.00347  4088 tok/s  eta 32.6 h
+step 42800 loss 2.4100 ema 2.2036 lr 0.00346  4049 tok/s  eta 32.9 h
+step 42900 loss 2.1118 ema 2.1988 lr 0.00346  4041 tok/s  eta 33.0 h
+step 43000 loss 2.1281 ema 2.1828 lr 0.00346  4053 tok/s  eta 32.8 h
+step 43000 VAL loss 1.9080
+step 43000 checkpoint saved
+step 43100 loss 2.2255 ema 2.1945 lr 0.00345  4046 tok/s  eta 32.9 h
+step 43200 loss 2.0418 ema 2.1945 lr 0.00345  4052 tok/s  eta 32.8 h
+step 43300 loss 2.2330 ema 2.1891 lr 0.00345  4041 tok/s  eta 32.9 h
+step 43400 loss 2.0734 ema 2.1926 lr 0.00345  4035 tok/s  eta 32.9 h
+step 43500 loss 2.1269 ema 2.2031 lr 0.00344  4059 tok/s  eta 32.7 h
+step 43500 VAL loss 1.9252
+step 43600 loss 2.0692 ema 2.1898 lr 0.00344  4072 tok/s  eta 32.5 h
+step 43700 loss 2.4136 ema 2.2022 lr 0.00344  4054 tok/s  eta 32.6 h
+step 43800 loss 2.1557 ema 2.1952 lr 0.00344  4068 tok/s  eta 32.5 h
+step 43900 loss 2.0085 ema 2.1917 lr 0.00343  4072 tok/s  eta 32.4 h
+step 44000 loss 2.0125 ema 2.1920 lr 0.00343  4058 tok/s  eta 32.5 h
+step 44000 VAL loss 1.9238
+step 44000 checkpoint saved
+step 44100 loss 2.4371 ema 2.1909 lr 0.00343  4086 tok/s  eta 32.3 h
+step 44200 loss 2.3301 ema 2.1814 lr 0.00343  4130 tok/s  eta 31.9 h
+step 44300 loss 2.2095 ema 2.1856 lr 0.00342  4114 tok/s  eta 32.0 h
+step 44400 loss 2.2299 ema 2.1793 lr 0.00342  4060 tok/s  eta 32.4 h
+step 44500 loss 2.1091 ema 2.1913 lr 0.00342  4030 tok/s  eta 32.6 h
+step 44500 VAL loss 1.9227
+step 44600 loss 2.2841 ema 2.2003 lr 0.00342  4038 tok/s  eta 32.5 h
+step 44700 loss 2.2124 ema 2.1930 lr 0.00341  4057 tok/s  eta 32.3 h
+step 44800 loss 2.2811 ema 2.2021 lr 0.00341  4039 tok/s  eta 32.4 h
+step 44900 loss 2.0745 ema 2.1949 lr 0.00341  4058 tok/s  eta 32.3 h
+step 45000 loss 2.2938 ema 2.2005 lr 0.00340  4051 tok/s  eta 32.3 h
+step 45000 VAL loss 1.9200
+step 45000 checkpoint saved
+step 45100 loss 2.0601 ema 2.2055 lr 0.00340  4056 tok/s  eta 32.2 h
+step 45200 loss 2.2629 ema 2.1955 lr 0.00340  4041 tok/s  eta 32.3 h
+step 45300 loss 2.1793 ema 2.1932 lr 0.00340  4064 tok/s  eta 32.1 h
+step 45400 loss 2.3096 ema 2.1975 lr 0.00339  4044 tok/s  eta 32.2 h
+step 45500 loss 2.1220 ema 2.1821 lr 0.00339  4077 tok/s  eta 32.0 h
+step 45500 VAL loss 1.9173
+step 45600 loss 2.1184 ema 2.1800 lr 0.00339  4057 tok/s  eta 32.1 h
+step 45700 loss 2.4631 ema 2.1953 lr 0.00339  4064 tok/s  eta 32.0 h
+step 45800 loss 2.1562 ema 2.1971 lr 0.00338  4052 tok/s  eta 32.1 h
+step 45900 loss 2.2927 ema 2.1954 lr 0.00338  4050 tok/s  eta 32.1 h
+step 46000 loss 2.0814 ema 2.1942 lr 0.00338  4034 tok/s  eta 32.2 h
+step 46000 VAL loss 1.9151
+step 46000 checkpoint saved
+step 46100 loss 2.2040 ema 2.1986 lr 0.00338  4042 tok/s  eta 32.1 h
+step 46200 loss 2.2620 ema 2.1852 lr 0.00337  4051 tok/s  eta 32.0 h
+step 46300 loss 2.2665 ema 2.1837 lr 0.00337  4022 tok/s  eta 32.2 h
+step 46400 loss 2.2299 ema 2.1882 lr 0.00337  4044 tok/s  eta 32.0 h
+step 46500 loss 2.1001 ema 2.1841 lr 0.00336  4071 tok/s  eta 31.7 h
+step 46500 VAL loss 1.9050
+step 46600 loss 2.1251 ema 2.1891 lr 0.00336  4050 tok/s  eta 31.9 h
+step 46700 loss 2.1840 ema 2.1785 lr 0.00336  4038 tok/s  eta 31.9 h
+step 46800 loss 2.1577 ema 2.1958 lr 0.00336  4055 tok/s  eta 31.8 h
+step 46900 loss 2.3452 ema 2.1938 lr 0.00335  4027 tok/s  eta 32.0 h
+step 47000 loss 2.2417 ema 2.1835 lr 0.00335  4074 tok/s  eta 31.6 h
+step 47000 VAL loss 1.9144
+step 47000 checkpoint saved
+step 47100 loss 2.1622 ema 2.1877 lr 0.00335  4065 tok/s  eta 31.6 h
+step 47200 loss 2.2846 ema 2.1882 lr 0.00334  4042 tok/s  eta 31.8 h
+step 47300 loss 2.2081 ema 2.1874 lr 0.00334  4036 tok/s  eta 31.8 h
+step 47400 loss 2.1365 ema 2.1887 lr 0.00334  4108 tok/s  eta 31.2 h
+step 47500 loss 2.2116 ema 2.1929 lr 0.00334  4100 tok/s  eta 31.2 h
+step 47500 VAL loss 1.9123
+step 47600 loss 2.1511 ema 2.1962 lr 0.00333  4065 tok/s  eta 31.5 h
+step 47700 loss 2.1577 ema 2.1776 lr 0.00333  4028 tok/s  eta 31.7 h
+step 47800 loss 2.2134 ema 2.1895 lr 0.00333  4027 tok/s  eta 31.7 h
+step 47900 loss 2.0728 ema 2.1896 lr 0.00333  4080 tok/s  eta 31.3 h
+step 48000 loss 2.2833 ema 2.1932 lr 0.00332  4035 tok/s  eta 31.6 h
+step 48000 VAL loss 1.9018
+step 48000 checkpoint saved
+step 48100 loss 2.2598 ema 2.1838 lr 0.00332  4062 tok/s  eta 31.3 h
+step 48200 loss 2.2863 ema 2.1843 lr 0.00332  4055 tok/s  eta 31.4 h
+step 48300 loss 2.1544 ema 2.1909 lr 0.00331  4033 tok/s  eta 31.5 h
+step 48400 loss 2.1068 ema 2.1818 lr 0.00331  4028 tok/s  eta 31.5 h
+step 48500 loss 2.2153 ema 2.1773 lr 0.00331  4032 tok/s  eta 31.5 h
+step 48500 VAL loss 1.9156
+step 48600 loss 2.2112 ema 2.1946 lr 0.00331  4046 tok/s  eta 31.3 h
+step 48700 loss 2.1759 ema 2.1839 lr 0.00330  4016 tok/s  eta 31.5 h
+step 48800 loss 2.0523 ema 2.1931 lr 0.00330  4051 tok/s  eta 31.2 h
+step 48900 loss 2.2076 ema 2.1825 lr 0.00330  4073 tok/s  eta 31.0 h
+step 49000 loss 2.1637 ema 2.1841 lr 0.00329  4055 tok/s  eta 31.1 h
+step 49000 VAL loss 1.9201
+step 49000 checkpoint saved
+step 49100 loss 2.2014 ema 2.1969 lr 0.00329  4052 tok/s  eta 31.1 h
+step 49200 loss 2.2907 ema 2.1912 lr 0.00329  4051 tok/s  eta 31.1 h
+step 49300 loss 2.1770 ema 2.1891 lr 0.00329  4042 tok/s  eta 31.2 h
+step 49400 loss 2.2337 ema 2.1888 lr 0.00328  4037 tok/s  eta 31.2 h
+step 49500 loss 2.0814 ema 2.1794 lr 0.00328  4069 tok/s  eta 30.9 h
+step 49500 VAL loss 1.9079
+step 49600 loss 2.2249 ema 2.1800 lr 0.00328  4032 tok/s  eta 31.2 h
+step 49700 loss 2.2289 ema 2.1857 lr 0.00327  4043 tok/s  eta 31.0 h
+step 49800 loss 2.2747 ema 2.1916 lr 0.00327  4051 tok/s  eta 30.9 h
+step 49900 loss 2.2893 ema 2.1902 lr 0.00327  4048 tok/s  eta 30.9 h
+step 50000 loss 2.3413 ema 2.1867 lr 0.00327  4052 tok/s  eta 30.9 h
+step 50000 VAL loss 1.9094
+step 50000 checkpoint saved
+step 50100 loss 2.0401 ema 2.1821 lr 0.00326  4097 tok/s  eta 30.5 h
+step 50200 loss 2.1364 ema 2.1960 lr 0.00326  4078 tok/s  eta 30.6 h
+step 50300 loss 2.3308 ema 2.1753 lr 0.00326  4071 tok/s  eta 30.7 h
+step 50400 loss 2.1286 ema 2.1804 lr 0.00325  4049 tok/s  eta 30.8 h
+step 50500 loss 2.3593 ema 2.1853 lr 0.00325  4023 tok/s  eta 31.0 h
+step 50500 VAL loss 1.9108
+step 50600 loss 2.0852 ema 2.1820 lr 0.00325  4091 tok/s  eta 30.4 h
+step 50700 loss 2.2605 ema 2.1934 lr 0.00324  4135 tok/s  eta 30.1 h
+step 50800 loss 2.3411 ema 2.1833 lr 0.00324  4046 tok/s  eta 30.7 h
+step 50900 loss 2.4037 ema 2.1915 lr 0.00324  4046 tok/s  eta 30.7 h
+step 51000 loss 2.1675 ema 2.1956 lr 0.00324  4078 tok/s  eta 30.4 h
+step 51000 VAL loss 1.9097
+step 51000 checkpoint saved
+step 51100 loss 2.3124 ema 2.1774 lr 0.00323  4030 tok/s  eta 30.7 h
+step 51200 loss 2.3126 ema 2.1725 lr 0.00323  4070 tok/s  eta 30.4 h
+step 51300 loss 2.2935 ema 2.1890 lr 0.00323  4034 tok/s  eta 30.7 h
+step 51400 loss 2.1745 ema 2.1887 lr 0.00322  4059 tok/s  eta 30.4 h
+step 51500 loss 2.1337 ema 2.1836 lr 0.00322  4031 tok/s  eta 30.6 h
+step 51500 VAL loss 1.9096
+step 51600 loss 2.2748 ema 2.1820 lr 0.00322  4033 tok/s  eta 30.6 h
+step 51700 loss 2.2116 ema 2.1753 lr 0.00321  4053 tok/s  eta 30.4 h
+step 51800 loss 2.2909 ema 2.1890 lr 0.00321  4057 tok/s  eta 30.3 h
+step 51900 loss 2.1061 ema 2.1837 lr 0.00321  4054 tok/s  eta 30.3 h
+step 52000 loss 2.1648 ema 2.1855 lr 0.00321  4035 tok/s  eta 30.5 h
+step 52000 VAL loss 1.9101
+step 52000 checkpoint saved
+step 52100 loss 2.1164 ema 2.1766 lr 0.00320  4065 tok/s  eta 30.2 h
+step 52200 loss 2.1969 ema 2.1863 lr 0.00320  4081 tok/s  eta 30.1 h
+step 52300 loss 2.1766 ema 2.1791 lr 0.00320  4045 tok/s  eta 30.3 h
+step 52400 loss 2.2446 ema 2.1852 lr 0.00319  4066 tok/s  eta 30.1 h
+step 52500 loss 2.0754 ema 2.1832 lr 0.00319  4046 tok/s  eta 30.2 h
+step 52500 VAL loss 1.9050
+step 52600 loss 2.3436 ema 2.1875 lr 0.00319  4039 tok/s  eta 30.3 h
+step 52700 loss 2.0468 ema 2.1826 lr 0.00319  4053 tok/s  eta 30.1 h
+step 52800 loss 2.2340 ema 2.1775 lr 0.00318  4047 tok/s  eta 30.1 h
+step 52900 loss 2.0893 ema 2.1776 lr 0.00318  4052 tok/s  eta 30.1 h
+step 53000 loss 2.1325 ema 2.1791 lr 0.00318  4034 tok/s  eta 30.2 h
+step 53000 VAL loss 1.9130
+step 53000 checkpoint saved
+step 53100 loss 2.2321 ema 2.1876 lr 0.00317  4075 tok/s  eta 29.8 h
+step 53200 loss 2.2417 ema 2.1773 lr 0.00317  4056 tok/s  eta 30.0 h
+step 53300 loss 2.2436 ema 2.1784 lr 0.00317  4076 tok/s  eta 29.8 h
+step 53400 loss 2.1239 ema 2.1754 lr 0.00316  4112 tok/s  eta 29.5 h
+step 53500 loss 2.2786 ema 2.1848 lr 0.00316  4161 tok/s  eta 29.1 h
+step 53500 VAL loss 1.9128
+step 53600 loss 2.1001 ema 2.1708 lr 0.00316  4135 tok/s  eta 29.3 h
+step 53700 loss 2.2823 ema 2.1742 lr 0.00315  4117 tok/s  eta 29.4 h
+step 53800 loss 2.2159 ema 2.1862 lr 0.00315  4105 tok/s  eta 29.4 h
+step 53900 loss 2.2073 ema 2.1892 lr 0.00315  4160 tok/s  eta 29.0 h
+step 54000 loss 2.0018 ema 2.1909 lr 0.00315  4124 tok/s  eta 29.2 h
+step 54000 VAL loss 1.9063
+step 54000 checkpoint saved
+step 54100 loss 2.0587 ema 2.1956 lr 0.00314  4087 tok/s  eta 29.5 h
+step 54200 loss 2.1795 ema 2.1929 lr 0.00314  4105 tok/s  eta 29.3 h
+step 54300 loss 2.2689 ema 2.1981 lr 0.00314  4089 tok/s  eta 29.4 h
+step 54400 loss 2.2851 ema 2.1976 lr 0.00313  4115 tok/s  eta 29.2 h
+step 54500 loss 2.1709 ema 2.1964 lr 0.00313  4116 tok/s  eta 29.2 h
+step 54500 VAL loss 1.9101
+step 54600 loss 2.1569 ema 2.1881 lr 0.00313  4061 tok/s  eta 29.5 h
+step 54700 loss 2.2626 ema 2.1786 lr 0.00312  4127 tok/s  eta 29.0 h
+step 54800 loss 2.2655 ema 2.1779 lr 0.00312  4059 tok/s  eta 29.5 h
+step 54900 loss 2.0147 ema 2.1814 lr 0.00312  4052 tok/s  eta 29.5 h
+step 55000 loss 2.1123 ema 2.1819 lr 0.00311  4036 tok/s  eta 29.6 h
+step 55000 VAL loss 1.9112
+step 55000 checkpoint saved
+step 55100 loss 2.2191 ema 2.1780 lr 0.00311  4035 tok/s  eta 29.6 h
+step 55200 loss 2.0724 ema 2.1776 lr 0.00311  4050 tok/s  eta 29.4 h
+step 55300 loss 2.1940 ema 2.1840 lr 0.00311  4056 tok/s  eta 29.4 h
+step 55400 loss 2.1448 ema 2.1802 lr 0.00310  4053 tok/s  eta 29.4 h
+step 55500 loss 2.1899 ema 2.1738 lr 0.00310  4062 tok/s  eta 29.3 h
+step 55500 VAL loss 1.9007
+step 55600 loss 2.1353 ema 2.1722 lr 0.00310  4057 tok/s  eta 29.3 h
+step 55700 loss 2.1457 ema 2.1892 lr 0.00309  4066 tok/s  eta 29.2 h
+step 55800 loss 2.1898 ema 2.1729 lr 0.00309  4064 tok/s  eta 29.2 h
+step 55900 loss 2.1770 ema 2.1760 lr 0.00309  4059 tok/s  eta 29.2 h
+step 56000 loss 2.2245 ema 2.1847 lr 0.00308  4029 tok/s  eta 29.4 h
+step 56000 VAL loss 1.9071
+step 56000 checkpoint saved
+step 56100 loss 2.1722 ema 2.1852 lr 0.00308  4064 tok/s  eta 29.1 h
+step 56200 loss 2.0781 ema 2.1906 lr 0.00308  4045 tok/s  eta 29.2 h
+step 56300 loss 2.2944 ema 2.1855 lr 0.00307  4055 tok/s  eta 29.1 h
+step 56400 loss 2.3197 ema 2.1812 lr 0.00307  4025 tok/s  eta 29.3 h
+step 56500 loss 2.1558 ema 2.1858 lr 0.00307  4037 tok/s  eta 29.2 h
+step 56500 VAL loss 1.9021
+step 56600 loss 2.1752 ema 2.1853 lr 0.00306  4051 tok/s  eta 29.0 h
+step 56700 loss 2.0645 ema 2.1889 lr 0.00306  4064 tok/s  eta 28.9 h
+step 56800 loss 2.2285 ema 2.1888 lr 0.00306  4077 tok/s  eta 28.8 h
+step 56900 loss 2.2887 ema 2.1768 lr 0.00305  4038 tok/s  eta 29.1 h
+step 57000 loss 2.3125 ema 2.1810 lr 0.00305  4044 tok/s  eta 29.0 h
+step 57000 VAL loss 1.9112
+step 57000 checkpoint saved
+step 57100 loss 2.0559 ema 2.1764 lr 0.00305  4112 tok/s  eta 28.5 h
+step 57200 loss 2.1776 ema 2.1834 lr 0.00305  4151 tok/s  eta 28.2 h
+step 57300 loss 2.2176 ema 2.1811 lr 0.00304  4089 tok/s  eta 28.6 h
+step 57400 loss 2.2154 ema 2.1763 lr 0.00304  4045 tok/s  eta 28.9 h
+step 57500 loss 2.1193 ema 2.1868 lr 0.00304  4035 tok/s  eta 28.9 h
+step 57500 VAL loss 1.9077
+step 57600 loss 2.1586 ema 2.1852 lr 0.00303  4042 tok/s  eta 28.8 h
+step 57700 loss 2.1405 ema 2.1835 lr 0.00303  4030 tok/s  eta 28.9 h
+step 57800 loss 2.2190 ema 2.1828 lr 0.00303  4041 tok/s  eta 28.8 h
+step 57900 loss 2.2007 ema 2.1749 lr 0.00302  4051 tok/s  eta 28.7 h
+step 58000 loss 2.1031 ema 2.1753 lr 0.00302  4030 tok/s  eta 28.8 h
+step 58000 VAL loss 1.9063
+step 58000 checkpoint saved
+step 58100 loss 2.1653 ema 2.1696 lr 0.00302  4053 tok/s  eta 28.6 h
+step 58200 loss 2.2453 ema 2.1742 lr 0.00301  4061 tok/s  eta 28.5 h
+step 58300 loss 2.0672 ema 2.1859 lr 0.00301  4035 tok/s  eta 28.7 h
+step 58400 loss 2.1545 ema 2.1793 lr 0.00301  4051 tok/s  eta 28.5 h
+step 58500 loss 2.0456 ema 2.1713 lr 0.00300  4077 tok/s  eta 28.3 h
+step 58500 VAL loss 1.8998
+step 58600 loss 2.0046 ema 2.1815 lr 0.00300  4052 tok/s  eta 28.5 h
+step 58700 loss 2.2463 ema 2.1894 lr 0.00300  4043 tok/s  eta 28.5 h
+step 58800 loss 2.1833 ema 2.1883 lr 0.00299  4047 tok/s  eta 28.4 h
+step 58900 loss 2.1385 ema 2.1865 lr 0.00299  4068 tok/s  eta 28.3 h
+step 59000 loss 2.2011 ema 2.1751 lr 0.00299  4051 tok/s  eta 28.4 h
+step 59000 VAL loss 1.8963
+step 59000 checkpoint saved
+step 59100 loss 2.0953 ema 2.1694 lr 0.00298  4054 tok/s  eta 28.3 h
+step 59200 loss 2.2135 ema 2.1771 lr 0.00298  4056 tok/s  eta 28.3 h
+step 59300 loss 2.3041 ema 2.1725 lr 0.00298  4060 tok/s  eta 28.2 h
+step 59400 loss 2.2966 ema 2.1784 lr 0.00297  4037 tok/s  eta 28.4 h
+step 59500 loss 2.3338 ema 2.1722 lr 0.00297  4062 tok/s  eta 28.2 h
+step 59500 VAL loss 1.8861
+step 59600 loss 2.2848 ema 2.1730 lr 0.00297  4041 tok/s  eta 28.3 h
+step 59700 loss 2.0475 ema 2.1619 lr 0.00296  4057 tok/s  eta 28.1 h
+step 59800 loss 2.1582 ema 2.1777 lr 0.00296  4032 tok/s  eta 28.3 h
+step 59900 loss 2.1877 ema 2.1754 lr 0.00296  4040 tok/s  eta 28.2 h
+step 60000 loss 2.2676 ema 2.1776 lr 0.00295  4035 tok/s  eta 28.2 h
+step 60000 VAL loss 1.8985
+step 60000 checkpoint saved
+step 60100 loss 2.1683 ema 2.1814 lr 0.00295  4079 tok/s  eta 27.9 h
+step 60200 loss 2.1038 ema 2.1737 lr 0.00295  4055 tok/s  eta 28.0 h
+step 60300 loss 2.0557 ema 2.1781 lr 0.00295  4076 tok/s  eta 27.8 h
+step 60400 loss 2.1644 ema 2.1919 lr 0.00294  4144 tok/s  eta 27.3 h
+step 60500 loss 2.1820 ema 2.1691 lr 0.00294  4140 tok/s  eta 27.3 h
+step 60500 VAL loss 1.9024
+step 60600 loss 2.2805 ema 2.1678 lr 0.00294  4110 tok/s  eta 27.5 h
+step 60700 loss 2.6053 ema 2.1702 lr 0.00293  4069 tok/s  eta 27.8 h
+step 60800 loss 2.1887 ema 2.1863 lr 0.00293  4085 tok/s  eta 27.6 h
+step 60900 loss 2.0866 ema 2.1886 lr 0.00293  4113 tok/s  eta 27.4 h
+step 61000 loss 2.0916 ema 2.1741 lr 0.00292  4079 tok/s  eta 27.6 h
+step 61000 VAL loss 1.8959
+step 61000 checkpoint saved
+step 61100 loss 2.3430 ema 2.1641 lr 0.00292  4134 tok/s  eta 27.2 h
+step 61200 loss 2.1700 ema 2.1756 lr 0.00292  4104 tok/s  eta 27.4 h
+step 61300 loss 2.1189 ema 2.1778 lr 0.00291  4096 tok/s  eta 27.4 h
+step 61400 loss 2.1302 ema 2.1721 lr 0.00291  4062 tok/s  eta 27.6 h
+step 61500 loss 2.1458 ema 2.1684 lr 0.00291  4060 tok/s  eta 27.6 h
+step 61500 VAL loss 1.8926
+step 61600 loss 2.0817 ema 2.1706 lr 0.00290  4065 tok/s  eta 27.5 h
+step 61700 loss 2.1567 ema 2.1617 lr 0.00290  4156 tok/s  eta 26.9 h
+step 61800 loss 2.1226 ema 2.1671 lr 0.00290  4169 tok/s  eta 26.8 h
+step 61900 loss 2.1283 ema 2.1715 lr 0.00289  4121 tok/s  eta 27.1 h
+step 62000 loss 2.1147 ema 2.1702 lr 0.00289  4118 tok/s  eta 27.1 h
+step 62000 VAL loss 1.9083
+step 62000 checkpoint saved
+step 62100 loss 2.3194 ema 2.1704 lr 0.00289  4180 tok/s  eta 26.7 h
+step 62200 loss 2.1394 ema 2.1640 lr 0.00288  4178 tok/s  eta 26.6 h
+step 62300 loss 2.1364 ema 2.1671 lr 0.00288  4158 tok/s  eta 26.7 h
+step 62400 loss 2.0535 ema 2.1698 lr 0.00288  4201 tok/s  eta 26.4 h
+step 62500 loss 2.0779 ema 2.1676 lr 0.00287  4215 tok/s  eta 26.3 h
+step 62500 VAL loss 1.8905
+step 62600 loss 2.3327 ema 2.1682 lr 0.00287  4197 tok/s  eta 26.4 h
+step 62700 loss 2.2645 ema 2.1794 lr 0.00287  4190 tok/s  eta 26.4 h
+step 62800 loss 2.1631 ema 2.1810 lr 0.00286  4178 tok/s  eta 26.5 h
+step 62900 loss 2.1075 ema 2.1787 lr 0.00286  4208 tok/s  eta 26.3 h
+step 63000 loss 2.1947 ema 2.1681 lr 0.00286  4164 tok/s  eta 26.5 h
+step 63000 VAL loss 1.9174
+step 63000 checkpoint saved
+step 63100 loss 2.4396 ema 2.1817 lr 0.00285  4141 tok/s  eta 26.6 h
+step 63200 loss 2.2543 ema 2.1766 lr 0.00285  4155 tok/s  eta 26.5 h
+step 63300 loss 2.1481 ema 2.1815 lr 0.00285  4200 tok/s  eta 26.2 h
+step 63400 loss 2.1571 ema 2.1681 lr 0.00284  4167 tok/s  eta 26.4 h
+step 63500 loss 2.2241 ema 2.1797 lr 0.00284  4208 tok/s  eta 26.1 h
+step 63500 VAL loss 1.9059
+step 63600 loss 2.1498 ema 2.1863 lr 0.00284  4189 tok/s  eta 26.2 h
+step 63700 loss 2.0726 ema 2.1800 lr 0.00283  4191 tok/s  eta 26.1 h
+step 63800 loss 2.3465 ema 2.1794 lr 0.00283  4190 tok/s  eta 26.1 h
+step 63900 loss 2.1961 ema 2.1715 lr 0.00283  4184 tok/s  eta 26.1 h
+step 64000 loss 2.1946 ema 2.1704 lr 0.00282  4184 tok/s  eta 26.1 h
+step 64000 VAL loss 1.8907
+step 64000 checkpoint saved
+step 64100 loss 2.0753 ema 2.1746 lr 0.00282  4186 tok/s  eta 26.1 h
+step 64200 loss 2.0551 ema 2.1609 lr 0.00281  4209 tok/s  eta 25.9 h
+step 64300 loss 2.0895 ema 2.1681 lr 0.00281  4166 tok/s  eta 26.1 h
+step 64400 loss 2.3626 ema 2.1686 lr 0.00281  4233 tok/s  eta 25.7 h
+step 64500 loss 2.1726 ema 2.1734 lr 0.00280  4122 tok/s  eta 26.4 h
+step 64500 VAL loss 1.8925
+step 64600 loss 2.1472 ema 2.1757 lr 0.00280  4180 tok/s  eta 26.0 h
+step 64700 loss 2.0846 ema 2.1705 lr 0.00280  4224 tok/s  eta 25.7 h
+step 64800 loss 2.5077 ema 2.1783 lr 0.00279  4184 tok/s  eta 25.9 h
+step 64900 loss 2.2956 ema 2.1760 lr 0.00279  4207 tok/s  eta 25.7 h
+step 65000 loss 2.3890 ema 2.1780 lr 0.00279  4174 tok/s  eta 25.9 h
+step 65000 VAL loss 1.8995
+step 65000 checkpoint saved
+step 65100 loss 2.0896 ema 2.1845 lr 0.00278  4181 tok/s  eta 25.8 h
+step 65200 loss 2.1778 ema 2.1731 lr 0.00278  4172 tok/s  eta 25.9 h
+step 65300 loss 2.3107 ema 2.1714 lr 0.00278  4179 tok/s  eta 25.8 h
+step 65400 loss 2.0110 ema 2.1667 lr 0.00277  4197 tok/s  eta 25.6 h
+step 65500 loss 2.0619 ema 2.1744 lr 0.00277  4186 tok/s  eta 25.7 h
+step 65500 VAL loss 1.8965
+step 65600 loss 2.2147 ema 2.1637 lr 0.00277  4201 tok/s  eta 25.6 h
+step 65700 loss 2.1470 ema 2.1624 lr 0.00276  4186 tok/s  eta 25.6 h
+step 65800 loss 2.1911 ema 2.1760 lr 0.00276  4210 tok/s  eta 25.5 h
+step 65900 loss 2.3202 ema 2.1724 lr 0.00276  4199 tok/s  eta 25.5 h
+step 66000 loss 2.2964 ema 2.1631 lr 0.00275  4177 tok/s  eta 25.6 h
+step 66000 VAL loss 1.8967
+step 66000 checkpoint saved
+step 66100 loss 2.2351 ema 2.1748 lr 0.00275  4213 tok/s  eta 25.4 h
+step 66200 loss 2.2223 ema 2.1731 lr 0.00275  4211 tok/s  eta 25.3 h
+step 66300 loss 2.2597 ema 2.1724 lr 0.00274  4200 tok/s  eta 25.4 h
+step 66400 loss 2.1978 ema 2.1623 lr 0.00274  4203 tok/s  eta 25.3 h
+step 66500 loss 2.1702 ema 2.1624 lr 0.00274  4180 tok/s  eta 25.5 h
+step 66500 VAL loss 1.8966
+step 66600 loss 2.1456 ema 2.1648 lr 0.00273  4190 tok/s  eta 25.4 h
+step 66700 loss 2.1122 ema 2.1624 lr 0.00273  4166 tok/s  eta 25.5 h
+step 66800 loss 2.0567 ema 2.1652 lr 0.00273  4188 tok/s  eta 25.3 h
+step 66900 loss 2.2093 ema 2.1725 lr 0.00272  4202 tok/s  eta 25.2 h
+step 67000 loss 2.0883 ema 2.1825 lr 0.00272  4127 tok/s  eta 25.6 h
+step 67000 VAL loss 1.8960
+step 67000 checkpoint saved
+step 67100 loss 2.1503 ema 2.1768 lr 0.00272  4136 tok/s  eta 25.6 h
+step 67200 loss 2.1360 ema 2.1731 lr 0.00271  4135 tok/s  eta 25.5 h
+step 67300 loss 2.0971 ema 2.1713 lr 0.00271  4095 tok/s  eta 25.8 h
+step 67400 loss 2.1373 ema 2.1755 lr 0.00271  4101 tok/s  eta 25.7 h
+step 67500 loss 2.1422 ema 2.1772 lr 0.00270  4102 tok/s  eta 25.7 h
+step 67500 VAL loss 1.9018
+step 67600 loss 2.2834 ema 2.1749 lr 0.00270  4157 tok/s  eta 25.3 h
+step 67700 loss 2.1231 ema 2.1651 lr 0.00269  4225 tok/s  eta 24.9 h
+step 67800 loss 2.2320 ema 2.1622 lr 0.00269  4185 tok/s  eta 25.1 h
+step 67900 loss 2.1126 ema 2.1665 lr 0.00269  4202 tok/s  eta 24.9 h
+step 68000 loss 2.1544 ema 2.1721 lr 0.00268  4159 tok/s  eta 25.2 h
+step 68000 VAL loss 1.8960
+step 68000 checkpoint saved
+step 68100 loss 2.0024 ema 2.1756 lr 0.00268  4176 tok/s  eta 25.0 h
+step 68200 loss 2.1742 ema 2.1618 lr 0.00268  4190 tok/s  eta 24.9 h
+step 68300 loss 2.1496 ema 2.1691 lr 0.00267  4177 tok/s  eta 25.0 h
+step 68400 loss 2.1201 ema 2.1755 lr 0.00267  4226 tok/s  eta 24.7 h
+step 68500 loss 2.4025 ema 2.1654 lr 0.00267  4178 tok/s  eta 24.9 h
+step 68500 VAL loss 1.8951
+step 68600 loss 2.0706 ema 2.1708 lr 0.00266  4194 tok/s  eta 24.8 h
+step 68700 loss 2.1389 ema 2.1662 lr 0.00266  4205 tok/s  eta 24.7 h
+step 68800 loss 2.2833 ema 2.1672 lr 0.00266  4194 tok/s  eta 24.7 h
+step 68900 loss 2.2114 ema 2.1632 lr 0.00265  4155 tok/s  eta 24.9 h
+step 69000 loss 2.1199 ema 2.1681 lr 0.00265  4183 tok/s  eta 24.8 h
+step 69000 VAL loss 1.8860
+step 69000 checkpoint saved
+step 69100 loss 2.2782 ema 2.1787 lr 0.00265  4178 tok/s  eta 24.8 h
+step 69200 loss 2.3213 ema 2.1631 lr 0.00264  4209 tok/s  eta 24.5 h
+step 69300 loss 2.0432 ema 2.1639 lr 0.00264  4188 tok/s  eta 24.6 h
+step 69400 loss 2.2652 ema 2.1660 lr 0.00264  4165 tok/s  eta 24.7 h
+step 69500 loss 2.1066 ema 2.1753 lr 0.00263  4180 tok/s  eta 24.6 h
+step 69500 VAL loss 1.8981
+step 69600 loss 2.0529 ema 2.1633 lr 0.00263  4213 tok/s  eta 24.4 h
+step 69700 loss 2.1554 ema 2.1757 lr 0.00263  4172 tok/s  eta 24.6 h
+step 69800 loss 1.9500 ema 2.1650 lr 0.00262  4185 tok/s  eta 24.5 h
+step 69900 loss 1.9988 ema 2.1452 lr 0.00262  4180 tok/s  eta 24.5 h
+step 70000 loss 2.0141 ema 2.1457 lr 0.00261  4182 tok/s  eta 24.5 h
+step 70000 VAL loss 1.9049
+step 70000 checkpoint saved
+step 70100 loss 2.2223 ema 2.1456 lr 0.00261  4198 tok/s  eta 24.4 h
+step 70200 loss 2.0521 ema 2.1660 lr 0.00261  4193 tok/s  eta 24.4 h
+step 70300 loss 2.1063 ema 2.1653 lr 0.00260  4205 tok/s  eta 24.3 h
+step 70400 loss 2.2609 ema 2.1702 lr 0.00260  4221 tok/s  eta 24.2 h
+step 70500 loss 2.1795 ema 2.1705 lr 0.00260  4189 tok/s  eta 24.3 h
+step 70500 VAL loss 1.9037
+step 70600 loss 2.1383 ema 2.1768 lr 0.00259  4205 tok/s  eta 24.2 h
+step 70700 loss 2.0117 ema 2.1657 lr 0.00259  4200 tok/s  eta 24.2 h
+step 70800 loss 2.0966 ema 2.1692 lr 0.00259  4220 tok/s  eta 24.1 h
+step 70900 loss 2.0688 ema 2.1645 lr 0.00258  4227 tok/s  eta 24.0 h
+step 71000 loss 2.2055 ema 2.1674 lr 0.00258  4172 tok/s  eta 24.3 h
+step 71000 VAL loss 1.8827
+step 71000 checkpoint saved
+step 71100 loss 1.9617 ema 2.1585 lr 0.00258  4183 tok/s  eta 24.2 h
+step 71200 loss 2.1555 ema 2.1738 lr 0.00257  4213 tok/s  eta 24.0 h
+step 71300 loss 2.2841 ema 2.1723 lr 0.00257  4180 tok/s  eta 24.1 h
+step 71400 loss 2.3468 ema 2.1642 lr 0.00257  4176 tok/s  eta 24.1 h
+step 71500 loss 2.0286 ema 2.1780 lr 0.00256  4187 tok/s  eta 24.0 h
+step 71500 VAL loss 1.9099
+step 71600 loss 2.1916 ema 2.1801 lr 0.00256  4192 tok/s  eta 24.0 h
+step 71700 loss 2.0893 ema 2.1633 lr 0.00255  4194 tok/s  eta 24.0 h
+step 71800 loss 2.1557 ema 2.1695 lr 0.00255  4201 tok/s  eta 23.9 h
+step 71900 loss 2.1724 ema 2.1641 lr 0.00255  4204 tok/s  eta 23.8 h
+step 72000 loss 2.1685 ema 2.1567 lr 0.00254  4196 tok/s  eta 23.9 h
+step 72000 VAL loss 1.8932
+step 72000 checkpoint saved
+step 72100 loss 2.2056 ema 2.1623 lr 0.00254  4191 tok/s  eta 23.9 h
+step 72200 loss 2.1706 ema 2.1713 lr 0.00254  4208 tok/s  eta 23.7 h
+step 72300 loss 2.1674 ema 2.1613 lr 0.00253  4182 tok/s  eta 23.9 h
+step 72400 loss 2.3038 ema 2.1584 lr 0.00253  4184 tok/s  eta 23.8 h
+step 72500 loss 2.1321 ema 2.1447 lr 0.00253  4175 tok/s  eta 23.8 h
+step 72500 VAL loss 1.8987
+step 72600 loss 2.0898 ema 2.1535 lr 0.00252  4202 tok/s  eta 23.7 h
+step 72700 loss 2.1387 ema 2.1462 lr 0.00252  4187 tok/s  eta 23.7 h
+step 72800 loss 2.2994 ema 2.1593 lr 0.00252  4188 tok/s  eta 23.7 h
+step 72900 loss 2.1267 ema 2.1611 lr 0.00251  4184 tok/s  eta 23.7 h
+step 73000 loss 2.2621 ema 2.1596 lr 0.00251  4198 tok/s  eta 23.6 h
+step 73000 VAL loss 1.9091
+step 73000 checkpoint saved
+step 73100 loss 2.1075 ema 2.1668 lr 0.00251  4200 tok/s  eta 23.5 h
+step 73200 loss 2.1901 ema 2.1669 lr 0.00250  4185 tok/s  eta 23.6 h
+step 73300 loss 2.1125 ema 2.1537 lr 0.00250  4216 tok/s  eta 23.4 h
+step 73400 loss 2.1537 ema 2.1592 lr 0.00249  4190 tok/s  eta 23.5 h
+step 73500 loss 2.1860 ema 2.1655 lr 0.00249  4169 tok/s  eta 23.6 h
+step 73500 VAL loss 1.8904
+step 73600 loss 2.1811 ema 2.1783 lr 0.00249  4206 tok/s  eta 23.4 h
+step 73700 loss 2.1768 ema 2.1615 lr 0.00248  4170 tok/s  eta 23.5 h
+step 73800 loss 2.1228 ema 2.1618 lr 0.00248  4187 tok/s  eta 23.4 h
+step 73900 loss 2.1364 ema 2.1563 lr 0.00248  4189 tok/s  eta 23.4 h
+step 74000 loss 2.1115 ema 2.1612 lr 0.00247  4178 tok/s  eta 23.4 h
+step 74000 VAL loss 1.8903
+step 74000 checkpoint saved
+step 74100 loss 2.1101 ema 2.1700 lr 0.00247  4202 tok/s  eta 23.3 h
+step 74200 loss 2.0981 ema 2.1564 lr 0.00247  4176 tok/s  eta 23.4 h
+step 74300 loss 2.1346 ema 2.1649 lr 0.00246  4175 tok/s  eta 23.4 h
+step 74400 loss 2.3274 ema 2.1730 lr 0.00246  4180 tok/s  eta 23.3 h
+step 74500 loss 2.2127 ema 2.1710 lr 0.00246  4201 tok/s  eta 23.2 h
+step 74500 VAL loss 1.8957
+step 74600 loss 1.9376 ema 2.1711 lr 0.00245  4217 tok/s  eta 23.0 h
+step 74700 loss 2.2059 ema 2.1785 lr 0.00245  4191 tok/s  eta 23.2 h
+step 74800 loss 2.0029 ema 2.1732 lr 0.00244  4178 tok/s  eta 23.2 h
+step 74900 loss 2.1220 ema 2.1616 lr 0.00244  4194 tok/s  eta 23.1 h
+step 75000 loss 2.2642 ema 2.1706 lr 0.00244  4210 tok/s  eta 23.0 h
+step 75000 VAL loss 1.8927
+step 75000 checkpoint saved
+step 75100 loss 1.8513 ema 2.1681 lr 0.00243  4198 tok/s  eta 23.0 h
+step 75200 loss 2.3875 ema 2.1618 lr 0.00243  4167 tok/s  eta 23.2 h
+step 75300 loss 2.0720 ema 2.1650 lr 0.00243  4194 tok/s  eta 23.0 h
+step 75400 loss 2.0582 ema 2.1710 lr 0.00242  4209 tok/s  eta 22.9 h
+step 75500 loss 2.1954 ema 2.1600 lr 0.00242  4189 tok/s  eta 23.0 h
+step 75500 VAL loss 1.8903
+step 75600 loss 2.2447 ema 2.1653 lr 0.00242  4169 tok/s  eta 23.0 h
+step 75700 loss 2.0727 ema 2.1671 lr 0.00241  4207 tok/s  eta 22.8 h
+step 75800 loss 2.3052 ema 2.1588 lr 0.00241  4203 tok/s  eta 22.8 h
+step 75900 loss 2.2413 ema 2.1785 lr 0.00241  4206 tok/s  eta 22.8 h
+step 76000 loss 2.2438 ema 2.1657 lr 0.00240  4178 tok/s  eta 22.9 h
+step 76000 VAL loss 1.8796
+step 76000 checkpoint saved
+step 76100 loss 2.0461 ema 2.1621 lr 0.00240  4228 tok/s  eta 22.6 h
+step 76200 loss 2.2548 ema 2.1673 lr 0.00239  4178 tok/s  eta 22.8 h
+step 76300 loss 2.1660 ema 2.1679 lr 0.00239  4210 tok/s  eta 22.6 h
+step 76400 loss 2.1555 ema 2.1595 lr 0.00239  4208 tok/s  eta 22.6 h
+step 76500 loss 2.1350 ema 2.1608 lr 0.00238  4189 tok/s  eta 22.7 h
+step 76500 VAL loss 1.8948
+step 76600 loss 2.1313 ema 2.1658 lr 0.00238  4187 tok/s  eta 22.7 h
+step 76700 loss 2.1163 ema 2.1672 lr 0.00238  4202 tok/s  eta 22.6 h
+step 76800 loss 2.1425 ema 2.1673 lr 0.00237  4210 tok/s  eta 22.5 h
+step 76900 loss 2.3353 ema 2.1656 lr 0.00237  4208 tok/s  eta 22.5 h
+step 77000 loss 2.1085 ema 2.1733 lr 0.00237  4181 tok/s  eta 22.6 h
+step 77000 VAL loss 1.8859
+step 77000 checkpoint saved
+step 77100 loss 2.0020 ema 2.1708 lr 0.00236  4188 tok/s  eta 22.5 h
+step 77200 loss 2.0934 ema 2.1714 lr 0.00236  4196 tok/s  eta 22.5 h
+step 77300 loss 2.1830 ema 2.1609 lr 0.00235  4175 tok/s  eta 22.5 h
+step 77400 loss 2.3169 ema 2.1607 lr 0.00235  4175 tok/s  eta 22.5 h
+step 77500 loss 2.1682 ema 2.1592 lr 0.00235  4180 tok/s  eta 22.5 h
+step 77500 VAL loss 1.8885
+step 77600 loss 2.0026 ema 2.1525 lr 0.00234  4193 tok/s  eta 22.4 h
+step 77700 loss 2.0562 ema 2.1529 lr 0.00234  4185 tok/s  eta 22.4 h
+step 77800 loss 2.0461 ema 2.1663 lr 0.00234  4195 tok/s  eta 22.3 h
+step 77900 loss 2.1580 ema 2.1568 lr 0.00233  4193 tok/s  eta 22.3 h
+step 78000 loss 2.1106 ema 2.1633 lr 0.00233  4181 tok/s  eta 22.3 h
+step 78000 VAL loss 1.8827
+step 78000 checkpoint saved
+step 78100 loss 2.1215 ema 2.1588 lr 0.00233  4204 tok/s  eta 22.2 h
+step 78200 loss 2.0499 ema 2.1479 lr 0.00232  4176 tok/s  eta 22.3 h
+step 78300 loss 2.1281 ema 2.1566 lr 0.00232  4177 tok/s  eta 22.3 h
+step 78400 loss 2.1343 ema 2.1573 lr 0.00232  4206 tok/s  eta 22.1 h
+step 78500 loss 1.9960 ema 2.1532 lr 0.00231  4207 tok/s  eta 22.0 h
+step 78500 VAL loss 1.8835
+step 78600 loss 2.1246 ema 2.1506 lr 0.00231  4178 tok/s  eta 22.2 h
+step 78700 loss 2.1189 ema 2.1664 lr 0.00230  4211 tok/s  eta 22.0 h
+step 78800 loss 2.1696 ema 2.1681 lr 0.00230  4188 tok/s  eta 22.1 h
+step 78900 loss 2.2371 ema 2.1625 lr 0.00230  4190 tok/s  eta 22.0 h
+step 79000 loss 1.9770 ema 2.1515 lr 0.00229  4208 tok/s  eta 21.9 h
+step 79000 VAL loss 1.8772
+step 79000 checkpoint saved
+step 79100 loss 2.0404 ema 2.1488 lr 0.00229  4206 tok/s  eta 21.9 h
+step 79200 loss 2.1456 ema 2.1554 lr 0.00229  4187 tok/s  eta 22.0 h
+step 79300 loss 2.0868 ema 2.1544 lr 0.00228  4199 tok/s  eta 21.9 h
+step 79400 loss 2.2220 ema 2.1659 lr 0.00228  4198 tok/s  eta 21.8 h
+step 79500 loss 2.1393 ema 2.1605 lr 0.00228  4192 tok/s  eta 21.8 h
+step 79500 VAL loss 1.8864
+step 79600 loss 2.2015 ema 2.1601 lr 0.00227  4212 tok/s  eta 21.7 h
+step 79700 loss 2.1490 ema 2.1654 lr 0.00227  4246 tok/s  eta 21.5 h
+step 79800 loss 1.9482 ema 2.1610 lr 0.00226  4194 tok/s  eta 21.8 h
+step 79900 loss 2.3079 ema 2.1544 lr 0.00226  4168 tok/s  eta 21.9 h
+step 80000 loss 2.3558 ema 2.1564 lr 0.00226  4179 tok/s  eta 21.8 h
+step 80000 VAL loss 1.8747
+step 80000 checkpoint saved
+step 80100 loss 2.1516 ema 2.1551 lr 0.00225  4197 tok/s  eta 21.7 h
+step 80200 loss 2.1255 ema 2.1612 lr 0.00225  4196 tok/s  eta 21.6 h
+step 80300 loss 1.9049 ema 2.1557 lr 0.00225  4198 tok/s  eta 21.6 h
+step 80400 loss 2.2582 ema 2.1669 lr 0.00224  4204 tok/s  eta 21.5 h
+step 80500 loss 2.0553 ema 2.1591 lr 0.00224  4223 tok/s  eta 21.4 h
+step 80500 VAL loss 1.8818
+step 80600 loss 2.0854 ema 2.1532 lr 0.00224  4223 tok/s  eta 21.4 h
+step 80700 loss 2.0780 ema 2.1478 lr 0.00223  4212 tok/s  eta 21.4 h
+step 80800 loss 2.2132 ema 2.1495 lr 0.00223  4200 tok/s  eta 21.5 h
+step 80900 loss 2.0863 ema 2.1602 lr 0.00223  4256 tok/s  eta 21.1 h
+step 81000 loss 1.9931 ema 2.1569 lr 0.00222  4298 tok/s  eta 20.9 h
+step 81000 VAL loss 1.8768
+step 81000 checkpoint saved
+step 81100 loss 2.0691 ema 2.1647 lr 0.00222  4245 tok/s  eta 21.1 h
+step 81200 loss 2.2268 ema 2.1483 lr 0.00221  4205 tok/s  eta 21.3 h
+step 81300 loss 2.0680 ema 2.1654 lr 0.00221  4230 tok/s  eta 21.2 h
+step 81400 loss 2.0569 ema 2.1561 lr 0.00221  4273 tok/s  eta 20.9 h
+step 81500 loss 2.1932 ema 2.1642 lr 0.00220  4214 tok/s  eta 21.2 h
+step 81500 VAL loss 1.8754
+step 81600 loss 2.0500 ema 2.1586 lr 0.00220  4205 tok/s  eta 21.2 h
+step 81700 loss 2.1102 ema 2.1636 lr 0.00220  4193 tok/s  eta 21.2 h
+step 81800 loss 2.1289 ema 2.1651 lr 0.00219  4185 tok/s  eta 21.3 h
+step 81900 loss 2.1002 ema 2.1585 lr 0.00219  4181 tok/s  eta 21.3 h
+step 82000 loss 2.3146 ema 2.1558 lr 0.00219  4196 tok/s  eta 21.1 h
+step 82000 VAL loss 1.8822
+step 82000 checkpoint saved
+step 82100 loss 2.2221 ema 2.1738 lr 0.00218  4190 tok/s  eta 21.2 h
+step 82200 loss 2.1801 ema 2.1748 lr 0.00218  4216 tok/s  eta 21.0 h
+step 82300 loss 2.1829 ema 2.1682 lr 0.00217  4257 tok/s  eta 20.8 h
+step 82400 loss 2.1465 ema 2.1571 lr 0.00217  4296 tok/s  eta 20.6 h
+step 82500 loss 2.1681 ema 2.1537 lr 0.00217  4225 tok/s  eta 20.9 h
+step 82500 VAL loss 1.8816
+step 82600 loss 1.9188 ema 2.1537 lr 0.00216  4213 tok/s  eta 20.9 h
+step 82700 loss 1.9143 ema 2.1557 lr 0.00216  4221 tok/s  eta 20.8 h
+step 82800 loss 2.1732 ema 2.1539 lr 0.00216  4194 tok/s  eta 20.9 h
+step 82900 loss 2.1044 ema 2.1459 lr 0.00215  4192 tok/s  eta 20.9 h
+step 83000 loss 2.1432 ema 2.1506 lr 0.00215  4216 tok/s  eta 20.8 h
+step 83000 VAL loss 1.8838
+step 83000 checkpoint saved
+step 83100 loss 2.2692 ema 2.1649 lr 0.00215  4215 tok/s  eta 20.8 h
+step 83200 loss 2.1704 ema 2.1542 lr 0.00214  4280 tok/s  eta 20.4 h
+step 83300 loss 2.4015 ema 2.1622 lr 0.00214  4321 tok/s  eta 20.2 h
+step 83400 loss 2.1680 ema 2.1539 lr 0.00214  4325 tok/s  eta 20.2 h
+step 83500 loss 2.0592 ema 2.1503 lr 0.00213  4320 tok/s  eta 20.1 h
+step 83500 VAL loss 1.8821
+step 83600 loss 2.1058 ema 2.1561 lr 0.00213  4242 tok/s  eta 20.5 h
+step 83700 loss 1.9473 ema 2.1478 lr 0.00212  4232 tok/s  eta 20.5 h
+step 83800 loss 2.1278 ema 2.1675 lr 0.00212  4298 tok/s  eta 20.2 h
+step 83900 loss 1.9754 ema 2.1526 lr 0.00212  4292 tok/s  eta 20.2 h
+step 84000 loss 2.2228 ema 2.1532 lr 0.00211  4215 tok/s  eta 20.5 h
+step 84000 VAL loss 1.8763
+step 84000 checkpoint saved
+step 84100 loss 2.0979 ema 2.1557 lr 0.00211  4236 tok/s  eta 20.4 h
+step 84200 loss 2.1737 ema 2.1609 lr 0.00211  4204 tok/s  eta 20.5 h
+step 84300 loss 2.3076 ema 2.1572 lr 0.00210  4159 tok/s  eta 20.7 h
+step 84400 loss 2.1634 ema 2.1600 lr 0.00210  4119 tok/s  eta 20.9 h
+step 84500 loss 2.0941 ema 2.1544 lr 0.00210  4176 tok/s  eta 20.6 h
+step 84500 VAL loss 1.8818
+step 84600 loss 2.1500 ema 2.1532 lr 0.00209  4172 tok/s  eta 20.6 h
+step 84700 loss 2.1225 ema 2.1486 lr 0.00209  4159 tok/s  eta 20.6 h
+step 84800 loss 2.0301 ema 2.1501 lr 0.00208  4163 tok/s  eta 20.6 h
+step 84900 loss 2.2233 ema 2.1576 lr 0.00208  4089 tok/s  eta 20.9 h
+step 85000 loss 2.1110 ema 2.1521 lr 0.00208  4069 tok/s  eta 21.0 h
+step 85000 VAL loss 1.8806
+step 85000 checkpoint saved
+step 85100 loss 2.1942 ema 2.1488 lr 0.00207  4100 tok/s  eta 20.8 h
+step 85200 loss 2.2409 ema 2.1410 lr 0.00207  4098 tok/s  eta 20.8 h
+step 85300 loss 2.1871 ema 2.1476 lr 0.00207  4097 tok/s  eta 20.7 h
+step 85400 loss 2.0458 ema 2.1507 lr 0.00206  4088 tok/s  eta 20.8 h
+step 85500 loss 2.1004 ema 2.1497 lr 0.00206  4078 tok/s  eta 20.8 h
+step 85500 VAL loss 1.8841
+step 85600 loss 2.2109 ema 2.1592 lr 0.00206  4163 tok/s  eta 20.3 h
+step 85700 loss 2.1283 ema 2.1421 lr 0.00205  4115 tok/s  eta 20.5 h
+step 85800 loss 2.1563 ema 2.1599 lr 0.00205  4110 tok/s  eta 20.5 h
+step 85900 loss 2.2076 ema 2.1465 lr 0.00205  4120 tok/s  eta 20.5 h
+step 86000 loss 2.2439 ema 2.1656 lr 0.00204  4077 tok/s  eta 20.7 h
+step 86000 VAL loss 1.8735
+step 86000 checkpoint saved
+step 86100 loss 2.2695 ema 2.1597 lr 0.00204  4068 tok/s  eta 20.7 h
+step 86200 loss 2.1830 ema 2.1511 lr 0.00203  4081 tok/s  eta 20.6 h
+step 86300 loss 2.3260 ema 2.1520 lr 0.00203  4083 tok/s  eta 20.5 h
+step 86400 loss 2.3213 ema 2.1521 lr 0.00203  4192 tok/s  eta 20.0 h
+step 86500 loss 2.1432 ema 2.1483 lr 0.00202  4190 tok/s  eta 20.0 h
+step 86500 VAL loss 1.8691
+step 86600 loss 2.2443 ema 2.1564 lr 0.00202  4171 tok/s  eta 20.0 h
+step 86700 loss 2.1039 ema 2.1452 lr 0.00202  4169 tok/s  eta 20.0 h
+step 86800 loss 2.4658 ema 2.1599 lr 0.00201  4169 tok/s  eta 20.0 h
+step 86900 loss 2.1992 ema 2.1569 lr 0.00201  4164 tok/s  eta 20.0 h
+step 87000 loss 2.0915 ema 2.1553 lr 0.00201  4172 tok/s  eta 19.9 h
+step 87000 VAL loss 1.8667
+step 87000 checkpoint saved
+step 87100 loss 2.2746 ema 2.1522 lr 0.00200  4186 tok/s  eta 19.8 h
+step 87200 loss 2.2482 ema 2.1518 lr 0.00200  4190 tok/s  eta 19.8 h
+step 87300 loss 2.2167 ema 2.1582 lr 0.00199  4185 tok/s  eta 19.8 h
+step 87400 loss 2.2306 ema 2.1568 lr 0.00199  4164 tok/s  eta 19.8 h
+step 87500 loss 2.0640 ema 2.1545 lr 0.00199  4187 tok/s  eta 19.7 h
+step 87500 VAL loss 1.8826
+step 87600 loss 2.0655 ema 2.1545 lr 0.00198  4175 tok/s  eta 19.7 h
+step 87700 loss 2.0264 ema 2.1515 lr 0.00198  4185 tok/s  eta 19.7 h
+step 87800 loss 2.1428 ema 2.1643 lr 0.00198  4189 tok/s  eta 19.6 h
+step 87900 loss 2.2449 ema 2.1569 lr 0.00197  4190 tok/s  eta 19.6 h
+step 88000 loss 2.0339 ema 2.1531 lr 0.00197  4172 tok/s  eta 19.6 h
+step 88000 VAL loss 1.8753
+step 88000 checkpoint saved
+step 88100 loss 2.0204 ema 2.1412 lr 0.00197  4200 tok/s  eta 19.5 h
+step 88200 loss 2.2502 ema 2.1406 lr 0.00196  4194 tok/s  eta 19.5 h
+step 88300 loss 2.1744 ema 2.1536 lr 0.00196  4190 tok/s  eta 19.5 h
+step 88400 loss 1.9873 ema 2.1553 lr 0.00196  4181 tok/s  eta 19.5 h
+step 88500 loss 2.1802 ema 2.1479 lr 0.00195  4216 tok/s  eta 19.3 h
+step 88500 VAL loss 1.8771
+step 88600 loss 2.1261 ema 2.1505 lr 0.00195  4174 tok/s  eta 19.5 h
+step 88700 loss 2.1042 ema 2.1472 lr 0.00194  4186 tok/s  eta 19.4 h
+step 88800 loss 2.2237 ema 2.1438 lr 0.00194  4177 tok/s  eta 19.4 h
+step 88900 loss 2.1043 ema 2.1426 lr 0.00194  4172 tok/s  eta 19.4 h
+step 89000 loss 2.2985 ema 2.1530 lr 0.00193  4059 tok/s  eta 19.9 h
+step 89000 VAL loss 1.8733
+step 89000 checkpoint saved
+step 89100 loss 2.1764 ema 2.1519 lr 0.00193  4067 tok/s  eta 19.8 h
+step 89200 loss 2.2322 ema 2.1498 lr 0.00193  4120 tok/s  eta 19.6 h
+step 89300 loss 2.1127 ema 2.1484 lr 0.00192  4131 tok/s  eta 19.5 h
+step 89400 loss 2.1596 ema 2.1368 lr 0.00192  4104 tok/s  eta 19.6 h
+step 89500 loss 2.2066 ema 2.1403 lr 0.00192  4106 tok/s  eta 19.5 h
+step 89500 VAL loss 1.8778
+step 89600 loss 2.1100 ema 2.1578 lr 0.00191  4095 tok/s  eta 19.6 h
+step 89700 loss 2.1129 ema 2.1541 lr 0.00191  4152 tok/s  eta 19.3 h
+step 89800 loss 2.1380 ema 2.1483 lr 0.00191  4202 tok/s  eta 19.0 h
+step 89900 loss 2.0741 ema 2.1481 lr 0.00190  4145 tok/s  eta 19.2 h
+step 90000 loss 2.1255 ema 2.1552 lr 0.00190  4150 tok/s  eta 19.2 h
+step 90000 VAL loss 1.8735
+step 90000 checkpoint saved
+step 90100 loss 2.0171 ema 2.1622 lr 0.00189  4282 tok/s  eta 18.6 h
+step 90200 loss 2.2932 ema 2.1523 lr 0.00189  4271 tok/s  eta 18.6 h
+step 90300 loss 2.1422 ema 2.1440 lr 0.00189  4301 tok/s  eta 18.4 h
+step 90400 loss 2.1980 ema 2.1403 lr 0.00188  3981 tok/s  eta 19.9 h
+step 90500 loss 2.0839 ema 2.1460 lr 0.00188  3778 tok/s  eta 20.9 h
+step 90500 VAL loss 1.8753
+step 90600 loss 2.0692 ema 2.1532 lr 0.00188  4039 tok/s  eta 19.5 h
+step 90700 loss 2.2134 ema 2.1472 lr 0.00187  4152 tok/s  eta 19.0 h
+step 90800 loss 2.1726 ema 2.1431 lr 0.00187  4215 tok/s  eta 18.7 h
+step 90900 loss 1.9538 ema 2.1359 lr 0.00187  4252 tok/s  eta 18.5 h
+step 91000 loss 2.2434 ema 2.1552 lr 0.00186  4267 tok/s  eta 18.4 h
+step 91000 VAL loss 1.8734
+step 91000 checkpoint saved
+step 91100 loss 2.2552 ema 2.1553 lr 0.00186  4259 tok/s  eta 18.4 h
+step 91200 loss 2.1770 ema 2.1588 lr 0.00186  4297 tok/s  eta 18.2 h
+step 91300 loss 2.0352 ema 2.1557 lr 0.00185  4251 tok/s  eta 18.4 h
+step 91400 loss 2.1080 ema 2.1559 lr 0.00185  4149 tok/s  eta 18.8 h
+step 91500 loss 2.0575 ema 2.1373 lr 0.00185  4228 tok/s  eta 18.4 h
+step 91500 VAL loss 1.8701
+step 91600 loss 2.1407 ema 2.1498 lr 0.00184  4021 tok/s  eta 19.4 h
+step 91700 loss 2.1576 ema 2.1467 lr 0.00184  4291 tok/s  eta 18.1 h
+step 91800 loss 2.1673 ema 2.1554 lr 0.00183  4349 tok/s  eta 17.8 h
+step 91900 loss 2.1425 ema 2.1512 lr 0.00183  4399 tok/s  eta 17.6 h
+step 92000 loss 2.1903 ema 2.1314 lr 0.00183  4293 tok/s  eta 18.0 h
+step 92000 VAL loss 1.8746
+step 92000 checkpoint saved
+step 92100 loss 2.3977 ema 2.1409 lr 0.00182  4369 tok/s  eta 17.7 h
+step 92200 loss 2.0254 ema 2.1499 lr 0.00182  4372 tok/s  eta 17.6 h
+step 92300 loss 1.9952 ema 2.1446 lr 0.00182  4372 tok/s  eta 17.6 h
+step 92400 loss 1.9626 ema 2.1426 lr 0.00181  4270 tok/s  eta 18.0 h
+step 92500 loss 2.1549 ema 2.1462 lr 0.00181  4317 tok/s  eta 17.8 h
+step 92500 VAL loss 1.8679
+step 92600 loss 2.3532 ema 2.1405 lr 0.00181  4317 tok/s  eta 17.8 h
+step 92700 loss 2.1204 ema 2.1440 lr 0.00180  4321 tok/s  eta 17.7 h
+step 92800 loss 2.1252 ema 2.1521 lr 0.00180  4311 tok/s  eta 17.7 h
+step 92900 loss 2.1511 ema 2.1469 lr 0.00180  4347 tok/s  eta 17.6 h
+step 93000 loss 2.0200 ema 2.1392 lr 0.00179  4307 tok/s  eta 17.7 h
+step 93000 VAL loss 1.8604
+step 93000 checkpoint saved
+step 93100 loss 2.2069 ema 2.1464 lr 0.00179  4345 tok/s  eta 17.5 h
+step 93200 loss 2.1932 ema 2.1404 lr 0.00179  4325 tok/s  eta 17.6 h
+step 93300 loss 1.9165 ema 2.1402 lr 0.00178  4337 tok/s  eta 17.5 h
+step 93400 loss 2.3037 ema 2.1489 lr 0.00178  4365 tok/s  eta 17.4 h
+step 93500 loss 2.3434 ema 2.1514 lr 0.00177  4287 tok/s  eta 17.7 h
+step 93500 VAL loss 1.8760
+step 93600 loss 2.2655 ema 2.1460 lr 0.00177  4378 tok/s  eta 17.3 h
+step 93700 loss 2.2557 ema 2.1402 lr 0.00177  4336 tok/s  eta 17.4 h
+step 93800 loss 2.1256 ema 2.1359 lr 0.00176  4319 tok/s  eta 17.4 h
+step 93900 loss 2.1686 ema 2.1353 lr 0.00176  4313 tok/s  eta 17.4 h
+step 94000 loss 2.3506 ema 2.1558 lr 0.00176  4332 tok/s  eta 17.3 h
+step 94000 VAL loss 1.8791
+step 94000 checkpoint saved
+step 94100 loss 2.1509 ema 2.1531 lr 0.00175  4098 tok/s  eta 18.3 h
+step 94200 loss 2.2642 ema 2.1428 lr 0.00175  4073 tok/s  eta 18.4 h
+step 94300 loss 2.0316 ema 2.1434 lr 0.00175  4303 tok/s  eta 17.4 h
+step 94400 loss 1.9776 ema 2.1409 lr 0.00174  4327 tok/s  eta 17.3 h
+step 94500 loss 1.9645 ema 2.1435 lr 0.00174  4281 tok/s  eta 17.4 h
+step 94500 VAL loss 1.8820
+step 94600 loss 2.1811 ema 2.1532 lr 0.00174  4289 tok/s  eta 17.3 h
+step 94700 loss 2.2543 ema 2.1597 lr 0.00173  4282 tok/s  eta 17.4 h
+step 94800 loss 2.1164 ema 2.1500 lr 0.00173  4077 tok/s  eta 18.2 h
+step 94900 loss 2.2436 ema 2.1544 lr 0.00173  4198 tok/s  eta 17.6 h
+step 95000 loss 2.0790 ema 2.1462 lr 0.00172  4178 tok/s  eta 17.7 h
+step 95000 VAL loss 1.8702
+step 95000 checkpoint saved
+step 95100 loss 2.0159 ema 2.1454 lr 0.00172  4295 tok/s  eta 17.2 h
+step 95200 loss 2.1659 ema 2.1443 lr 0.00172  4267 tok/s  eta 17.3 h
+step 95300 loss 2.1065 ema 2.1395 lr 0.00171  4210 tok/s  eta 17.5 h
+step 95400 loss 2.2266 ema 2.1476 lr 0.00171  4199 tok/s  eta 17.5 h
+step 95500 loss 2.1411 ema 2.1381 lr 0.00171  4228 tok/s  eta 17.4 h
+step 95500 VAL loss 1.8667
+step 95600 loss 2.1078 ema 2.1457 lr 0.00170  4160 tok/s  eta 17.6 h
+step 95700 loss 2.1190 ema 2.1478 lr 0.00170  4189 tok/s  eta 17.5 h
+step 95800 loss 2.1174 ema 2.1447 lr 0.00169  4200 tok/s  eta 17.4 h
+step 95900 loss 1.9593 ema 2.1326 lr 0.00169  3991 tok/s  eta 18.3 h
+step 96000 loss 2.1124 ema 2.1419 lr 0.00169  4109 tok/s  eta 17.7 h
+step 96000 VAL loss 1.8677
+step 96000 checkpoint saved
+step 96100 loss 2.0512 ema 2.1404 lr 0.00168  4264 tok/s  eta 17.0 h
+step 96200 loss 2.2916 ema 2.1373 lr 0.00168  4224 tok/s  eta 17.2 h
+step 96300 loss 2.1405 ema 2.1484 lr 0.00168  4194 tok/s  eta 17.3 h
+step 96400 loss 2.0977 ema 2.1482 lr 0.00167  4192 tok/s  eta 17.3 h
+step 96500 loss 2.1180 ema 2.1595 lr 0.00167  3930 tok/s  eta 18.4 h
+step 96500 VAL loss 1.8797
+step 96600 loss 2.1869 ema 2.1615 lr 0.00167  3622 tok/s  eta 19.9 h
+step 96700 loss 2.2072 ema 2.1471 lr 0.00166  2764 tok/s  eta 26.1 h
+step 96800 loss 2.1805 ema 2.1444 lr 0.00166  2869 tok/s  eta 25.1 h
+step 96900 loss 2.1003 ema 2.1494 lr 0.00166  2446 tok/s  eta 29.4 h
+step 97000 loss 2.0455 ema 2.1447 lr 0.00165  2270 tok/s  eta 31.6 h
+step 97000 VAL loss 1.8794
+step 97000 checkpoint saved
+step 97100 loss 2.2255 ema 2.1552 lr 0.00165  3668 tok/s  eta 19.5 h
+step 97200 loss 2.2261 ema 2.1445 lr 0.00165  3626 tok/s  eta 19.7 h
+step 97300 loss 2.1052 ema 2.1250 lr 0.00164  3771 tok/s  eta 18.9 h
+step 97400 loss 2.1769 ema 2.1435 lr 0.00164  3896 tok/s  eta 18.3 h
+step 97500 loss 2.1611 ema 2.1316 lr 0.00164  3984 tok/s  eta 17.8 h
+step 97500 VAL loss 1.8643
+step 97600 loss 2.3499 ema 2.1370 lr 0.00163  4151 tok/s  eta 17.1 h
+step 97700 loss 2.1004 ema 2.1302 lr 0.00163  4226 tok/s  eta 16.8 h
+step 97800 loss 2.0887 ema 2.1443 lr 0.00163  4207 tok/s  eta 16.8 h
+step 97900 loss 2.2296 ema 2.1356 lr 0.00162  4075 tok/s  eta 17.3 h
+step 98000 loss 2.1304 ema 2.1431 lr 0.00162  4093 tok/s  eta 17.2 h
+step 98000 VAL loss 1.8734
+step 98000 checkpoint saved
+step 98100 loss 2.2743 ema 2.1462 lr 0.00162  3814 tok/s  eta 18.5 h
+step 98200 loss 2.0605 ema 2.1399 lr 0.00161  3070 tok/s  eta 22.9 h
+step 98300 loss 2.1136 ema 2.1433 lr 0.00161  4052 tok/s  eta 17.3 h
+step 98400 loss 2.3181 ema 2.1409 lr 0.00161  3749 tok/s  eta 18.7 h
+step 98500 loss 2.3261 ema 2.1435 lr 0.00160  3320 tok/s  eta 21.1 h
+step 98500 VAL loss 1.8572
+step 98600 loss 2.2420 ema 2.1490 lr 0.00160  3030 tok/s  eta 23.1 h
+step 98700 loss 2.2074 ema 2.1550 lr 0.00160  3264 tok/s  eta 21.4 h
+step 98800 loss 2.3002 ema 2.1481 lr 0.00159  4201 tok/s  eta 16.6 h
+step 98900 loss 2.1328 ema 2.1330 lr 0.00159  4249 tok/s  eta 16.4 h
+step 99000 loss 2.2754 ema 2.1438 lr 0.00159  4256 tok/s  eta 16.3 h
+step 99000 VAL loss 1.8640
+step 99000 checkpoint saved
+step 99100 loss 2.1027 ema 2.1475 lr 0.00158  4228 tok/s  eta 16.4 h
+step 99200 loss 2.0955 ema 2.1540 lr 0.00158  4271 tok/s  eta 16.2 h
+step 99300 loss 2.1775 ema 2.1371 lr 0.00157  4305 tok/s  eta 16.0 h
+step 99400 loss 2.1953 ema 2.1335 lr 0.00157  4296 tok/s  eta 16.0 h
+step 99500 loss 2.1348 ema 2.1273 lr 0.00157  4224 tok/s  eta 16.3 h
+step 99500 VAL loss 1.8648
+step 99600 loss 2.3156 ema 2.1305 lr 0.00156  4209 tok/s  eta 16.3 h
+step 99700 loss 2.0278 ema 2.1334 lr 0.00156  4208 tok/s  eta 16.3 h
+step 99800 loss 2.2165 ema 2.1303 lr 0.00156  4207 tok/s  eta 16.3 h
+step 99900 loss 2.3255 ema 2.1326 lr 0.00155  4218 tok/s  eta 16.2 h
+step 100000 loss 2.0124 ema 2.1317 lr 0.00155  4263 tok/s  eta 16.0 h
+step 100000 VAL loss 1.8636
+step 100000 checkpoint saved
+step 100100 loss 2.1169 ema 2.1374 lr 0.00155  4197 tok/s  eta 16.2 h
+step 100200 loss 2.1427 ema 2.1359 lr 0.00154  4234 tok/s  eta 16.1 h
+step 100300 loss 2.0615 ema 2.1319 lr 0.00154  4213 tok/s  eta 16.1 h
+step 100400 loss 2.1866 ema 2.1213 lr 0.00154  4195 tok/s  eta 16.2 h
+step 100500 loss 2.0726 ema 2.1394 lr 0.00153  4200 tok/s  eta 16.1 h
+step 100500 VAL loss 1.8666
+step 100600 loss 2.3293 ema 2.1429 lr 0.00153  4221 tok/s  eta 16.0 h
+step 100700 loss 2.1021 ema 2.1456 lr 0.00153  4206 tok/s  eta 16.0 h
+step 100800 loss 2.0759 ema 2.1427 lr 0.00152  4203 tok/s  eta 16.0 h
+step 100900 loss 2.0994 ema 2.1407 lr 0.00152  4208 tok/s  eta 16.0 h
+step 101000 loss 2.1283 ema 2.1444 lr 0.00152  4201 tok/s  eta 16.0 h
+step 101000 VAL loss 1.8658
+step 101000 checkpoint saved
+step 101100 loss 2.0836 ema 2.1374 lr 0.00151  4172 tok/s  eta 16.1 h
+step 101200 loss 2.1490 ema 2.1330 lr 0.00151  4204 tok/s  eta 15.9 h
+step 101300 loss 2.0148 ema 2.1386 lr 0.00151  4195 tok/s  eta 15.9 h
+step 101400 loss 2.1954 ema 2.1255 lr 0.00150  4194 tok/s  eta 15.9 h
+step 101500 loss 1.8924 ema 2.1252 lr 0.00150  4208 tok/s  eta 15.8 h
+step 101500 VAL loss 1.8662
+step 101600 loss 2.0996 ema 2.1287 lr 0.00150  4208 tok/s  eta 15.8 h
+step 101700 loss 2.3225 ema 2.1478 lr 0.00149  3901 tok/s  eta 17.0 h
+step 101800 loss 2.0852 ema 2.1335 lr 0.00149  3663 tok/s  eta 18.1 h
+step 101900 loss 2.2517 ema 2.1340 lr 0.00149  3905 tok/s  eta 16.9 h
+step 102000 loss 1.9669 ema 2.1424 lr 0.00148  3951 tok/s  eta 16.7 h
+step 102000 VAL loss 1.8645
+step 102000 checkpoint saved
+step 102100 loss 2.1197 ema 2.1257 lr 0.00148  3963 tok/s  eta 16.6 h
+step 102200 loss 2.2083 ema 2.1387 lr 0.00148  3934 tok/s  eta 16.7 h
+step 102300 loss 2.1540 ema 2.1335 lr 0.00147  3859 tok/s  eta 17.0 h
+step 102400 loss 2.2050 ema 2.1393 lr 0.00147  3938 tok/s  eta 16.6 h
+step 102500 loss 2.2100 ema 2.1445 lr 0.00147  4074 tok/s  eta 16.1 h
+step 102500 VAL loss 1.8516
+step 102600 loss 2.0497 ema 2.1349 lr 0.00146  3951 tok/s  eta 16.5 h
+step 102700 loss 2.1173 ema 2.1376 lr 0.00146  3805 tok/s  eta 17.1 h
+step 102800 loss 2.1879 ema 2.1466 lr 0.00146  3698 tok/s  eta 17.6 h
+step 102900 loss 2.1443 ema 2.1337 lr 0.00145  4171 tok/s  eta 15.6 h
+step 103000 loss 2.1864 ema 2.1406 lr 0.00145  4235 tok/s  eta 15.3 h
+step 103000 VAL loss 1.8637
+step 103000 checkpoint saved
+step 103100 loss 2.2313 ema 2.1335 lr 0.00145  4161 tok/s  eta 15.6 h
+step 103200 loss 2.2213 ema 2.1367 lr 0.00145  4223 tok/s  eta 15.3 h
+step 103300 loss 2.3360 ema 2.1434 lr 0.00144  4185 tok/s  eta 15.4 h
+step 103400 loss 2.1438 ema 2.1410 lr 0.00144  4149 tok/s  eta 15.5 h
+step 103500 loss 2.1122 ema 2.1399 lr 0.00144  3770 tok/s  eta 17.1 h
+step 103500 VAL loss 1.8645
+step 103600 loss 1.9906 ema 2.1287 lr 0.00143  4073 tok/s  eta 15.8 h
+step 103700 loss 2.0792 ema 2.1241 lr 0.00143  4179 tok/s  eta 15.3 h
+step 103800 loss 2.2289 ema 2.1384 lr 0.00143  4125 tok/s  eta 15.5 h
+step 103900 loss 2.2445 ema 2.1458 lr 0.00142  3800 tok/s  eta 16.8 h
+step 104000 loss 2.1931 ema 2.1431 lr 0.00142  3721 tok/s  eta 17.1 h
+step 104000 VAL loss 1.8657
+step 104000 checkpoint saved
+step 104100 loss 2.2194 ema 2.1346 lr 0.00142  3800 tok/s  eta 16.7 h
+step 104200 loss 2.0748 ema 2.1433 lr 0.00141  3984 tok/s  eta 15.9 h
+step 104300 loss 2.1936 ema 2.1389 lr 0.00141  4069 tok/s  eta 15.6 h
+step 104400 loss 2.1650 ema 2.1267 lr 0.00141  4094 tok/s  eta 15.5 h
+step 104500 loss 2.1405 ema 2.1284 lr 0.00140  4176 tok/s  eta 15.1 h
+step 104500 VAL loss 1.8635
+step 104600 loss 2.2189 ema 2.1293 lr 0.00140  3948 tok/s  eta 16.0 h
+step 104700 loss 2.1741 ema 2.1335 lr 0.00140  3762 tok/s  eta 16.7 h
+step 104800 loss 2.0859 ema 2.1453 lr 0.00139  3796 tok/s  eta 16.5 h
+step 104900 loss 2.0693 ema 2.1302 lr 0.00139  3736 tok/s  eta 16.8 h
+step 105000 loss 2.0874 ema 2.1410 lr 0.00139  3930 tok/s  eta 15.9 h
+step 105000 VAL loss 1.8676
+step 105000 checkpoint saved
+step 105100 loss 2.2057 ema 2.1309 lr 0.00138  3949 tok/s  eta 15.8 h
+step 105200 loss 2.1992 ema 2.1284 lr 0.00138  3832 tok/s  eta 16.3 h
+step 105300 loss 2.0390 ema 2.1204 lr 0.00138  3707 tok/s  eta 16.8 h
+step 105400 loss 2.1587 ema 2.1329 lr 0.00137  3940 tok/s  eta 15.8 h
+step 105500 loss 2.3055 ema 2.1354 lr 0.00137  4137 tok/s  eta 15.0 h
+step 105500 VAL loss 1.8684
+step 105600 loss 2.0993 ema 2.1317 lr 0.00137  4216 tok/s  eta 14.7 h
+step 105700 loss 1.9899 ema 2.1229 lr 0.00136  4258 tok/s  eta 14.5 h
+step 105800 loss 2.1499 ema 2.1443 lr 0.00136  4292 tok/s  eta 14.4 h
+step 105900 loss 2.1181 ema 2.1285 lr 0.00136  4077 tok/s  eta 15.1 h
+step 106000 loss 2.3013 ema 2.1366 lr 0.00135  3811 tok/s  eta 16.1 h
+step 106000 VAL loss 1.8503
+step 106000 checkpoint saved
+step 106100 loss 2.2505 ema 2.1474 lr 0.00135  3990 tok/s  eta 15.4 h
+step 106200 loss 2.1607 ema 2.1364 lr 0.00135  4061 tok/s  eta 15.1 h
+step 106300 loss 2.2154 ema 2.1339 lr 0.00135  4073 tok/s  eta 15.0 h
+step 106400 loss 2.2579 ema 2.1390 lr 0.00134  4126 tok/s  eta 14.8 h
+step 106500 loss 2.2633 ema 2.1410 lr 0.00134  4084 tok/s  eta 14.9 h
+step 106500 VAL loss 1.8563
+step 106600 loss 2.1225 ema 2.1296 lr 0.00134  4213 tok/s  eta 14.4 h
+step 106700 loss 2.0139 ema 2.1399 lr 0.00133  4146 tok/s  eta 14.6 h
+step 106800 loss 2.1636 ema 2.1285 lr 0.00133  4196 tok/s  eta 14.4 h
+step 106900 loss 2.1742 ema 2.1269 lr 0.00133  4188 tok/s  eta 14.4 h
+step 107000 loss 2.0896 ema 2.1266 lr 0.00132  4291 tok/s  eta 14.1 h
+step 107000 VAL loss 1.8556
+step 107000 checkpoint saved
+step 107100 loss 2.1946 ema 2.1259 lr 0.00132  3953 tok/s  eta 15.2 h
+step 107200 loss 2.0254 ema 2.1351 lr 0.00132  3991 tok/s  eta 15.1 h
+step 107300 loss 2.3234 ema 2.1324 lr 0.00131  3953 tok/s  eta 15.2 h
+step 107400 loss 2.1604 ema 2.1325 lr 0.00131  3918 tok/s  eta 15.3 h
+step 107500 loss 2.1368 ema 2.1369 lr 0.00131  3769 tok/s  eta 15.8 h
+step 107500 VAL loss 1.8554
+step 107600 loss 2.0044 ema 2.1329 lr 0.00130  3736 tok/s  eta 16.0 h
+step 107700 loss 1.9682 ema 2.1228 lr 0.00130  4005 tok/s  eta 14.9 h
+step 107800 loss 2.0548 ema 2.1155 lr 0.00130  4033 tok/s  eta 14.7 h
+step 107900 loss 2.1488 ema 2.1296 lr 0.00129  4032 tok/s  eta 14.7 h
+step 108000 loss 2.1645 ema 2.1257 lr 0.00129  3843 tok/s  eta 15.4 h
+step 108000 VAL loss 1.8620
+step 108000 checkpoint saved
+step 108100 loss 1.9951 ema 2.1224 lr 0.00129  3769 tok/s  eta 15.7 h
+step 108200 loss 2.2669 ema 2.1260 lr 0.00129  3950 tok/s  eta 14.9 h
+step 108300 loss 2.0462 ema 2.1309 lr 0.00128  4120 tok/s  eta 14.3 h
+step 108400 loss 2.2053 ema 2.1287 lr 0.00128  3293 tok/s  eta 17.8 h
+step 108500 loss 2.2420 ema 2.1241 lr 0.00128  3978 tok/s  eta 14.7 h
+step 108500 VAL loss 1.8636
+step 108600 loss 2.1176 ema 2.1264 lr 0.00127  3747 tok/s  eta 15.6 h
+step 108700 loss 2.1468 ema 2.1337 lr 0.00127  3833 tok/s  eta 15.2 h
+step 108800 loss 2.0759 ema 2.1339 lr 0.00127  3984 tok/s  eta 14.6 h
+step 108900 loss 2.1898 ema 2.1392 lr 0.00126  3919 tok/s  eta 14.8 h
+step 109000 loss 2.1307 ema 2.1330 lr 0.00126  3964 tok/s  eta 14.6 h
+step 109000 VAL loss 1.8631
+step 109000 checkpoint saved
+step 109100 loss 2.0166 ema 2.1359 lr 0.00126  4031 tok/s  eta 14.4 h
+step 109200 loss 2.1167 ema 2.1291 lr 0.00125  3950 tok/s  eta 14.6 h
+step 109300 loss 2.1781 ema 2.1335 lr 0.00125  3798 tok/s  eta 15.2 h
+step 109400 loss 1.9751 ema 2.1243 lr 0.00125  4079 tok/s  eta 14.1 h
+step 109500 loss 2.0725 ema 2.1348 lr 0.00125  3705 tok/s  eta 15.5 h
+step 109500 VAL loss 1.8674
+step 109600 loss 1.9654 ema 2.1261 lr 0.00124  4245 tok/s  eta 13.5 h
+step 109700 loss 2.0100 ema 2.1343 lr 0.00124  3901 tok/s  eta 14.7 h
+step 109800 loss 2.0197 ema 2.1235 lr 0.00124  3868 tok/s  eta 14.8 h
+step 109900 loss 2.1123 ema 2.1296 lr 0.00123  4093 tok/s  eta 13.9 h
+step 110000 loss 2.1619 ema 2.1357 lr 0.00123  4135 tok/s  eta 13.8 h
+step 110000 VAL loss 1.8455
+step 110000 checkpoint saved
+step 110100 loss 2.0505 ema 2.1281 lr 0.00123  4157 tok/s  eta 13.7 h
+step 110200 loss 1.9887 ema 2.1322 lr 0.00122  4017 tok/s  eta 14.1 h
+step 110300 loss 2.1201 ema 2.1141 lr 0.00122  4264 tok/s  eta 13.3 h
+step 110400 loss 2.2266 ema 2.1275 lr 0.00122  3914 tok/s  eta 14.4 h
+step 110500 loss 1.9805 ema 2.1286 lr 0.00122  3690 tok/s  eta 15.3 h
+step 110500 VAL loss 1.8632
+step 110600 loss 2.0298 ema 2.1322 lr 0.00121  3797 tok/s  eta 14.8 h
+step 110700 loss 2.1197 ema 2.1276 lr 0.00121  3931 tok/s  eta 14.3 h
+step 110800 loss 2.1055 ema 2.1263 lr 0.00121  3803 tok/s  eta 14.7 h
+step 110900 loss 1.9614 ema 2.1346 lr 0.00120  4027 tok/s  eta 13.9 h
+step 111000 loss 2.1106 ema 2.1156 lr 0.00120  3986 tok/s  eta 14.0 h
+step 111000 VAL loss 1.8512
+step 111000 checkpoint saved
+step 111100 loss 2.3603 ema 2.1199 lr 0.00120  4206 tok/s  eta 13.2 h
+step 111200 loss 2.1121 ema 2.1270 lr 0.00119  4197 tok/s  eta 13.2 h
+step 111300 loss 2.2569 ema 2.1274 lr 0.00119  3980 tok/s  eta 13.9 h
+step 111400 loss 2.0540 ema 2.1252 lr 0.00119  4080 tok/s  eta 13.6 h
+step 111500 loss 2.0289 ema 2.1302 lr 0.00119  4131 tok/s  eta 13.4 h
+step 111500 VAL loss 1.8487
+step 111600 loss 2.2539 ema 2.1336 lr 0.00118  4016 tok/s  eta 13.7 h
+step 111700 loss 2.0555 ema 2.1333 lr 0.00118  4277 tok/s  eta 12.8 h
+step 111800 loss 2.1508 ema 2.1334 lr 0.00118  4291 tok/s  eta 12.8 h
+step 111900 loss 2.0176 ema 2.1397 lr 0.00117  4322 tok/s  eta 12.7 h
+step 112000 loss 2.0483 ema 2.1242 lr 0.00117  4291 tok/s  eta 12.7 h
+step 112000 VAL loss 1.8511
+step 112000 checkpoint saved
+step 112100 loss 2.0711 ema 2.1139 lr 0.00117  4318 tok/s  eta 12.6 h
+step 112200 loss 2.0403 ema 2.1325 lr 0.00116  3882 tok/s  eta 14.0 h
+step 112300 loss 2.0924 ema 2.1335 lr 0.00116  3881 tok/s  eta 14.0 h
+step 112400 loss 2.3167 ema 2.1329 lr 0.00116  4138 tok/s  eta 13.1 h
+step 112500 loss 2.1287 ema 2.1270 lr 0.00116  4167 tok/s  eta 13.0 h
+step 112500 VAL loss 1.8431
+step 112600 loss 2.1734 ema 2.1259 lr 0.00115  4214 tok/s  eta 12.8 h
+step 112700 loss 2.0650 ema 2.1213 lr 0.00115  4123 tok/s  eta 13.1 h
+step 112800 loss 2.2148 ema 2.1199 lr 0.00115  4100 tok/s  eta 13.1 h
+step 112900 loss 2.1466 ema 2.1317 lr 0.00114  4191 tok/s  eta 12.8 h
+step 113000 loss 2.1933 ema 2.1272 lr 0.00114  4028 tok/s  eta 13.3 h
+step 113000 VAL loss 1.8388
+step 113000 checkpoint saved
+step 113100 loss 2.0030 ema 2.1152 lr 0.00114  4163 tok/s  eta 12.8 h
+step 113200 loss 1.9919 ema 2.1170 lr 0.00114  3884 tok/s  eta 13.7 h
+step 113300 loss 2.0785 ema 2.1291 lr 0.00113  4116 tok/s  eta 12.9 h
+step 113400 loss 2.2063 ema 2.1163 lr 0.00113  3872 tok/s  eta 13.7 h
+step 113500 loss 2.1473 ema 2.1055 lr 0.00113  4046 tok/s  eta 13.1 h
+step 113500 VAL loss 1.8345
+step 113600 loss 2.1969 ema 2.1190 lr 0.00112  4059 tok/s  eta 13.0 h
+step 113700 loss 2.3103 ema 2.1340 lr 0.00112  4283 tok/s  eta 12.3 h
+step 113800 loss 2.0891 ema 2.1291 lr 0.00112  4250 tok/s  eta 12.4 h
+step 113900 loss 2.2003 ema 2.1215 lr 0.00111  4279 tok/s  eta 12.3 h
+step 114000 loss 2.2538 ema 2.1184 lr 0.00111  4222 tok/s  eta 12.4 h
+step 114000 VAL loss 1.8440
+step 114000 checkpoint saved
+step 114100 loss 2.0310 ema 2.1148 lr 0.00111  4223 tok/s  eta 12.4 h
+step 114200 loss 1.9899 ema 2.1107 lr 0.00111  4089 tok/s  eta 12.7 h
+step 114300 loss 2.0101 ema 2.1276 lr 0.00110  4130 tok/s  eta 12.6 h
+step 114400 loss 2.2634 ema 2.1305 lr 0.00110  4210 tok/s  eta 12.3 h
+step 114500 loss 2.0944 ema 2.1258 lr 0.00110  4157 tok/s  eta 12.5 h
+step 114500 VAL loss 1.8498
+step 114600 loss 2.2425 ema 2.1202 lr 0.00109  4152 tok/s  eta 12.4 h
+step 114700 loss 2.1909 ema 2.1322 lr 0.00109  4161 tok/s  eta 12.4 h
+step 114800 loss 2.0662 ema 2.1337 lr 0.00109  4263 tok/s  eta 12.1 h
+step 114900 loss 2.2151 ema 2.1323 lr 0.00109  4265 tok/s  eta 12.0 h
+step 115000 loss 2.0600 ema 2.1183 lr 0.00108  4242 tok/s  eta 12.1 h
+step 115000 VAL loss 1.8421
+step 115000 checkpoint saved
+step 115100 loss 2.1603 ema 2.1356 lr 0.00108  4112 tok/s  eta 12.4 h
+step 115200 loss 2.1626 ema 2.1256 lr 0.00108  4142 tok/s  eta 12.3 h
+step 115300 loss 2.1134 ema 2.1251 lr 0.00107  4259 tok/s  eta 11.9 h
+step 115400 loss 2.3360 ema 2.1206 lr 0.00107  4151 tok/s  eta 12.2 h
+step 115500 loss 2.2112 ema 2.1254 lr 0.00107  4027 tok/s  eta 12.6 h
+step 115500 VAL loss 1.8446
+step 115600 loss 1.9839 ema 2.1120 lr 0.00107  4226 tok/s  eta 12.0 h
+step 115700 loss 2.2687 ema 2.1099 lr 0.00106  4245 tok/s  eta 11.9 h
+step 115800 loss 2.0917 ema 2.1111 lr 0.00106  4023 tok/s  eta 12.5 h
+step 115900 loss 2.1569 ema 2.1069 lr 0.00106  4261 tok/s  eta 11.8 h
+step 116000 loss 2.2717 ema 2.1261 lr 0.00106  3927 tok/s  eta 12.7 h
+step 116000 VAL loss 1.8484
+step 116000 checkpoint saved
+step 116100 loss 2.3321 ema 2.1267 lr 0.00105  4256 tok/s  eta 11.7 h
+step 116200 loss 2.1381 ema 2.1238 lr 0.00105  4319 tok/s  eta 11.5 h
+step 116300 loss 2.0085 ema 2.1237 lr 0.00105  4253 tok/s  eta 11.7 h
+step 116400 loss 1.9071 ema 2.1181 lr 0.00104  4216 tok/s  eta 11.8 h
+step 116500 loss 2.2211 ema 2.1235 lr 0.00104  4242 tok/s  eta 11.7 h
+step 116500 VAL loss 1.8514
+step 116600 loss 2.2508 ema 2.1203 lr 0.00104  4320 tok/s  eta 11.4 h
+step 116700 loss 2.1199 ema 2.1157 lr 0.00104  4304 tok/s  eta 11.4 h
+step 116800 loss 2.1299 ema 2.1126 lr 0.00103  4291 tok/s  eta 11.5 h
+step 116900 loss 2.0597 ema 2.1119 lr 0.00103  4282 tok/s  eta 11.5 h
+step 117000 loss 2.2179 ema 2.1280 lr 0.00103  4202 tok/s  eta 11.6 h
+step 117000 VAL loss 1.8544
+step 117000 checkpoint saved
+step 117100 loss 2.1506 ema 2.1308 lr 0.00102  4268 tok/s  eta 11.4 h
+step 117200 loss 2.1824 ema 2.1157 lr 0.00102  4288 tok/s  eta 11.4 h
+step 117300 loss 2.1235 ema 2.1189 lr 0.00102  4288 tok/s  eta 11.3 h
+step 117400 loss 2.0115 ema 2.1302 lr 0.00102  4260 tok/s  eta 11.4 h
+step 117500 loss 2.0935 ema 2.1243 lr 0.00101  4160 tok/s  eta 11.6 h
+step 117500 VAL loss 1.8398
+step 117600 loss 2.2675 ema 2.1234 lr 0.00101  4294 tok/s  eta 11.2 h
+step 117700 loss 2.0853 ema 2.1253 lr 0.00101  4296 tok/s  eta 11.2 h
+step 117800 loss 2.0583 ema 2.1191 lr 0.00101  4135 tok/s  eta 11.6 h
+step 117900 loss 2.0798 ema 2.1196 lr 0.00100  4223 tok/s  eta 11.3 h
+step 118000 loss 2.0476 ema 2.1248 lr 0.00100  4294 tok/s  eta 11.1 h
+step 118000 VAL loss 1.8427
+step 118000 checkpoint saved
+step 118100 loss 2.1528 ema 2.1267 lr 0.00100  4314 tok/s  eta 11.0 h
+step 118200 loss 2.1067 ema 2.1285 lr 0.00100  4261 tok/s  eta 11.2 h
+step 118300 loss 2.1772 ema 2.1228 lr 0.00099  4315 tok/s  eta 11.0 h
+step 118400 loss 2.1045 ema 2.1238 lr 0.00099  4313 tok/s  eta 11.0 h
+step 118500 loss 1.9576 ema 2.1067 lr 0.00099  4318 tok/s  eta 10.9 h
+step 118500 VAL loss 1.8380
+step 118600 loss 2.2362 ema 2.1013 lr 0.00098  4328 tok/s  eta 10.9 h
+step 118700 loss 2.2216 ema 2.1132 lr 0.00098  4337 tok/s  eta 10.8 h
+step 118800 loss 2.2537 ema 2.1254 lr 0.00098  4196 tok/s  eta 11.2 h
+step 118900 loss 2.0836 ema 2.1166 lr 0.00098  4319 tok/s  eta 10.8 h
+step 119000 loss 2.0681 ema 2.1174 lr 0.00097  4326 tok/s  eta 10.8 h
+step 119000 VAL loss 1.8287
+step 119000 checkpoint saved
+step 119100 loss 2.0946 ema 2.1121 lr 0.00097  4327 tok/s  eta 10.8 h
+step 119200 loss 2.2729 ema 2.1165 lr 0.00097  4343 tok/s  eta 10.7 h
+step 119300 loss 2.1530 ema 2.1219 lr 0.00097  4273 tok/s  eta 10.8 h
+step 119400 loss 2.0506 ema 2.1197 lr 0.00096  4228 tok/s  eta 10.9 h
+step 119500 loss 2.2237 ema 2.1241 lr 0.00096  4301 tok/s  eta 10.7 h
+step 119500 VAL loss 1.8470
+step 119600 loss 2.0213 ema 2.1210 lr 0.00096  4339 tok/s  eta 10.6 h
+step 119700 loss 2.0922 ema 2.1221 lr 0.00096  4317 tok/s  eta 10.6 h
+step 119800 loss 2.0768 ema 2.1195 lr 0.00095  4217 tok/s  eta 10.8 h
+step 119900 loss 2.2205 ema 2.1140 lr 0.00095  4201 tok/s  eta 10.9 h
+step 120000 loss 2.2168 ema 2.1066 lr 0.00095  4321 tok/s  eta 10.5 h
+step 120000 VAL loss 1.8476
+step 120000 checkpoint saved
+step 120100 loss 1.9918 ema 2.1178 lr 0.00095  4263 tok/s  eta 10.7 h
+step 120200 loss 1.9910 ema 2.1276 lr 0.00094  4297 tok/s  eta 10.5 h
+step 120300 loss 2.1151 ema 2.1286 lr 0.00094  4297 tok/s  eta 10.5 h
+step 120400 loss 2.2006 ema 2.1262 lr 0.00094  4359 tok/s  eta 10.3 h
+step 120500 loss 2.1563 ema 2.1199 lr 0.00093  4325 tok/s  eta 10.4 h
+step 120500 VAL loss 1.8435
+step 120600 loss 1.9606 ema 2.1211 lr 0.00093  4273 tok/s  eta 10.5 h
+step 120700 loss 2.2019 ema 2.1207 lr 0.00093  4190 tok/s  eta 10.7 h
+step 120800 loss 1.9761 ema 2.1133 lr 0.00093  4341 tok/s  eta 10.3 h
+step 120900 loss 2.1276 ema 2.1127 lr 0.00092  4220 tok/s  eta 10.5 h
+step 121000 loss 2.0790 ema 2.1159 lr 0.00092  4314 tok/s  eta 10.3 h
+step 121000 VAL loss 1.8414
+step 121000 checkpoint saved
+step 121100 loss 2.1239 ema 2.1183 lr 0.00092  4067 tok/s  eta 10.9 h
+step 121200 loss 2.1482 ema 2.1212 lr 0.00092  3927 tok/s  eta 11.2 h
+step 121300 loss 2.1781 ema 2.1224 lr 0.00091  4165 tok/s  eta 10.6 h
+step 121400 loss 1.9778 ema 2.1136 lr 0.00091  4272 tok/s  eta 10.3 h
+step 121500 loss 2.2303 ema 2.1264 lr 0.00091  4291 tok/s  eta 10.2 h
+step 121500 VAL loss 1.8370
+step 121600 loss 2.2479 ema 2.1101 lr 0.00091  4350 tok/s  eta 10.0 h
+step 121700 loss 2.0821 ema 2.1044 lr 0.00090  4281 tok/s  eta 10.2 h
+step 121800 loss 2.1496 ema 2.1154 lr 0.00090  4243 tok/s  eta 10.2 h
+step 121900 loss 1.9565 ema 2.1102 lr 0.00090  4299 tok/s  eta 10.1 h
+step 122000 loss 2.1365 ema 2.1131 lr 0.00090  4336 tok/s  eta 10.0 h
+step 122000 VAL loss 1.8340
+step 122000 checkpoint saved
+step 122100 loss 2.0461 ema 2.1121 lr 0.00089  4330 tok/s  eta 10.0 h
+step 122200 loss 2.1796 ema 2.1227 lr 0.00089  4197 tok/s  eta 10.2 h
+step 122300 loss 2.2072 ema 2.1273 lr 0.00089  4290 tok/s  eta 10.0 h
+step 122400 loss 1.9771 ema 2.1238 lr 0.00089  4298 tok/s  eta 10.0 h
+step 122500 loss 2.0992 ema 2.1222 lr 0.00088  4198 tok/s  eta 10.2 h
+step 122500 VAL loss 1.8399
+step 122600 loss 2.0882 ema 2.1155 lr 0.00088  4344 tok/s  eta 9.8 h
+step 122700 loss 2.2554 ema 2.1209 lr 0.00088  4202 tok/s  eta 10.1 h
+step 122800 loss 2.0384 ema 2.1189 lr 0.00088  4242 tok/s  eta 10.0 h
+step 122900 loss 2.0020 ema 2.1170 lr 0.00087  4150 tok/s  eta 10.2 h
+step 123000 loss 2.0505 ema 2.1088 lr 0.00087  4220 tok/s  eta 10.0 h
+step 123000 VAL loss 1.8295
+step 123000 checkpoint saved
+step 123100 loss 2.1735 ema 2.1146 lr 0.00087  4247 tok/s  eta 9.9 h
+step 123200 loss 2.0416 ema 2.1226 lr 0.00087  4270 tok/s  eta 9.8 h
+step 123300 loss 2.1619 ema 2.1261 lr 0.00087  4261 tok/s  eta 9.8 h
+step 123400 loss 2.0205 ema 2.1259 lr 0.00086  4204 tok/s  eta 9.9 h
+step 123500 loss 2.1785 ema 2.1190 lr 0.00086  4249 tok/s  eta 9.8 h
+step 123500 VAL loss 1.8466
+step 123600 loss 2.2052 ema 2.1036 lr 0.00086  4128 tok/s  eta 10.0 h
+step 123700 loss 2.2854 ema 2.1019 lr 0.00086  4077 tok/s  eta 10.1 h
+step 123800 loss 2.1045 ema 2.1225 lr 0.00085  4193 tok/s  eta 9.8 h
+step 123900 loss 2.2498 ema 2.1187 lr 0.00085  4330 tok/s  eta 9.5 h
+step 124000 loss 1.8649 ema 2.1189 lr 0.00085  4144 tok/s  eta 9.9 h
+step 124000 VAL loss 1.8412
+step 124000 checkpoint saved
+step 124100 loss 1.9682 ema 2.1077 lr 0.00085  4087 tok/s  eta 10.0 h
+step 124200 loss 2.0491 ema 2.1160 lr 0.00084  4020 tok/s  eta 10.1 h
+step 124300 loss 1.9776 ema 2.1131 lr 0.00084  4158 tok/s  eta 9.8 h
+step 124400 loss 1.9738 ema 2.1162 lr 0.00084  4128 tok/s  eta 9.8 h
+step 124500 loss 2.1510 ema 2.1106 lr 0.00084  4263 tok/s  eta 9.5 h
+step 124500 VAL loss 1.8505
+step 124600 loss 2.0215 ema 2.1116 lr 0.00083  4141 tok/s  eta 9.7 h
+step 124700 loss 2.0693 ema 2.1208 lr 0.00083  4252 tok/s  eta 9.4 h
+step 124800 loss 2.3008 ema 2.1150 lr 0.00083  4259 tok/s  eta 9.4 h
+step 124900 loss 2.0199 ema 2.1037 lr 0.00083  4343 tok/s  eta 9.2 h
+step 125000 loss 2.1858 ema 2.0951 lr 0.00082  4376 tok/s  eta 9.1 h
+step 125000 VAL loss 1.8340
+step 125000 checkpoint saved
+step 125100 loss 2.1120 ema 2.1065 lr 0.00082  4325 tok/s  eta 9.2 h
+step 125200 loss 2.2200 ema 2.1111 lr 0.00082  4337 tok/s  eta 9.1 h
+step 125300 loss 2.1161 ema 2.1017 lr 0.00082  4150 tok/s  eta 9.5 h
+step 125400 loss 2.2531 ema 2.1048 lr 0.00082  4061 tok/s  eta 9.7 h
+step 125500 loss 2.2310 ema 2.1095 lr 0.00081  4090 tok/s  eta 9.6 h
+step 125500 VAL loss 1.8382
+step 125600 loss 2.0384 ema 2.1186 lr 0.00081  4103 tok/s  eta 9.5 h
+step 125700 loss 2.0234 ema 2.1149 lr 0.00081  4127 tok/s  eta 9.5 h
+step 125800 loss 2.0788 ema 2.1131 lr 0.00081  4328 tok/s  eta 9.0 h
+step 125900 loss 1.9714 ema 2.1215 lr 0.00080  4386 tok/s  eta 8.8 h
+step 126000 loss 2.0913 ema 2.1153 lr 0.00080  4358 tok/s  eta 8.9 h
+step 126000 VAL loss 1.8305
+step 126000 checkpoint saved
+step 126100 loss 2.2968 ema 2.1088 lr 0.00080  4327 tok/s  eta 8.9 h
+step 126200 loss 2.2136 ema 2.1165 lr 0.00080  4307 tok/s  eta 8.9 h
+step 126300 loss 2.0057 ema 2.1096 lr 0.00079  4293 tok/s  eta 8.9 h
+step 126400 loss 2.1435 ema 2.1117 lr 0.00079  4328 tok/s  eta 8.8 h
+step 126500 loss 2.0985 ema 2.0980 lr 0.00079  4290 tok/s  eta 8.9 h
+step 126500 VAL loss 1.8326
+step 126600 loss 2.1017 ema 2.1021 lr 0.00079  4250 tok/s  eta 8.9 h
+step 126700 loss 2.1270 ema 2.1205 lr 0.00079  4203 tok/s  eta 9.0 h
+step 126800 loss 2.1233 ema 2.1168 lr 0.00078  4325 tok/s  eta 8.7 h
+step 126900 loss 2.0451 ema 2.1046 lr 0.00078  4306 tok/s  eta 8.7 h
+step 127000 loss 2.0312 ema 2.1067 lr 0.00078  4334 tok/s  eta 8.7 h
+step 127000 VAL loss 1.8233
+step 127000 checkpoint saved
+step 127100 loss 2.1187 ema 2.1126 lr 0.00078  4276 tok/s  eta 8.8 h
+step 127200 loss 2.1637 ema 2.1057 lr 0.00077  4241 tok/s  eta 8.8 h
+step 127300 loss 2.0906 ema 2.1051 lr 0.00077  4213 tok/s  eta 8.8 h
+step 127400 loss 2.1268 ema 2.1030 lr 0.00077  4241 tok/s  eta 8.7 h
+step 127500 loss 2.0062 ema 2.1066 lr 0.00077  4228 tok/s  eta 8.7 h
+step 127500 VAL loss 1.8279
+step 127600 loss 2.2581 ema 2.1122 lr 0.00077  4212 tok/s  eta 8.8 h
+step 127700 loss 2.1281 ema 2.1122 lr 0.00076  4220 tok/s  eta 8.7 h
+step 127800 loss 2.0558 ema 2.1119 lr 0.00076  4257 tok/s  eta 8.6 h
+step 127900 loss 2.0973 ema 2.1075 lr 0.00076  4265 tok/s  eta 8.6 h
+step 128000 loss 2.0827 ema 2.1157 lr 0.00076  4217 tok/s  eta 8.6 h
+step 128000 VAL loss 1.8425
+step 128000 checkpoint saved
+step 128100 loss 2.2017 ema 2.1234 lr 0.00076  4200 tok/s  eta 8.6 h
+step 128200 loss 2.0576 ema 2.1096 lr 0.00075  4192 tok/s  eta 8.6 h
+step 128300 loss 2.1286 ema 2.1160 lr 0.00075  4216 tok/s  eta 8.6 h
+step 128400 loss 1.9907 ema 2.1254 lr 0.00075  4207 tok/s  eta 8.5 h
+step 128500 loss 2.1316 ema 2.1205 lr 0.00075  4228 tok/s  eta 8.5 h
+step 128500 VAL loss 1.8412
+step 128600 loss 2.2809 ema 2.1163 lr 0.00074  4227 tok/s  eta 8.5 h
+step 128700 loss 1.9663 ema 2.1002 lr 0.00074  4224 tok/s  eta 8.4 h
+step 128800 loss 2.1273 ema 2.1019 lr 0.00074  4242 tok/s  eta 8.4 h
+step 128900 loss 2.0141 ema 2.0919 lr 0.00074  4260 tok/s  eta 8.3 h
+step 129000 loss 2.0118 ema 2.0954 lr 0.00074  4351 tok/s  eta 8.1 h
+step 129000 VAL loss 1.8326
+step 129000 checkpoint saved
+step 129100 loss 2.0792 ema 2.1078 lr 0.00073  4342 tok/s  eta 8.1 h
+step 129200 loss 2.2805 ema 2.1003 lr 0.00073  4311 tok/s  eta 8.1 h
+step 129300 loss 2.1922 ema 2.1121 lr 0.00073  4326 tok/s  eta 8.1 h
+step 129400 loss 2.2103 ema 2.1043 lr 0.00073  4367 tok/s  eta 8.0 h
+step 129500 loss 1.9936 ema 2.1087 lr 0.00073  4284 tok/s  eta 8.1 h
+step 129500 VAL loss 1.8348
+step 129600 loss 2.2150 ema 2.1054 lr 0.00072  4273 tok/s  eta 8.1 h
+step 129700 loss 1.9563 ema 2.0936 lr 0.00072  4213 tok/s  eta 8.2 h
+step 129800 loss 2.0850 ema 2.1137 lr 0.00072  4340 tok/s  eta 7.9 h
+step 129900 loss 2.0542 ema 2.1075 lr 0.00072  4353 tok/s  eta 7.9 h
+step 130000 loss 2.0112 ema 2.1212 lr 0.00072  4306 tok/s  eta 7.9 h
+step 130000 VAL loss 1.8346
+step 130000 checkpoint saved
+step 130100 loss 2.0746 ema 2.1042 lr 0.00071  4244 tok/s  eta 8.0 h
+step 130200 loss 2.1719 ema 2.1027 lr 0.00071  4138 tok/s  eta 8.2 h
+step 130300 loss 2.0672 ema 2.1052 lr 0.00071  4197 tok/s  eta 8.1 h
+step 130400 loss 2.1805 ema 2.1078 lr 0.00071  4359 tok/s  eta 7.7 h
+step 130500 loss 1.9667 ema 2.1080 lr 0.00071  4345 tok/s  eta 7.7 h
+step 130500 VAL loss 1.8391
+step 130600 loss 2.1905 ema 2.1027 lr 0.00070  4353 tok/s  eta 7.7 h
+step 130700 loss 2.2328 ema 2.1043 lr 0.00070  4328 tok/s  eta 7.7 h
+step 130800 loss 2.2141 ema 2.1067 lr 0.00070  4289 tok/s  eta 7.7 h
+step 130900 loss 2.1956 ema 2.1140 lr 0.00070  4245 tok/s  eta 7.8 h
+step 131000 loss 2.1250 ema 2.1103 lr 0.00070  4166 tok/s  eta 7.9 h
+step 131000 VAL loss 1.8366
+step 131000 checkpoint saved
+step 131100 loss 2.0806 ema 2.1124 lr 0.00069  4338 tok/s  eta 7.6 h
+step 131200 loss 2.1282 ema 2.1076 lr 0.00069  4350 tok/s  eta 7.5 h
+step 131300 loss 2.3052 ema 2.1064 lr 0.00069  4317 tok/s  eta 7.6 h
+step 131400 loss 2.0410 ema 2.1058 lr 0.00069  4281 tok/s  eta 7.6 h
+step 131500 loss 2.1957 ema 2.1046 lr 0.00069  4172 tok/s  eta 7.8 h
+step 131500 VAL loss 1.8386
+step 131600 loss 2.0422 ema 2.1042 lr 0.00068  4191 tok/s  eta 7.7 h
+step 131700 loss 2.0683 ema 2.1051 lr 0.00068  4246 tok/s  eta 7.6 h
+step 131800 loss 1.9618 ema 2.1066 lr 0.00068  4215 tok/s  eta 7.6 h
+step 131900 loss 2.0927 ema 2.0968 lr 0.00068  4138 tok/s  eta 7.7 h
+step 132000 loss 2.1620 ema 2.1035 lr 0.00068  4096 tok/s  eta 7.8 h
+step 132000 VAL loss 1.8308
+step 132000 checkpoint saved
+step 132100 loss 2.0838 ema 2.1006 lr 0.00067  4127 tok/s  eta 7.7 h
+step 132200 loss 2.2323 ema 2.1093 lr 0.00067  4209 tok/s  eta 7.5 h
+step 132300 loss 2.0979 ema 2.1090 lr 0.00067  4234 tok/s  eta 7.4 h
+step 132400 loss 2.0276 ema 2.1033 lr 0.00067  4149 tok/s  eta 7.6 h
+step 132500 loss 2.0888 ema 2.1055 lr 0.00067  4122 tok/s  eta 7.6 h
+step 132500 VAL loss 1.8338
+step 132600 loss 2.1122 ema 2.1093 lr 0.00066  4129 tok/s  eta 7.6 h
+step 132700 loss 1.9367 ema 2.1020 lr 0.00066  4129 tok/s  eta 7.5 h
+step 132800 loss 1.8727 ema 2.0965 lr 0.00066  4262 tok/s  eta 7.3 h
+step 132900 loss 2.0377 ema 2.1096 lr 0.00066  4219 tok/s  eta 7.3 h
+step 133000 loss 2.1482 ema 2.0960 lr 0.00066  4269 tok/s  eta 7.2 h
+step 133000 VAL loss 1.8313
+step 133000 checkpoint saved
+step 133100 loss 2.0537 ema 2.1024 lr 0.00066  4129 tok/s  eta 7.4 h
+step 133200 loss 2.2670 ema 2.1142 lr 0.00065  4152 tok/s  eta 7.3 h
+step 133300 loss 2.0543 ema 2.0980 lr 0.00065  4125 tok/s  eta 7.4 h
+step 133400 loss 2.1609 ema 2.1046 lr 0.00065  4128 tok/s  eta 7.3 h
+step 133500 loss 2.0083 ema 2.1138 lr 0.00065  4081 tok/s  eta 7.4 h
+step 133500 VAL loss 1.8368
+step 133600 loss 2.2263 ema 2.1148 lr 0.00065  4232 tok/s  eta 7.1 h
+step 133700 loss 2.1341 ema 2.1107 lr 0.00064  4342 tok/s  eta 6.9 h
+step 133800 loss 2.0722 ema 2.1038 lr 0.00064  4366 tok/s  eta 6.8 h
+step 133900 loss 2.1394 ema 2.0989 lr 0.00064  4367 tok/s  eta 6.8 h
+step 134000 loss 2.0016 ema 2.0972 lr 0.00064  4284 tok/s  eta 6.9 h
+step 134000 VAL loss 1.8290
+step 134000 checkpoint saved
+step 134100 loss 2.0483 ema 2.1041 lr 0.00064  4173 tok/s  eta 7.1 h
+step 134200 loss 1.9686 ema 2.1000 lr 0.00064  4335 tok/s  eta 6.8 h
+step 134300 loss 2.1115 ema 2.0982 lr 0.00063  4265 tok/s  eta 6.9 h
+step 134400 loss 2.1251 ema 2.1005 lr 0.00063  4324 tok/s  eta 6.7 h
+step 134500 loss 2.0038 ema 2.0989 lr 0.00063  4206 tok/s  eta 6.9 h
+step 134500 VAL loss 1.8306
+step 134600 loss 2.1417 ema 2.1083 lr 0.00063  4172 tok/s  eta 6.9 h
+step 134700 loss 2.2119 ema 2.0998 lr 0.00063  4195 tok/s  eta 6.9 h
+step 134800 loss 2.0807 ema 2.0966 lr 0.00062  4335 tok/s  eta 6.6 h
+step 134900 loss 2.1993 ema 2.0954 lr 0.00062  4360 tok/s  eta 6.5 h
+step 135000 loss 2.1889 ema 2.1011 lr 0.00062  4099 tok/s  eta 6.9 h
+step 135000 VAL loss 1.8321
+step 135000 checkpoint saved
+step 135100 loss 2.1119 ema 2.0953 lr 0.00062  4072 tok/s  eta 7.0 h
+step 135200 loss 1.9493 ema 2.1043 lr 0.00062  4094 tok/s  eta 6.9 h
+step 135300 loss 2.0041 ema 2.0894 lr 0.00062  4092 tok/s  eta 6.9 h
+step 135400 loss 2.0716 ema 2.0982 lr 0.00061  4086 tok/s  eta 6.8 h
+step 135500 loss 2.1109 ema 2.0993 lr 0.00061  4079 tok/s  eta 6.8 h
+step 135500 VAL loss 1.8409
+step 135600 loss 1.9511 ema 2.0993 lr 0.00061  4104 tok/s  eta 6.8 h
+step 135700 loss 2.0856 ema 2.0934 lr 0.00061  4105 tok/s  eta 6.7 h
+step 135800 loss 2.0946 ema 2.0910 lr 0.00061  4156 tok/s  eta 6.6 h
+step 135900 loss 2.1276 ema 2.0858 lr 0.00061  4158 tok/s  eta 6.6 h
+step 136000 loss 2.1673 ema 2.1032 lr 0.00060  4145 tok/s  eta 6.6 h
+step 136000 VAL loss 1.8326
+step 136000 checkpoint saved
+step 136100 loss 2.1149 ema 2.0929 lr 0.00060  4314 tok/s  eta 6.3 h
+step 136200 loss 2.0759 ema 2.1026 lr 0.00060  4369 tok/s  eta 6.2 h
+step 136300 loss 2.0169 ema 2.0940 lr 0.00060  4365 tok/s  eta 6.2 h
+step 136400 loss 1.9311 ema 2.1060 lr 0.00060  4351 tok/s  eta 6.2 h
+step 136500 loss 2.0470 ema 2.0988 lr 0.00060  4362 tok/s  eta 6.1 h
+step 136500 VAL loss 1.8224
+step 136600 loss 2.1388 ema 2.0997 lr 0.00059  4303 tok/s  eta 6.2 h
+step 136700 loss 2.0560 ema 2.0973 lr 0.00059  4304 tok/s  eta 6.2 h
+step 136800 loss 2.0049 ema 2.0983 lr 0.00059  4378 tok/s  eta 6.0 h
+step 136900 loss 2.0435 ema 2.1064 lr 0.00059  4379 tok/s  eta 6.0 h
+step 137000 loss 2.1269 ema 2.1058 lr 0.00059  4370 tok/s  eta 6.0 h
+step 137000 VAL loss 1.8314
+step 137000 checkpoint saved
+step 137100 loss 2.1454 ema 2.1052 lr 0.00059  4172 tok/s  eta 6.2 h
+step 137200 loss 2.0862 ema 2.1096 lr 0.00058  4340 tok/s  eta 6.0 h
+step 137300 loss 2.2178 ema 2.1073 lr 0.00058  4341 tok/s  eta 6.0 h
+step 137400 loss 1.9780 ema 2.1009 lr 0.00058  4331 tok/s  eta 5.9 h
+step 137500 loss 2.0339 ema 2.0944 lr 0.00058  4168 tok/s  eta 6.1 h
+step 137500 VAL loss 1.8293
+step 137600 loss 2.1602 ema 2.0902 lr 0.00058  4335 tok/s  eta 5.9 h
+step 137700 loss 2.1225 ema 2.0991 lr 0.00058  4373 tok/s  eta 5.8 h
+step 137800 loss 2.0453 ema 2.0950 lr 0.00058  4351 tok/s  eta 5.8 h
+step 137900 loss 2.1225 ema 2.0855 lr 0.00057  4238 tok/s  eta 5.9 h
+step 138000 loss 2.1152 ema 2.1016 lr 0.00057  4385 tok/s  eta 5.7 h
+step 138000 VAL loss 1.8266
+step 138000 checkpoint saved
+step 138100 loss 2.1511 ema 2.1068 lr 0.00057  4321 tok/s  eta 5.8 h
+step 138200 loss 2.1137 ema 2.1080 lr 0.00057  4348 tok/s  eta 5.7 h
+step 138300 loss 2.0757 ema 2.1072 lr 0.00057  4235 tok/s  eta 5.8 h
+step 138400 loss 1.9246 ema 2.1037 lr 0.00057  4358 tok/s  eta 5.6 h
+step 138500 loss 2.1389 ema 2.1117 lr 0.00056  4270 tok/s  eta 5.7 h
+step 138500 VAL loss 1.8256
+step 138600 loss 2.1702 ema 2.0992 lr 0.00056  4334 tok/s  eta 5.6 h
+step 138700 loss 2.1059 ema 2.0899 lr 0.00056  4363 tok/s  eta 5.6 h
+step 138800 loss 2.2327 ema 2.0895 lr 0.00056  4230 tok/s  eta 5.7 h
+step 138900 loss 2.1163 ema 2.0927 lr 0.00056  4341 tok/s  eta 5.5 h
+step 139000 loss 2.2472 ema 2.1018 lr 0.00056  4199 tok/s  eta 5.7 h
+step 139000 VAL loss 1.8194
+step 139000 checkpoint saved
+step 139100 loss 2.0134 ema 2.1006 lr 0.00056  4307 tok/s  eta 5.5 h
+step 139200 loss 2.0002 ema 2.0875 lr 0.00055  4313 tok/s  eta 5.5 h
+step 139300 loss 1.9582 ema 2.0922 lr 0.00055  4072 tok/s  eta 5.8 h
+step 139400 loss 2.2246 ema 2.1017 lr 0.00055  4146 tok/s  eta 5.7 h
+step 139500 loss 1.9585 ema 2.1033 lr 0.00055  4356 tok/s  eta 5.4 h
+step 139500 VAL loss 1.8275
+step 139600 loss 2.1932 ema 2.0932 lr 0.00055  4205 tok/s  eta 5.5 h
+step 139700 loss 2.2032 ema 2.0979 lr 0.00055  3587 tok/s  eta 6.4 h
+step 139800 loss 1.9949 ema 2.1019 lr 0.00055  3823 tok/s  eta 6.0 h
+step 139900 loss 2.1475 ema 2.0928 lr 0.00054  4050 tok/s  eta 5.6 h
+step 140000 loss 1.9926 ema 2.0885 lr 0.00054  4254 tok/s  eta 5.3 h
+step 140000 VAL loss 1.8296
+step 140000 checkpoint saved
+step 140100 loss 2.1698 ema 2.1020 lr 0.00054  4180 tok/s  eta 5.4 h
+step 140200 loss 2.2421 ema 2.0944 lr 0.00054  4013 tok/s  eta 5.6 h
+step 140300 loss 2.1418 ema 2.0915 lr 0.00054  4134 tok/s  eta 5.4 h
+step 140400 loss 2.2124 ema 2.0914 lr 0.00054  3776 tok/s  eta 5.9 h
+step 140500 loss 2.1504 ema 2.0840 lr 0.00054  4207 tok/s  eta 5.3 h
+step 140500 VAL loss 1.8238
+step 140600 loss 1.9654 ema 2.0956 lr 0.00053  3841 tok/s  eta 5.7 h
+step 140700 loss 2.1281 ema 2.0992 lr 0.00053  4075 tok/s  eta 5.4 h
+step 140800 loss 2.2631 ema 2.0953 lr 0.00053  3760 tok/s  eta 5.8 h
+step 140900 loss 2.1177 ema 2.0856 lr 0.00053  4074 tok/s  eta 5.3 h
+step 141000 loss 2.1169 ema 2.0911 lr 0.00053  4140 tok/s  eta 5.2 h
+step 141000 VAL loss 1.8196
+step 141000 checkpoint saved
+step 141100 loss 2.1080 ema 2.0873 lr 0.00053  3867 tok/s  eta 5.6 h
+step 141200 loss 2.0808 ema 2.0928 lr 0.00053  4204 tok/s  eta 5.1 h
+step 141300 loss 2.1770 ema 2.1050 lr 0.00052  3967 tok/s  eta 5.4 h
+step 141400 loss 2.0601 ema 2.0989 lr 0.00052  4252 tok/s  eta 5.0 h
+step 141500 loss 2.1288 ema 2.1007 lr 0.00052  4250 tok/s  eta 5.0 h
+step 141500 VAL loss 1.8302
+step 141600 loss 2.1421 ema 2.0910 lr 0.00052  4223 tok/s  eta 5.0 h
+step 141700 loss 2.1374 ema 2.0975 lr 0.00052  4080 tok/s  eta 5.1 h
+step 141800 loss 2.0202 ema 2.0922 lr 0.00052  4286 tok/s  eta 4.8 h
+step 141900 loss 2.0992 ema 2.0907 lr 0.00052  4242 tok/s  eta 4.9 h
+step 142000 loss 2.0852 ema 2.1032 lr 0.00052  4242 tok/s  eta 4.8 h
+step 142000 VAL loss 1.8250
+step 142000 checkpoint saved
+step 142100 loss 2.0009 ema 2.0973 lr 0.00051  3964 tok/s  eta 5.1 h
+step 142200 loss 2.1424 ema 2.0931 lr 0.00051  4301 tok/s  eta 4.7 h
+step 142300 loss 2.1431 ema 2.0897 lr 0.00051  4255 tok/s  eta 4.7 h
+step 142400 loss 2.0980 ema 2.0898 lr 0.00051  4276 tok/s  eta 4.7 h
+step 142500 loss 2.0877 ema 2.0951 lr 0.00051  4310 tok/s  eta 4.6 h
+step 142500 VAL loss 1.8247
+step 142600 loss 2.2842 ema 2.0864 lr 0.00051  4337 tok/s  eta 4.6 h
+step 142700 loss 2.0326 ema 2.0801 lr 0.00051  4323 tok/s  eta 4.6 h
+step 142800 loss 2.1182 ema 2.0812 lr 0.00051  4361 tok/s  eta 4.5 h
+step 142900 loss 2.1542 ema 2.0899 lr 0.00050  4352 tok/s  eta 4.5 h
+step 143000 loss 2.1334 ema 2.0969 lr 0.00050  4007 tok/s  eta 4.8 h
+step 143000 VAL loss 1.8268
+step 143000 checkpoint saved
+step 143100 loss 2.2665 ema 2.0897 lr 0.00050  3936 tok/s  eta 4.9 h
+step 143200 loss 2.1587 ema 2.0898 lr 0.00050  4089 tok/s  eta 4.7 h
+step 143300 loss 2.0610 ema 2.0891 lr 0.00050  4350 tok/s  eta 4.4 h
+step 143400 loss 2.1621 ema 2.0910 lr 0.00050  4354 tok/s  eta 4.3 h
+step 143500 loss 2.1277 ema 2.1061 lr 0.00050  4148 tok/s  eta 4.5 h
+step 143500 VAL loss 1.8252
+step 143600 loss 2.1194 ema 2.1099 lr 0.00050  3978 tok/s  eta 4.7 h
+step 143700 loss 2.0607 ema 2.1023 lr 0.00050  3928 tok/s  eta 4.7 h
+step 143800 loss 2.0901 ema 2.0832 lr 0.00049  4259 tok/s  eta 4.3 h
+step 143900 loss 2.2715 ema 2.0868 lr 0.00049  4338 tok/s  eta 4.2 h
+step 144000 loss 2.0198 ema 2.0941 lr 0.00049  4374 tok/s  eta 4.2 h
+step 144000 VAL loss 1.8263
+step 144000 checkpoint saved
+step 144100 loss 2.2134 ema 2.0924 lr 0.00049  4346 tok/s  eta 4.2 h
+step 144200 loss 2.1866 ema 2.0938 lr 0.00049  4338 tok/s  eta 4.1 h
+step 144300 loss 2.1826 ema 2.0916 lr 0.00049  4335 tok/s  eta 4.1 h
+step 144400 loss 2.0776 ema 2.0899 lr 0.00049  4377 tok/s  eta 4.1 h
+step 144500 loss 2.1222 ema 2.0841 lr 0.00049  4326 tok/s  eta 4.1 h
+step 144500 VAL loss 1.8228
+step 144600 loss 2.2466 ema 2.0917 lr 0.00049  4366 tok/s  eta 4.0 h
+step 144700 loss 2.2184 ema 2.0982 lr 0.00048  4374 tok/s  eta 4.0 h
+step 144800 loss 2.0439 ema 2.0939 lr 0.00048  4349 tok/s  eta 4.0 h
+step 144900 loss 2.1783 ema 2.0856 lr 0.00048  4361 tok/s  eta 3.9 h
+step 145000 loss 2.1266 ema 2.0928 lr 0.00048  4358 tok/s  eta 3.9 h
+step 145000 VAL loss 1.8240
+step 145000 checkpoint saved
+step 145100 loss 2.1971 ema 2.0965 lr 0.00048  4371 tok/s  eta 3.9 h
+step 145200 loss 1.9720 ema 2.0890 lr 0.00048  4358 tok/s  eta 3.9 h
+step 145300 loss 2.0543 ema 2.0865 lr 0.00048  4373 tok/s  eta 3.8 h
+step 145400 loss 2.0275 ema 2.0929 lr 0.00048  4357 tok/s  eta 3.8 h
+step 145500 loss 2.0884 ema 2.0823 lr 0.00048  4374 tok/s  eta 3.8 h
+step 145500 VAL loss 1.8319
+step 145600 loss 2.2176 ema 2.0930 lr 0.00047  4227 tok/s  eta 3.9 h
+step 145700 loss 2.2162 ema 2.0858 lr 0.00047  4306 tok/s  eta 3.8 h
+step 145800 loss 2.1633 ema 2.1040 lr 0.00047  4365 tok/s  eta 3.7 h
+step 145900 loss 1.9658 ema 2.0854 lr 0.00047  4346 tok/s  eta 3.7 h
+step 146000 loss 2.1653 ema 2.0829 lr 0.00047  4357 tok/s  eta 3.7 h
+step 146000 VAL loss 1.8167
+step 146000 checkpoint saved
+step 146100 loss 2.1171 ema 2.0806 lr 0.00047  4319 tok/s  eta 3.7 h
+step 146200 loss 2.0057 ema 2.0922 lr 0.00047  4357 tok/s  eta 3.6 h
+step 146300 loss 2.1464 ema 2.1005 lr 0.00047  4364 tok/s  eta 3.6 h
+step 146400 loss 2.1814 ema 2.0949 lr 0.00047  4283 tok/s  eta 3.6 h
+step 146500 loss 2.1518 ema 2.0939 lr 0.00047  4364 tok/s  eta 3.5 h
+step 146500 VAL loss 1.8169
+step 146600 loss 2.2377 ema 2.1025 lr 0.00046  4358 tok/s  eta 3.5 h
+step 146700 loss 2.0709 ema 2.1005 lr 0.00046  4339 tok/s  eta 3.5 h
+step 146800 loss 2.1026 ema 2.0908 lr 0.00046  4356 tok/s  eta 3.4 h
+step 146900 loss 2.0614 ema 2.1021 lr 0.00046  4339 tok/s  eta 3.4 h
+step 147000 loss 2.1099 ema 2.0954 lr 0.00046  4379 tok/s  eta 3.4 h
+step 147000 VAL loss 1.8157
+step 147000 checkpoint saved
+step 147100 loss 2.0492 ema 2.0899 lr 0.00046  4355 tok/s  eta 3.4 h
+step 147200 loss 2.1418 ema 2.0885 lr 0.00046  4352 tok/s  eta 3.3 h
+step 147300 loss 2.0247 ema 2.0821 lr 0.00046  4359 tok/s  eta 3.3 h
+step 147400 loss 2.0520 ema 2.0876 lr 0.00046  4378 tok/s  eta 3.3 h
+step 147500 loss 2.0299 ema 2.0808 lr 0.00046  3743 tok/s  eta 3.8 h
+step 147500 VAL loss 1.8171
+step 147600 loss 2.0174 ema 2.0840 lr 0.00046  3856 tok/s  eta 3.7 h
+step 147700 loss 1.8622 ema 2.0846 lr 0.00045  4211 tok/s  eta 3.3 h
+step 147800 loss 2.0669 ema 2.0934 lr 0.00045  4322 tok/s  eta 3.2 h
+step 147900 loss 1.9437 ema 2.0835 lr 0.00045  4340 tok/s  eta 3.2 h
+step 148000 loss 1.9684 ema 2.0905 lr 0.00045  4340 tok/s  eta 3.1 h
+step 148000 VAL loss 1.8221
+step 148000 checkpoint saved
+step 148100 loss 2.1882 ema 2.0974 lr 0.00045  4336 tok/s  eta 3.1 h
+step 148200 loss 2.0454 ema 2.1010 lr 0.00045  4351 tok/s  eta 3.1 h
+step 148300 loss 2.1128 ema 2.0930 lr 0.00045  4300 tok/s  eta 3.1 h
+step 148400 loss 2.0429 ema 2.0982 lr 0.00045  4297 tok/s  eta 3.1 h
+step 148500 loss 2.1499 ema 2.0982 lr 0.00045  4296 tok/s  eta 3.0 h
+step 148500 VAL loss 1.8182
+step 148600 loss 2.1462 ema 2.0861 lr 0.00045  4339 tok/s  eta 3.0 h
+step 148700 loss 2.0994 ema 2.0900 lr 0.00045  4348 tok/s  eta 3.0 h
+step 148800 loss 1.9638 ema 2.0983 lr 0.00045  3968 tok/s  eta 3.2 h
+step 148900 loss 2.2299 ema 2.0932 lr 0.00044  4140 tok/s  eta 3.1 h
+step 149000 loss 2.0375 ema 2.0884 lr 0.00044  3818 tok/s  eta 3.3 h
+step 149000 VAL loss 1.8196
+step 149000 checkpoint saved
+step 149100 loss 2.0438 ema 2.0880 lr 0.00044  4230 tok/s  eta 2.9 h
+step 149200 loss 2.1320 ema 2.1013 lr 0.00044  4240 tok/s  eta 2.9 h
+step 149300 loss 2.0779 ema 2.0995 lr 0.00044  4215 tok/s  eta 2.9 h
+step 149400 loss 2.0848 ema 2.0943 lr 0.00044  4249 tok/s  eta 2.8 h
+step 149500 loss 2.0498 ema 2.0902 lr 0.00044  4075 tok/s  eta 2.9 h
+step 149500 VAL loss 1.8213
+step 149600 loss 1.9648 ema 2.0893 lr 0.00044  4215 tok/s  eta 2.8 h
+step 149700 loss 2.2024 ema 2.0919 lr 0.00044  4198 tok/s  eta 2.8 h
+step 149800 loss 2.1367 ema 2.0901 lr 0.00044  4186 tok/s  eta 2.8 h
+step 149900 loss 2.0714 ema 2.0893 lr 0.00044  4267 tok/s  eta 2.7 h
+step 150000 loss 2.1973 ema 2.1010 lr 0.00044  4310 tok/s  eta 2.6 h
+step 150000 VAL loss 1.8094
+step 150000 checkpoint saved
+step 150100 loss 2.1032 ema 2.0986 lr 0.00044  4078 tok/s  eta 2.8 h
+step 150200 loss 1.9994 ema 2.0952 lr 0.00043  4142 tok/s  eta 2.7 h
+step 150300 loss 2.0670 ema 2.0875 lr 0.00043  4240 tok/s  eta 2.6 h
+step 150400 loss 2.1918 ema 2.0845 lr 0.00043  4193 tok/s  eta 2.6 h
+step 150500 loss 2.0358 ema 2.0873 lr 0.00043  4251 tok/s  eta 2.5 h
+step 150500 VAL loss 1.8181
+step 150600 loss 2.2089 ema 2.0820 lr 0.00043  4199 tok/s  eta 2.5 h
+step 150700 loss 2.0762 ema 2.0951 lr 0.00043  3902 tok/s  eta 2.7 h
+step 150800 loss 1.9071 ema 2.0847 lr 0.00043  4036 tok/s  eta 2.6 h
+step 150900 loss 2.2189 ema 2.0832 lr 0.00043  4058 tok/s  eta 2.6 h
+step 151000 loss 2.2618 ema 2.0820 lr 0.00043  3906 tok/s  eta 2.6 h
+step 151000 VAL loss 1.8138
+step 151000 checkpoint saved
+step 151100 loss 1.9309 ema 2.0712 lr 0.00043  3952 tok/s  eta 2.6 h
+step 151200 loss 2.1272 ema 2.0844 lr 0.00043  3649 tok/s  eta 2.7 h
+step 151300 loss 2.1294 ema 2.0873 lr 0.00043  4027 tok/s  eta 2.5 h
+step 151400 loss 2.0138 ema 2.0859 lr 0.00043  3973 tok/s  eta 2.5 h
+step 151500 loss 2.0198 ema 2.0917 lr 0.00043  4129 tok/s  eta 2.3 h
+step 151500 VAL loss 1.8204
+step 151600 loss 2.2206 ema 2.0905 lr 0.00043  4129 tok/s  eta 2.3 h
+step 151700 loss 2.1975 ema 2.0922 lr 0.00042  4028 tok/s  eta 2.3 h
+step 151800 loss 2.0655 ema 2.0910 lr 0.00042  3930 tok/s  eta 2.4 h
+step 151900 loss 2.0473 ema 2.0823 lr 0.00042  3964 tok/s  eta 2.3 h
+step 152000 loss 2.1601 ema 2.0839 lr 0.00042  4150 tok/s  eta 2.2 h
+step 152000 VAL loss 1.8175
+step 152000 checkpoint saved
+step 152100 loss 2.1354 ema 2.0813 lr 0.00042  3925 tok/s  eta 2.3 h
+step 152200 loss 2.2346 ema 2.0919 lr 0.00042  3989 tok/s  eta 2.2 h
+step 152300 loss 1.8380 ema 2.0906 lr 0.00042  4119 tok/s  eta 2.1 h
+step 152400 loss 2.1145 ema 2.0795 lr 0.00042  4295 tok/s  eta 2.0 h
+step 152500 loss 2.1426 ema 2.0784 lr 0.00042  4254 tok/s  eta 2.0 h
+step 152500 VAL loss 1.8132
+step 152600 loss 2.1468 ema 2.0833 lr 0.00042  4093 tok/s  eta 2.1 h
+step 152700 loss 2.1476 ema 2.0993 lr 0.00042  4176 tok/s  eta 2.0 h
+step 152800 loss 2.0216 ema 2.0967 lr 0.00042  4194 tok/s  eta 2.0 h
+step 152900 loss 2.0822 ema 2.0904 lr 0.00042  4129 tok/s  eta 2.0 h
+step 153000 loss 2.1532 ema 2.0843 lr 0.00042  4063 tok/s  eta 2.0 h
+step 153000 VAL loss 1.8157
+step 153000 checkpoint saved
+step 153100 loss 2.0096 ema 2.0794 lr 0.00042  4193 tok/s  eta 1.9 h
+step 153200 loss 2.1816 ema 2.0939 lr 0.00042  4214 tok/s  eta 1.8 h
+step 153300 loss 2.0184 ema 2.0871 lr 0.00042  4090 tok/s  eta 1.9 h
+step 153400 loss 2.1225 ema 2.1026 lr 0.00042  4012 tok/s  eta 1.9 h
+step 153500 loss 1.9131 ema 2.0979 lr 0.00042  4149 tok/s  eta 1.8 h
+step 153500 VAL loss 1.8114
+step 153600 loss 2.0739 ema 2.0972 lr 0.00041  4117 tok/s  eta 1.8 h
+step 153700 loss 2.1614 ema 2.0945 lr 0.00041  3970 tok/s  eta 1.8 h
+step 153800 loss 1.9324 ema 2.0875 lr 0.00041  3921 tok/s  eta 1.8 h
+step 153900 loss 2.0386 ema 2.0896 lr 0.00041  3854 tok/s  eta 1.8 h
+step 154000 loss 2.0652 ema 2.0800 lr 0.00041  3944 tok/s  eta 1.7 h
+step 154000 VAL loss 1.8132
+step 154000 checkpoint saved
+step 154100 loss 2.1169 ema 2.0796 lr 0.00041  4054 tok/s  eta 1.7 h
+step 154200 loss 2.2362 ema 2.0838 lr 0.00041  4137 tok/s  eta 1.6 h
+step 154300 loss 2.0946 ema 2.0922 lr 0.00041  4099 tok/s  eta 1.6 h
+step 154400 loss 1.9412 ema 2.0929 lr 0.00041  4151 tok/s  eta 1.5 h
+step 154500 loss 2.2311 ema 2.0980 lr 0.00041  4176 tok/s  eta 1.5 h
+step 154500 VAL loss 1.8173
+step 154600 loss 2.2428 ema 2.0820 lr 0.00041  4098 tok/s  eta 1.5 h
+step 154700 loss 1.9185 ema 2.0793 lr 0.00041  4150 tok/s  eta 1.5 h
+step 154800 loss 2.0997 ema 2.0769 lr 0.00041  4147 tok/s  eta 1.4 h
+step 154900 loss 2.0616 ema 2.0786 lr 0.00041  4108 tok/s  eta 1.4 h
+step 155000 loss 1.9479 ema 2.0681 lr 0.00041  4119 tok/s  eta 1.4 h
+step 155000 VAL loss 1.8018
+step 155000 checkpoint saved
+step 155100 loss 2.0431 ema 2.0772 lr 0.00041  4145 tok/s  eta 1.3 h
+step 155200 loss 1.9711 ema 2.0837 lr 0.00041  4157 tok/s  eta 1.3 h
+step 155300 loss 2.0517 ema 2.0841 lr 0.00041  4120 tok/s  eta 1.3 h
+step 155400 loss 2.1364 ema 2.0864 lr 0.00041  4123 tok/s  eta 1.3 h
+step 155500 loss 1.9765 ema 2.0917 lr 0.00041  4116 tok/s  eta 1.2 h
+step 155500 VAL loss 1.8150
+step 155600 loss 2.1280 ema 2.0858 lr 0.00041  4086 tok/s  eta 1.2 h
+step 155700 loss 1.9123 ema 2.0911 lr 0.00041  4141 tok/s  eta 1.2 h
+step 155800 loss 2.0816 ema 2.0887 lr 0.00041  4250 tok/s  eta 1.1 h
+step 155900 loss 2.0641 ema 2.1008 lr 0.00041  4214 tok/s  eta 1.1 h
+step 156000 loss 2.1026 ema 2.0992 lr 0.00041  4246 tok/s  eta 1.1 h
+step 156000 VAL loss 1.8220
+step 156000 checkpoint saved
+step 156100 loss 2.0962 ema 2.0964 lr 0.00041  4252 tok/s  eta 1.0 h
+step 156200 loss 1.9260 ema 2.0850 lr 0.00041  4214 tok/s  eta 1.0 h
+step 156300 loss 2.1892 ema 2.0825 lr 0.00040  4226 tok/s  eta 1.0 h
+step 156400 loss 2.0532 ema 2.0863 lr 0.00040  4262 tok/s  eta 1.0 h
+step 156500 loss 2.2287 ema 2.0811 lr 0.00040  4077 tok/s  eta 1.0 h
+step 156500 VAL loss 1.8222
+step 156600 loss 2.0352 ema 2.0867 lr 0.00040  4098 tok/s  eta 0.9 h
+step 156700 loss 2.0265 ema 2.0872 lr 0.00040  4220 tok/s  eta 0.9 h
+step 156800 loss 2.0025 ema 2.0823 lr 0.00040  4169 tok/s  eta 0.9 h
+step 156900 loss 2.1579 ema 2.0860 lr 0.00040  4109 tok/s  eta 0.9 h
+step 157000 loss 2.0134 ema 2.0871 lr 0.00040  4171 tok/s  eta 0.8 h
+step 157000 VAL loss 1.8178
+step 157000 checkpoint saved
+step 157100 loss 2.1063 ema 2.0865 lr 0.00040  4170 tok/s  eta 0.8 h
+step 157200 loss 2.0572 ema 2.0941 lr 0.00040  4034 tok/s  eta 0.8 h
+step 157300 loss 2.1279 ema 2.0836 lr 0.00040  4067 tok/s  eta 0.8 h
+step 157400 loss 2.1595 ema 2.0759 lr 0.00040  4112 tok/s  eta 0.7 h
+step 157500 loss 2.1954 ema 2.0795 lr 0.00040  4056 tok/s  eta 0.7 h
+step 157500 VAL loss 1.8091
+step 157600 loss 2.1870 ema 2.0819 lr 0.00040  4040 tok/s  eta 0.7 h
+step 157700 loss 2.1036 ema 2.0856 lr 0.00040  3671 tok/s  eta 0.7 h
+step 157800 loss 2.1485 ema 2.0795 lr 0.00040  3940 tok/s  eta 0.6 h
+step 157900 loss 2.2359 ema 2.0904 lr 0.00040  4032 tok/s  eta 0.6 h
+step 158000 loss 2.0716 ema 2.0891 lr 0.00040  3992 tok/s  eta 0.6 h
+step 158000 VAL loss 1.8077
+step 158000 checkpoint saved
+step 158100 loss 2.0724 ema 2.0837 lr 0.00040  4092 tok/s  eta 0.5 h
+step 158200 loss 2.1266 ema 2.0898 lr 0.00040  4093 tok/s  eta 0.5 h
+step 158300 loss 2.1097 ema 2.0934 lr 0.00040  3931 tok/s  eta 0.5 h
+step 158400 loss 1.9410 ema 2.0860 lr 0.00040  4084 tok/s  eta 0.4 h
+step 158500 loss 2.0229 ema 2.0833 lr 0.00040  4172 tok/s  eta 0.4 h
+step 158500 VAL loss 1.8210
+step 158600 loss 2.0714 ema 2.1005 lr 0.00040  4113 tok/s  eta 0.4 h
+step 158700 loss 2.1917 ema 2.0948 lr 0.00040  4026 tok/s  eta 0.4 h
+step 158800 loss 2.2358 ema 2.0863 lr 0.00040  4117 tok/s  eta 0.3 h
+step 158900 loss 2.0205 ema 2.0935 lr 0.00040  4243 tok/s  eta 0.3 h
+step 159000 loss 2.1207 ema 2.0826 lr 0.00040  4062 tok/s  eta 0.3 h
+step 159000 VAL loss 1.8144
+step 159000 checkpoint saved
+step 159100 loss 2.0839 ema 2.0889 lr 0.00040  4182 tok/s  eta 0.2 h
+step 159200 loss 2.0616 ema 2.0917 lr 0.00040  3431 tok/s  eta 0.3 h
+step 159300 loss 1.9748 ema 2.0939 lr 0.00040  3641 tok/s  eta 0.2 h
+step 159400 loss 2.1244 ema 2.0964 lr 0.00040  4035 tok/s  eta 0.2 h
+step 159500 loss 1.9800 ema 2.0914 lr 0.00040  4036 tok/s  eta 0.1 h
+step 159500 VAL loss 1.8161
+step 159600 loss 2.1895 ema 2.0993 lr 0.00040  3989 tok/s  eta 0.1 h
+step 159700 loss 2.1475 ema 2.0986 lr 0.00040  4127 tok/s  eta 0.1 h
+step 159800 loss 2.3143 ema 2.0911 lr 0.00040  4150 tok/s  eta 0.1 h
+step 159900 loss 2.2684 ema 2.1063 lr 0.00040  4008 tok/s  eta 0.0 h
+step 160000 loss 2.0910 ema 2.0921 lr 0.00040  4126 tok/s  eta 0.0 h
+step 160000 VAL loss 1.8209
+step 160000 checkpoint saved
+FINAL VAL loss 1.8209

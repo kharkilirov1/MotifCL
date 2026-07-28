@@ -207,3 +207,40 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: ctest --preset asan --output-on-failure
+
+  vulkan-off-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Configure OpenCL-off (Vulkan-only)
+        run: >
+          cmake -S . -B build/vulkan-off -G Ninja
+          -DMOTIFCL_ENABLE_OPENCL=OFF
+          -DMOTIFCL_BUILD_TESTS=ON
+          -DMOTIFCL_BUILD_PYTHON=OFF
+          -DMOTIFCL_BUILD_EXAMPLES=OFF
+          -DMOTIFCL_BUILD_TOOLS=OFF
+
+      - name: Build Vulkan-only witnesses
+        run: >
+          cmake --build build/vulkan-off --parallel 2
+          --target test_vulkan_runtime_standalone test_vulkan_backend test_vulkan_train_step
+          test_vulkan_reversible test_vulkan_memory_native
+
+      - name: Assert the standalone witness links without OpenCL
+        run: |
+          if ninja -C build/vulkan-off -t commands test_vulkan_runtime_standalone | grep -i opencl; then
+            echo "::error title=Vulkan witness contaminated::OpenCL appeared in the test_vulkan_runtime_standalone link line"
+            exit 1
+          fi
+
+      - name: Run Vulkan-only tests (skip cleanly without a GPU)
+        run: >
+          ctest --test-dir build/vulkan-off --output-on-failure
+          -R "test_vulkan_runtime_standalone|test_vulkan_backend|test_vulkan_train_step|test_vulkan_reversible|test_vulkan_memory_native"

@@ -64,7 +64,14 @@ void release_buffer(Buffer&& buffer) {
 
 } // namespace
 
-Storage::Storage(Backend& backend, std::size_t bytes) : buffer(acquire_buffer(backend, bytes, pooled)), nbytes(bytes) {}
+Storage::Storage(Backend& backend, std::size_t bytes) : nbytes(bytes) {
+    if (backend.is_vulkan()) {
+        pooled = false;
+        vulkan_buffer = backend.vulkan_runtime().create_buffer(bytes);
+        return;
+    }
+    buffer = acquire_buffer(backend, bytes, pooled);
+}
 
 Storage::~Storage() {
     if (pooled && buffer.valid()) release_buffer(std::move(buffer));

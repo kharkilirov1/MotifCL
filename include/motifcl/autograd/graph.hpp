@@ -112,7 +112,9 @@ struct GraphNodeInfo {
     const std::vector<GraphKernelLaunchInfo>& kernel_launches() const { return kernel_launches_; }
 
     void replay() const;
-    void replay(const std::unordered_map<int, cl_mem>& tensor_bindings) const;
+    void replay(const std::unordered_map<int, cl_mem>& tensor_bindings,
+                const std::vector<GraphScalarArgOverride>& scalar_overrides = {},
+                const std::vector<GraphLocalArgOverride>& local_overrides = {}) const;
 
 private:
     friend class CapturedGraph;
@@ -127,7 +129,9 @@ private:
                                  std::vector<int> outputs,
                                  std::vector<int> temporaries,
                                  std::function<void()> replay);
-    std::function<void(const std::unordered_map<int, cl_mem>&)> replay_fn;
+    std::function<void(const std::unordered_map<int, cl_mem>&,
+                       const std::vector<GraphScalarArgOverride>&,
+                       const std::vector<GraphLocalArgOverride>&)> replay_fn;
     std::vector<GraphKernelLaunchInfo> kernel_launches_;
 };
 
@@ -190,11 +194,15 @@ void record_kernel_launch(const std::string& kernel_name, std::function<void()> 
 void record_kernel_launch(const std::string& kernel_name,
                           std::vector<std::pair<int, cl_mem>> buffer_args,
                           std::function<void(const std::unordered_map<int, cl_mem>&,
-                                             const std::vector<std::pair<int, int>>&)>
+                                             const std::vector<std::pair<int, int>>&,
+                                             const std::vector<GraphScalarArgOverride>&,
+                                             const std::vector<GraphLocalArgOverride>&)>
                               replay);
 void record_kernel_launch(GraphKernelLaunchInfo launch,
                           std::function<void(const std::unordered_map<int, cl_mem>&,
-                                             const std::vector<std::pair<int, int>>&)>
+                                             const std::vector<std::pair<int, int>>&,
+                                             const std::vector<GraphScalarArgOverride>&,
+                                             const std::vector<GraphLocalArgOverride>&)>
                               replay);
 void register_tensor(int id, const Shape& shape, DType dtype, std::size_t nbytes, cl_mem mem = nullptr);
 

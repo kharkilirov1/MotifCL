@@ -1,0 +1,81 @@
+// Wave64 subgroup-optimized fused Q/K RMSNorm + RoPE + KV append.
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KBuf { float k[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VBuf { float v[]; };
+layout(std430, set = 0, binding = 3) readonly buffer QWBuf { float qw[]; };
+layout(std430, set = 0, binding = 4) readonly buffer KWBuf { float kw[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer QOutBuf { float qout[]; };
+layout(std430, set = 0, binding = 6) buffer CacheKBuf { float cache_k[]; };
+layout(std430, set = 0, binding = 7) buffer CacheVBuf { float cache_v[]; };
+
+layout(push_constant) uniform Push {
+    uint batch;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    uint rotary_dim;
+    uint token_offset;
+    uint max_tokens;
+    float theta;
+    float q_eps;
+    float k_eps;
+} p;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint group = gl_WorkGroupID.x;
+    const uint heads_total = p.n_head + 2u * p.n_kv_head;
+    const uint b = group / heads_total;
+    const uint local_head = group - b * heads_total;
+    if (b >= p.batch) return;
+    const uint kv_channels = p.n_kv_head * p.head_dim;
+
+    if (local_head >= p.n_head + p.n_kv_head) {
+        const uint head = local_head - p.n_head - p.n_kv_head;
+        const uint src_base = b * kv_channels + head * p.head_dim;
+        const uint dst_base =
+            (b * p.max_tokens + p.token_offset) * kv_channels + head * p.head_dim;
+        for (uint d = lane; d < p.head_dim; d += 64u) cache_v[dst_base + d] = v[src_base + d];
+        return;
+    }
+
+    const bool is_q = local_head < p.n_head;
+    const uint head = is_q ? local_head : local_head - p.n_head;
+    const uint channels = (is_q ? p.n_head : p.n_kv_head) * p.head_dim;
+    const uint src_base = b * channels + head * p.head_dim;
+    float ss = 0.0;
+    for (uint d = lane; d < p.head_dim; d += 64u) {
+        const float value = is_q ? q[src_base + d] : k[src_base + d];
+        ss += value * value;
+    }
+    const float eps = is_q ? p.q_eps : p.k_eps;
+    const float inv = inversesqrt(subgroupAdd(ss) / float(p.head_dim) + eps);
+    const uint rd = min(p.rotary_dim, p.head_dim) & ~1u;
+    const uint dst_base = is_q
+        ? src_base
+        : (b * p.max_tokens + p.token_offset) * kv_channels + head * p.head_dim;
+    for (uint d = lane; d < p.head_dim; d += 64u) {
+        float value;
+        if (d >= rd) {
+            value = (is_q ? q[src_base + d] * qw[d] : k[src_base + d] * kw[d]) * inv;
+        } else {
+            const uint pair_d = d & ~1u;
+            const float angle = float(p.token_offset) /
+                pow(p.theta, float(pair_d) / float(p.head_dim));
+            const float cs = cos(angle);
+            const float sn = sin(angle);
+            const float even = (is_q ? q[src_base + pair_d] * qw[pair_d]
+                                     : k[src_base + pair_d] * kw[pair_d]) * inv;
+            const float odd = (is_q ? q[src_base + pair_d + 1u] * qw[pair_d + 1u]
+                                    : k[src_base + pair_d + 1u] * kw[pair_d + 1u]) * inv;
+            value = d == pair_d ? even * cs - odd * sn : even * sn + odd * cs;
+        }
+        if (is_q) qout[dst_base + d] = value;
+        else cache_k[dst_base + d] = value;
+    }
+}

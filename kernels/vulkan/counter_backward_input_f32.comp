@@ -1,0 +1,58 @@
+// Memory-native counter backward-to-input, matching
+// kernels/compact_counter.cl counter_backward_input_f32:
+//   grad_x[r,i] = sum_o grad_out[r,o] * scale[o] * t[o,i]
+// with the ternary t decoded from packed state on the fly (no dense weight).
+// One invocation per (r, group-of-4): the 3 packed state bytes for group g are
+// decoded once per o and reused for all four lanes k=0..3, instead of the
+// previous one-invocation-per-(r,i) which re-read+re-decoded the same 3 bytes
+// four times. Per-lane accumulation order over o is unchanged, so each grad_x[i]
+// stays bit-identical to the scalar CL port.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer GradOutBuf { float grad_out[]; };
+layout(std430, set = 0, binding = 1) readonly buffer StateBuf { uint8_t state[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ScaleBuf { float scale[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer GradXBuf { float grad_x[]; };
+
+layout(push_constant) uniform Push {
+    int C;
+    int in_features;
+    int out_features;
+    int N;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    const int gpr = p.in_features / 4;
+    if (gid >= p.N * gpr) return;
+    const int r = gid / gpr;
+    const int g = gid - r * gpr;
+    const int lv = 2 * p.C - 1;
+    float acc0 = 0.0;
+    float acc1 = 0.0;
+    float acc2 = 0.0;
+    float acc3 = 0.0;
+    for (int o = 0; o < p.out_features; ++o) {
+        const int base = (o * gpr + g) * 3;
+        const int b0 = int(uint(state[base]));
+        const int b1 = int(uint(state[base + 1]));
+        const int b2 = int(uint(state[base + 2]));
+        const int code0 = b0 & 0x3F;
+        const int code1 = ((b0 >> 6) | (b1 << 2)) & 0x3F;
+        const int code2 = ((b1 >> 4) | (b2 << 4)) & 0x3F;
+        const int code3 = (b2 >> 2) & 0x3F;
+        const float gs = grad_out[r * p.out_features + o] * scale[o];
+        acc0 += gs * float(code0 / lv - 1);
+        acc1 += gs * float(code1 / lv - 1);
+        acc2 += gs * float(code2 / lv - 1);
+        acc3 += gs * float(code3 / lv - 1);
+    }
+    const int ibase = r * p.in_features + g * 4;
+    grad_x[ibase]     = acc0;
+    grad_x[ibase + 1] = acc1;
+    grad_x[ibase + 2] = acc2;
+    grad_x[ibase + 3] = acc3;
+}

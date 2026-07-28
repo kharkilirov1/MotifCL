@@ -1,0 +1,42 @@
+// C[M,N] = A[M,K] * B[N,K]^T, row-major F32 (transpose-B matmul).
+// 16x16 shared-memory tile per workgroup; also the dA = dC * B^T backward form.
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { float A[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BBuf { float B[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer CBuf { float C[]; };
+
+layout(push_constant) uniform Push {
+    uint M;
+    uint K;
+    uint N;
+} p;
+
+shared float As[16][17];
+shared float Bs[16][17];
+
+void main() {
+    const uint tx = gl_LocalInvocationID.x;
+    const uint ty = gl_LocalInvocationID.y;
+    const uint col = gl_WorkGroupID.x * 16u + tx;  // n
+    const uint row = gl_WorkGroupID.y * 16u + ty;  // m
+
+    float acc = 0.0;
+    const uint tiles = (p.K + 15u) / 16u;
+    for (uint t = 0u; t < tiles; ++t) {
+        const uint k = t * 16u + tx;
+        const uint b_row = gl_WorkGroupID.x * 16u + ty;  // n index for the B tile
+        As[ty][tx] = (row < p.M && k < p.K) ? A[row * p.K + k] : 0.0;
+        Bs[ty][tx] = (b_row < p.N && k < p.K) ? B[b_row * p.K + k] : 0.0;
+        barrier();
+        for (uint i = 0u; i < 16u; ++i) {
+            acc += As[ty][i] * Bs[tx][i];
+        }
+        barrier();
+    }
+    if (row < p.M && col < p.N) {
+        C[row * p.N + col] = acc;
+    }
+}

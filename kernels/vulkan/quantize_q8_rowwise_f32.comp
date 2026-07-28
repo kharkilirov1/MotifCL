@@ -1,0 +1,56 @@
+// Quantize f32 [M,K] -> i8 [M,K] + scales f32 [M] (per-row max|x|/127).
+// One workgroup per row, shared-memory reduction.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer InBuf  { float in_f32[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer OutBuf { int8_t out_i8[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer ScaleBuf { float scales[]; };
+
+layout(push_constant) uniform Push {
+    uint M;
+    uint K;
+    uint N; // total elements (M*K)
+} p;
+
+shared float scratch[64];
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (row >= p.M) return;
+
+    const uint base = row * p.K;
+    float max_abs = 0.0;
+    for (uint c = lane; c < p.K; c += 64u) {
+        float v = abs(in_f32[base + c]);
+        if (v > max_abs) max_abs = v;
+    }
+    scratch[lane] = max_abs;
+    barrier();
+
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            float other = scratch[lane + stride];
+            if (other > scratch[lane]) scratch[lane] = other;
+        }
+        barrier();
+    }
+
+    float scale = scratch[0];
+    if (scale <= 0.0) scale = 1.0;
+    else scale = scale / 127.0;
+    if (lane == 0u) scales[row] = scale;
+    barrier();
+
+    for (uint c = lane; c < p.K; c += 64u) {
+        uint idx = base + c;
+        if (idx >= p.N) continue;
+        float v = in_f32[idx] / scale;
+        int q = int(roundEven(v));
+        q = min(127, max(-127, q));
+        out_i8[idx] = int8_t(q);
+    }
+}

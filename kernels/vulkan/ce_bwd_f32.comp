@@ -1,0 +1,59 @@
+// Softmax cross-entropy backward, matching kernels/loss.cl
+// softmax_cross_entropy_backward_f32_i32:
+//   grad_logits[row,c] = grad_out[0] / rows * (softmax(logits[row])[c] - onehot)
+// One wave64 workgroup per row (softmax recomputed with shared reductions).
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer LogitsBuf { float logits[]; };
+layout(std430, set = 0, binding = 1) readonly buffer TargetsBuf { int targets[]; };
+layout(std430, set = 0, binding = 2) readonly buffer GradOutBuf { float grad_out[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer GradBuf { float grad_logits[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint cols;
+} p;
+
+shared float scratch[64];
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (row >= p.rows) return;
+    const uint base = row * p.cols;
+
+    float maxv = -3.402823466e+38;
+    for (uint c = lane; c < p.cols; c += 64u) {
+        maxv = max(maxv, logits[base + c]);
+    }
+    scratch[lane] = maxv;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) scratch[lane] = max(scratch[lane], scratch[lane + stride]);
+        barrier();
+    }
+    maxv = scratch[0];
+    barrier();
+
+    float sum = 0.0;
+    for (uint c = lane; c < p.cols; c += 64u) {
+        sum += exp(logits[base + c] - maxv);
+    }
+    scratch[lane] = sum;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) scratch[lane] += scratch[lane + stride];
+        barrier();
+    }
+    const float inv_sum = 1.0 / scratch[0];
+
+    const int target = targets[row];
+    const float scale = grad_out[0] / float(p.rows);
+    for (uint c = lane; c < p.cols; c += 64u) {
+        const float prob = exp(logits[base + c] - maxv) * inv_sum;
+        const float onehot = (int(c) == target) ? 1.0 : 0.0;
+        grad_logits[base + c] = scale * (prob - onehot);
+    }
+}

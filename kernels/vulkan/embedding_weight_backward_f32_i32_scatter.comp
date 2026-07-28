@@ -1,0 +1,35 @@
+// Embedding weight backward via atomic scatter.
+// O(tokens * embed_dim) instead of O(vocab * tokens * embed_dim) for the
+// original kernel_weight_backward_f32_i32. One invocation per (token, d);
+// grad_weight[indices[t]*embed + d] is updated with atomicAdd.
+//
+// The grad_weight buffer MUST be zero-filled by the host before this kernel
+// runs (atomicAdd accumulates into the existing value). The caller is
+// responsible for the zero-fill (a single fill_f32 / mul_scalar(0) dispatch,
+// or a freshly Tensor::zeros allocation).
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer IBuf { int indices[]; };
+layout(std430, set = 0, binding = 1) readonly buffer GBuf { float grad_out[]; };
+layout(std430, set = 0, binding = 2) buffer OBuf { float grad_weight[]; };
+
+layout(push_constant) uniform Push {
+    int vocab_size;
+    int embed_dim;
+    int token_count;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    const int total = p.token_count * p.embed_dim;
+    if (gid >= total) return;
+    const int t = gid / p.embed_dim;
+    const int d = gid - t * p.embed_dim;
+    const int idx = indices[t];
+    if (idx < 0 || idx >= p.vocab_size) return;  // OOB index contributes 0
+    const int row = idx * p.embed_dim + d;
+    atomicAdd(grad_weight[row], grad_out[gid]);
+}

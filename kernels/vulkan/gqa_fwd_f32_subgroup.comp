@@ -1,0 +1,80 @@
+// Grouped-query attention forward, non-causal, batch=1.
+// Subgroup reduction variant: replaces shared-memory tree reductions (max,
+// sum) with subgroupMax / subgroupAdd. probs[] still lives in shared memory
+// because pass 3 re-reads every prob from every lane.
+#version 450
+
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KBuf { float k[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VBuf { float v[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint query_tokens;
+    uint key_tokens;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    float scale;
+} p;
+
+shared float probs[1024];
+
+void main() {
+    const uint tq = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint lane = gl_LocalInvocationID.x;
+    if (tq >= p.query_tokens || h >= p.n_head) return;
+
+    const uint group_size = p.n_head / p.n_kv_head;
+    const uint g = h / group_size;
+    const uint q_stride = p.n_head * p.head_dim;
+    const uint kv_stride = p.n_kv_head * p.head_dim;
+    const uint q_base = tq * q_stride + h * p.head_dim;
+    const uint kv_off = g * p.head_dim;
+
+    // Pass 1: scores + per-lane max, then subgroup max.
+    float maxv = -3.402823466e+38;
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        float dot = 0.0;
+        const uint k_base = tk * kv_stride + kv_off;
+        for (uint d = 0u; d < p.head_dim; ++d) {
+            dot += q[q_base + d] * k[k_base + d];
+        }
+        const float score = dot * p.scale;
+        probs[tk] = score;
+        maxv = max(maxv, score);
+    }
+    maxv = subgroupMax(maxv);
+
+    // Pass 2: exp + per-lane sum, then subgroup sum. Still need barrier()
+    // between pass 1 writes to probs[] and pass 2 reads — but subgroupMax
+    // is a wave-wide op that synchronizes the wave, which on a single-wave
+    // workgroup (local_size_x=64 == subgroupSize) acts as the barrier.
+    subgroupMemoryBarrier();
+    float sum = 0.0;
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        const float e = exp(probs[tk] - maxv);
+        probs[tk] = e;
+        sum += e;
+    }
+    sum = subgroupAdd(sum);
+    const float inv_sum = 1.0 / sum;
+
+    // Pass 3 reuses probs[] written by pass 2; subgroupAdd above synchronized
+    // the wave, then pass 2 wrote probs[tk] (per-lane distinct indices), then
+    // we need another barrier so all writes are visible before pass 3 reads.
+    subgroupMemoryBarrier();
+    for (uint d = lane; d < p.head_dim; d += 64u) {
+        float acc = 0.0;
+        for (uint tk = 0u; tk < p.key_tokens; ++tk) {
+            acc += probs[tk] * v[tk * kv_stride + kv_off + d];
+        }
+        outv[q_base + d] = acc * inv_sum;
+    }
+}

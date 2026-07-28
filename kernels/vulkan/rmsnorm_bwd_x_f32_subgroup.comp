@@ -1,0 +1,45 @@
+// RMSNorm backward w.r.t. x, one wave64 workgroup per row:
+//   inv = rsqrt(mean(x^2) + eps); dot = sum(dy * w * x)
+//   dx  = dy * w * inv - x * inv^3 * dot / cols
+// Subgroup reduction variant: replaces shared-memory tree with subgroupAdd.
+#version 450
+
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) readonly buffer WBuf { float w[]; };
+layout(std430, set = 0, binding = 2) readonly buffer DyBuf { float dy[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer DxBuf { float dx[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint cols;
+    float eps;
+} p;
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (row >= p.rows) return;
+    const uint base = row * p.cols;
+
+    float ss = 0.0;
+    float dot = 0.0;
+    for (uint c = lane; c < p.cols; c += 64u) {
+        const float xv = x[base + c];
+        ss += xv * xv;
+        dot += dy[base + c] * w[c] * xv;
+    }
+    // Two independent reductions in one shot: subgroupAdd is a register op.
+    ss = subgroupAdd(ss);
+    dot = subgroupAdd(dot);
+    const float inv = inversesqrt(ss / float(p.cols) + p.eps);
+
+    for (uint c = lane; c < p.cols; c += 64u) {
+        const uint idx = base + c;
+        dx[idx] = dy[idx] * w[c] * inv - x[idx] * inv * inv * inv * dot / float(p.cols);
+    }
+}

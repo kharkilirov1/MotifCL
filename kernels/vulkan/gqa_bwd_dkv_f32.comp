@@ -1,0 +1,83 @@
+// Grouped-query attention backward, stage 3 of 3:
+//   dv[tk,g,d] =         sum_{h in group g} sum_tq p[h,tq,tk]  * dout[tq,h,d]
+//   dk[tk,g,d] = scale * sum_{h in group g} sum_tq ds[h,tq,tk] * q[tq,h,d]
+// One wave64 workgroup per (batch, four-key block, kv head), lanes over
+// head_dim. Four dK/dV rows stay register-blocked so q/dout are loaded once
+// and reused across four adjacent keys.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DoutBuf { float dout[]; };
+layout(std430, set = 0, binding = 2) readonly buffer PBuf { float p_in[]; };
+layout(std430, set = 0, binding = 3) readonly buffer DsBuf { float ds[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer DkBuf { float dk[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer DvBuf { float dv[]; };
+
+layout(push_constant) uniform Push {
+    uint batch;
+    uint query_tokens;
+    uint key_tokens;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    uint causal;
+    uint query_offset;
+    float scale;
+} p;
+
+void main() {
+    const uint tk0 = gl_WorkGroupID.x * 4u;
+    const uint g = gl_WorkGroupID.y;
+    const uint b = gl_WorkGroupID.z;
+    const uint lane = gl_LocalInvocationID.x;
+    if (b >= p.batch || tk0 >= p.key_tokens || g >= p.n_kv_head) return;
+
+    const uint group_size = p.n_head / p.n_kv_head;
+    const uint q_stride = p.n_head * p.head_dim;
+    const uint kv_stride = p.n_kv_head * p.head_dim;
+
+    for (uint d = lane; d < p.head_dim; d += 64u) {
+        vec4 acc_v = vec4(0.0);
+        vec4 acc_k = vec4(0.0);
+        for (uint hi = 0u; hi < group_size; ++hi) {
+            const uint h = g * group_size + hi;
+            for (uint tq = 0u; tq < p.query_tokens; ++tq) {
+                const uint row_base =
+                    ((b * p.n_head + h) * p.query_tokens + tq) *
+                    p.key_tokens + tk0;
+                vec4 prob = vec4(0.0);
+                vec4 dsv = vec4(0.0);
+                prob.x = p_in[row_base];
+                dsv.x = ds[row_base];
+                if (tk0 + 1u < p.key_tokens) {
+                    prob.y = p_in[row_base + 1u];
+                    dsv.y = ds[row_base + 1u];
+                }
+                if (tk0 + 2u < p.key_tokens) {
+                    prob.z = p_in[row_base + 2u];
+                    dsv.z = ds[row_base + 2u];
+                }
+                if (tk0 + 3u < p.key_tokens) {
+                    prob.w = p_in[row_base + 3u];
+                    dsv.w = ds[row_base + 3u];
+                }
+                const uint q_index =
+                    (b * p.query_tokens + tq) * q_stride + h * p.head_dim + d;
+                const float go = dout[q_index];
+                const float qv = q[q_index];
+                acc_v += prob * go;
+                acc_k += dsv * qv;
+            }
+        }
+        for (uint j = 0u; j < 4u; ++j) {
+            const uint tk = tk0 + j;
+            if (tk >= p.key_tokens) break;
+            const uint kv_index =
+                (b * p.key_tokens + tk) * kv_stride + g * p.head_dim + d;
+            dv[kv_index] = acc_v[j];
+            dk[kv_index] = acc_k[j] * p.scale;
+        }
+    }
+}

@@ -191,17 +191,15 @@ int main() {
   "num_experts_per_tok": 2
 })json";
     }
-    auto mixtral_cfg = motifcl::nn::load_hf_transformer_config_json(mixtral_config_path.string());
-    auto mixtral_spec = motifcl::nn::modern_model_spec_from_config(mixtral_cfg);
-    require(mixtral_cfg.architecture == motifcl::nn::HFArchitecture::Mixtral &&
-                mixtral_cfg.has_moe && mixtral_cfg.num_experts == 4,
-            "Mixtral MoE config parse failed");
-    require(!motifcl::nn::modern_model_spec_runnable_by_modern_gpt(mixtral_spec) &&
-                motifcl::nn::modern_model_spec_runnable_by_hybrid(mixtral_spec),
-            "Mixtral MoE graph should route through HybridGPTModel");
-    require(count_kind(mixtral_spec, motifcl::nn::ModernLayerKind::FullAttention) == 2 &&
-                count_kind(mixtral_spec, motifcl::nn::ModernLayerKind::MoEFFN) == 2,
-            "Mixtral graph layer kinds failed");
+    bool mixtral_rejected = false;
+    try {
+        (void)motifcl::nn::load_hf_transformer_config_json(mixtral_config_path.string());
+    } catch (const std::exception& e) {
+        const std::string message = e.what();
+        mixtral_rejected = message.find("unsupported MoE model family") != std::string::npos &&
+                            message.find("mixtral") != std::string::npos;
+    }
+    require(mixtral_rejected, "Mixtral MoE must be rejected with a clear dense-loader error");
 
     std::vector<motifcl::nn::HFChatMessage> messages{{"system", "Be concise"}, {"user", "Hello"}};
     auto chatml = motifcl::nn::apply_hf_chat_template(messages, motifcl::nn::HFArchitecture::Qwen2,
@@ -244,6 +242,12 @@ int main() {
         }
         throw;
     }
+
+    // HF-parsed configs defer weight init (real loads fill weights from disk); this
+    // weightless smoke test forwards random-init models, so opt back in explicitly.
+    cfg.transformer.skip_weight_init = false;
+    gemma4_cfg.transformer.skip_weight_init = false;
+    qwen35_cfg.transformer.skip_weight_init = false;
 
     auto qwen35_hybrid = motifcl::nn::make_hf_hybrid_transformer_model(backend, qwen35_cfg);
     std::vector<int32_t> qwen35_token_values{65, 66, 67};

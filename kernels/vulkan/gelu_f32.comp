@@ -1,0 +1,20 @@
+// GELU (tanh approximation), matching kernels/activation.cl gelu_f32:
+//   out = 0.5 * x * (1 + tanh(0.79788456 * (x + 0.044715 * x^3)))
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+} p;
+
+void main() {
+    const uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+    const float v = x[gid];
+    const float t = 0.7978845608028654 * (v + 0.044715 * v * v * v);
+    outv[gid] = 0.5 * v * (1.0 + tanh(t));
+}

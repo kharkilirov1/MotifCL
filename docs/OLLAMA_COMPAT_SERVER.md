@@ -24,7 +24,7 @@ one-time install the command is just `motifcl`, like `ollama`.
 `motifcl` without arguments:
 
 1. finds or builds `motifcl_generate_transformer`;
-2. auto-selects the newest local `.gguf` under `build/models`, `build_kquant_prefill/models`, or `models`;
+2. auto-selects the newest local `.gguf` under `models`;
 3. starts `tools/motifcl_ollama_server.py` in the background;
 4. waits until `/health` is ready after model load and warmup.
 

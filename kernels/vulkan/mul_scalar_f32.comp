@@ -1,0 +1,20 @@
+// Elementwise scalar multiply: out = x * alpha (1 element per lane, coalesced).
+// Used by `scale`/`mul_scalar` ops and SubBackward/MulBackward/ScalarBackward
+// chains on Vulkan. Mirrors kernels/basic.cl:mul_scalar_f32.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer OBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    float alpha;
+    uint n;
+} p;
+
+void main() {
+    const uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+    outv[gid] = x[gid] * p.alpha;
+}

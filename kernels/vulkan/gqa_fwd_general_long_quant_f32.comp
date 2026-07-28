@@ -1,0 +1,150 @@
+// Streaming fallback for Q8_0/Q4_0 KV-cache GQA rows longer than 1024 keys.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KBuf { uint8_t k_raw[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VBuf { uint8_t v_raw[]; };
+layout(std430, set = 0, binding = 3) readonly buffer KSBuf { float k_scales[]; };
+layout(std430, set = 0, binding = 4) readonly buffer VSBuf { float v_scales[]; };
+layout(std430, set = 0, binding = 5) readonly buffer MaskBuf { uint8_t mask_bytes[]; };
+layout(std430, set = 0, binding = 6) buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint batch;
+    uint query_tokens;
+    uint key_tokens;
+    uint key_stride;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    uint v_head_dim;
+    uint causal;
+    uint query_offset;
+    uint sliding_window;
+    uint mask_layout;
+    uint mask_mode;
+    uint mask_dtype;
+    uint kv_dtype;
+    float scale;
+} p;
+
+shared float row_max;
+shared float row_sum;
+shared float old_scale;
+shared float key_weight;
+
+uint mask_index(uint b, uint tq, uint tk) {
+    if (p.mask_layout == 1u) return tq * p.key_tokens + tk;
+    if (p.mask_layout == 2u) return b * p.key_tokens + tk;
+    if (p.mask_layout == 3u) return (b * p.query_tokens + tq) * p.key_tokens + tk;
+    if (p.mask_layout == 4u) return b * p.key_tokens + tk;
+    if (p.mask_layout == 5u) return tq * p.key_tokens + tk;
+    return tq * p.key_tokens + tk;
+}
+
+uint mask_code(uint idx) {
+    if (p.mask_dtype == 3u) return uint(mask_bytes[idx]);
+    const uint base = idx * 4u;
+    return uint(mask_bytes[base]) |
+           (uint(mask_bytes[base + 1u]) << 8u) |
+           (uint(mask_bytes[base + 2u]) << 16u) |
+           (uint(mask_bytes[base + 3u]) << 24u);
+}
+
+bool key_allowed(uint b, uint tq, uint tk) {
+    const uint abs_query = p.query_offset + tq;
+    if (p.causal != 0u && tk > abs_query) return false;
+    if (p.sliding_window != 0u) {
+        const uint min_key = abs_query + 1u > p.sliding_window
+            ? abs_query + 1u - p.sliding_window
+            : 0u;
+        if (tk < min_key) return false;
+    }
+    if (p.mask_dtype == 0u || p.mask_mode != 0u) return true;
+    const uint code = mask_code(mask_index(b, tq, tk));
+    return p.mask_dtype == 1u ? uintBitsToFloat(code) == 0.0 : code == 0u;
+}
+
+float mask_bias(uint b, uint tq, uint tk) {
+    return p.mask_dtype == 1u && p.mask_mode != 0u
+        ? uintBitsToFloat(mask_code(mask_index(b, tq, tk)))
+        : 0.0;
+}
+
+float load_k(uint index, float scale) {
+    if (p.kv_dtype == 1u) {
+        const int code = int(uint(k_raw[index]));
+        return float(code >= 128 ? code - 256 : code) * scale;
+    }
+    const uint packed = uint(k_raw[index >> 1u]);
+    const uint code = (index & 1u) == 0u ? (packed & 15u) : ((packed >> 4u) & 15u);
+    return float(int(code) - 8) * scale;
+}
+
+float load_v(uint index, float scale) {
+    if (p.kv_dtype == 1u) {
+        const int code = int(uint(v_raw[index]));
+        return float(code >= 128 ? code - 256 : code) * scale;
+    }
+    const uint packed = uint(v_raw[index >> 1u]);
+    const uint code = (index & 1u) == 0u ? (packed & 15u) : ((packed >> 4u) & 15u);
+    return float(int(code) - 8) * scale;
+}
+
+void main() {
+    const uint tq = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint b = gl_WorkGroupID.z;
+    const uint lane = gl_LocalInvocationID.x;
+    if (b >= p.batch || tq >= p.query_tokens || h >= p.n_head) return;
+
+    const uint kv_head = h / (p.n_head / p.n_kv_head);
+    const uint q_channels = p.n_head * p.head_dim;
+    const uint k_channels = p.n_kv_head * p.head_dim;
+    const uint v_channels = p.n_kv_head * p.v_head_dim;
+    const uint out_channels = p.n_head * p.v_head_dim;
+    const uint q_base = (b * p.query_tokens + tq) * q_channels + h * p.head_dim;
+    const uint out_base = (b * p.query_tokens + tq) * out_channels + h * p.v_head_dim;
+
+    for (uint d = lane; d < p.v_head_dim; d += 64u) outv[out_base + d] = 0.0;
+    if (lane == 0u) {
+        row_max = -3.402823466e+38;
+        row_sum = 0.0;
+    }
+    barrier();
+
+    for (uint tk = 0u; tk < p.key_tokens; ++tk) {
+        const uint cache_row = b * p.key_stride + tk;
+        if (lane == 0u) {
+            old_scale = 1.0;
+            key_weight = 0.0;
+            if (key_allowed(b, tq, tk)) {
+                const uint k_base = cache_row * k_channels + kv_head * p.head_dim;
+                float score = 0.0;
+                for (uint d = 0u; d < p.head_dim; ++d) {
+                    score += q[q_base + d] * load_k(k_base + d, k_scales[cache_row]);
+                }
+                score = score * p.scale + mask_bias(b, tq, tk);
+                const float new_max = max(row_max, score);
+                old_scale = row_sum == 0.0 ? 0.0 : exp(row_max - new_max);
+                key_weight = exp(score - new_max);
+                row_sum = row_sum * old_scale + key_weight;
+                row_max = new_max;
+            }
+        }
+        barrier();
+        const uint v_base = cache_row * v_channels + kv_head * p.v_head_dim;
+        for (uint d = lane; d < p.v_head_dim; d += 64u) {
+            outv[out_base + d] =
+                outv[out_base + d] * old_scale +
+                key_weight * load_v(v_base + d, v_scales[cache_row]);
+        }
+        barrier();
+    }
+
+    const float inv_sum = row_sum > 0.0 ? 1.0 / row_sum : 0.0;
+    for (uint d = lane; d < p.v_head_dim; d += 64u) outv[out_base + d] *= inv_sum;
+}

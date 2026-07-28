@@ -278,8 +278,6 @@ def resolve_ctx_size(value: str | int | None, model: Path, runner: Path, arch: s
 
 def discover_models() -> list[Path]:
     roots = [
-        ROOT / "build" / "models",
-        ROOT / "build_kquant_prefill" / "models",
         ROOT / "models",
     ]
     found: list[Path] = []
@@ -309,7 +307,7 @@ def resolve_model(value: str | None) -> Path:
     if not value:
         if not models:
             raise SystemExit(
-                "no local GGUF model found. Put a .gguf under build/models or pass a model path, e.g.\n"
+                "no local GGUF model found. Put a .gguf under models/ or pass a model path, e.g.\n"
                 "  .\\motifcl.cmd up .\\path\\model.gguf"
             )
         return models[0]
@@ -587,7 +585,7 @@ def command_status(args: argparse.Namespace) -> int:
 def command_list(_: argparse.Namespace) -> int:
     models = discover_models()
     if not models:
-        log("no .gguf models discovered under build/models, build_kquant_prefill/models, or models")
+        log("no .gguf models discovered under models/")
         return 1
     for idx, path in enumerate(models, start=1):
         name = model_name_from_path(path)

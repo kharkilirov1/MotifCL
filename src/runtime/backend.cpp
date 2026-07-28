@@ -41,8 +41,25 @@ int attention_workgroup_from_env() {
     return (value == 64 || value == 128 || value == 256) ? value : 128;
 }
 
+void append_env_options(std::string& options, const char* name) {
+    if (const char* env = std::getenv(name)) {
+        if (*env) {
+            options += " ";
+            options += env;
+        }
+    }
+}
+
+std::string opencl_build_options(std::string options) {
+#ifdef MOTIFCL_OPENCL_FAST_RELAXED_MATH
+    options += " -cl-fast-relaxed-math -cl-mad-enable -cl-no-signed-zeros";
+#endif
+    append_env_options(options, "MOTIFCL_OPENCL_BUILD_OPTIONS");
+    return options;
+}
+
 std::string build_options_for_source(const std::string& file) {
-    std::string options = "-cl-std=CL1.2";
+    std::string options = opencl_build_options("-cl-std=CL1.2");
     if (file == "attention.cl") {
         options += " -DFA_TILE=" + std::to_string(attention_tile_from_env());
         options += " -DFA_WG=" + std::to_string(attention_workgroup_from_env());
@@ -153,6 +170,7 @@ KernelCache::KernelCache(OpenCLContext& ctx, std::string kernel_dir, Profiler* p
     : ctx_(&ctx), profiler_(profiler), kernel_dir_(std::move(kernel_dir)) {}
 
 std::string KernelCache::source_file_for_kernel(const std::string& kernel_name) const {
+    if (contains(kernel_name, "counter")) return "compact_counter.cl";
     if (contains(kernel_name, "f16")) return "fp16.cl";
     if (contains(kernel_name, "matmul")) return "matmul.cl";
     if (contains(kernel_name, "quantize") || contains(kernel_name, "dequantize")) return "quant.cl";
@@ -202,11 +220,12 @@ Kernel KernelCache::get_matmul_tiled_variant(int tile) {
     MCL_CHECK(ctx_ != nullptr, "kernel cache has no context");
     MCL_CHECK(tile == 4 || tile == 8 || tile == 16, "generated matmul tile must be one of 4, 8, or 16");
     const auto kernel_name = matmul_tiled_variant_name(tile);
-    const auto key = std::string("generated:") + kernel_name;
+    const auto options = opencl_build_options("-cl-std=CL1.2");
+    const auto key = std::string("generated:") + kernel_name + "|" + options;
     auto it = programs_.find(key);
     if (it == programs_.end()) {
         auto source = generated_matmul_tiled_source(tile, kernel_name);
-        auto program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL1.2", profiler_);
+        auto program = std::make_shared<Program>(*ctx_, source, options, profiler_);
         it = programs_.emplace(key, std::move(program)).first;
     }
     return it->second->get_kernel(kernel_name);
@@ -218,18 +237,18 @@ Kernel KernelCache::get_q8_int_dot_variant(const std::string& mode) {
         return get("matmul_q8_0_dot4_f32");
     }
     const auto kernel_name = q8_int_dot_variant_name(mode);
-    const auto key = std::string("generated:") + kernel_name;
+    const auto key = std::string("generated:") + kernel_name + "|" + opencl_build_options("-cl-std=CL1.2");
     auto it = programs_.find(key);
     if (it == programs_.end()) {
         auto source = generated_q8_khr_dot_source(kernel_name);
         std::shared_ptr<Program> program;
         try {
-            program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL3.0", profiler_);
+            program = std::make_shared<Program>(*ctx_, source, opencl_build_options("-cl-std=CL3.0"), profiler_);
         } catch (const Error&) {
             try {
-            program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL2.0", profiler_);
+                program = std::make_shared<Program>(*ctx_, source, opencl_build_options("-cl-std=CL2.0"), profiler_);
             } catch (const Error&) {
-                program = std::make_shared<Program>(*ctx_, source, "-cl-std=CL1.2", profiler_);
+                program = std::make_shared<Program>(*ctx_, source, opencl_build_options("-cl-std=CL1.2"), profiler_);
             }
         }
         it = programs_.emplace(key, std::move(program)).first;
@@ -238,7 +257,8 @@ Kernel KernelCache::get_q8_int_dot_variant(const std::string& mode) {
 }
 
 Backend::Backend(OpenCLContext&& context, std::string kernel_dir)
-    : ctx(std::move(context)), kernels(ctx, kernel_dir.empty() ? default_kernel_dir() : std::move(kernel_dir), &profiler) {}
+    : ctx(std::move(context)), kernels(ctx, kernel_dir.empty() ? default_kernel_dir() : std::move(kernel_dir), &profiler),
+      kind_(BackendKind::OpenCL) {}
 
 Backend::~Backend() {
     if (ctx.valid()) {
@@ -249,7 +269,8 @@ Backend::~Backend() {
 }
 
 Backend::Backend(Backend&& other) noexcept
-    : ctx(std::move(other.ctx)), kernels(ctx, other.kernels.kernel_dir(), &profiler), lifetime_(std::make_shared<BackendLifetime>()) {
+    : ctx(std::move(other.ctx)), kernels(ctx, other.kernels.kernel_dir(), &profiler), kind_(other.kind_),
+      vulkan_runtime_(std::move(other.vulkan_runtime_)), lifetime_(std::make_shared<BackendLifetime>()) {
     if (other.lifetime_) other.lifetime_->alive = false;
     if (ctx.valid()) {
         finish_context_noexcept(ctx);
@@ -266,6 +287,8 @@ Backend& Backend::operator=(Backend&& other) noexcept {
         if (lifetime_) lifetime_->alive = false;
         ctx = std::move(other.ctx);
         kernels = KernelCache(ctx, other.kernels.kernel_dir(), &profiler);
+        kind_ = other.kind_;
+        vulkan_runtime_ = std::move(other.vulkan_runtime_);
         if (other.lifetime_) other.lifetime_->alive = false;
         if (ctx.valid()) {
             finish_context_noexcept(ctx);
@@ -280,7 +303,51 @@ Backend Backend::create_opencl(const std::string& kernel_dir) {
     return Backend(OpenCLContext::create_default_gpu(), kernel_dir.empty() ? default_kernel_dir() : kernel_dir);
 }
 
+Backend Backend::create_vulkan() {
+    Backend backend;
+    backend.kind_ = BackendKind::Vulkan;
+    backend.vulkan_runtime_ = std::make_shared<VulkanRuntime>(VulkanRuntime::create());
+    MCL_CHECK(backend.vulkan_runtime_->available(),
+              backend.vulkan_runtime_->error().empty() ? "Vulkan runtime is not available"
+                                                       : backend.vulkan_runtime_->error());
+    return backend;
+}
+
+VulkanRuntime& Backend::vulkan_runtime() {
+    MCL_CHECK(is_vulkan() && vulkan_runtime_ && vulkan_runtime_->available(),
+              "backend does not have an available Vulkan runtime");
+    return *vulkan_runtime_;
+}
+
+const VulkanRuntime& Backend::vulkan_runtime() const {
+    MCL_CHECK(is_vulkan() && vulkan_runtime_ && vulkan_runtime_->available(),
+              "backend does not have an available Vulkan runtime");
+    return *vulkan_runtime_;
+}
+
+void Backend::finish() const {
+    if (is_opencl() && ctx.valid()) ctx.finish();
+}
+
+DeviceInfo Backend::device_info() const {
+    if (is_vulkan()) {
+        DeviceInfo info;
+        info.platform_name = "Vulkan";
+        info.platform_vendor = "Vulkan";
+        info.device_name = vulkan_runtime().device_name();
+        info.device_vendor = "Vulkan";
+        info.device_version = "Vulkan";
+        const auto& caps = vulkan_runtime().caps();
+        info.local_mem_size = static_cast<cl_ulong>(caps.max_shared_memory_bytes);
+        info.max_work_group_size =
+            static_cast<std::size_t>(caps.max_workgroup_invocations);
+        return info;
+    }
+    return ctx.info();
+}
+
 bool Backend::supports_integer_dot() const {
+    if (!is_opencl()) return false;
     const auto info = device_info();
     return contains(info.extensions, "cl_khr_integer_dot_product") ||
            contains(info.extensions, "cl_arm_integer_dot_product") ||
@@ -292,6 +359,7 @@ bool Backend::supports_integer_dot() const {
 }
 
 std::string Backend::int_dot_mode() const {
+    if (!is_opencl()) return "unsupported";
     const auto info = device_info();
     if (contains(info.extensions, "cl_khr_integer_dot_product")) return "cl_khr_integer_dot_product";
     if (contains(info.extensions, "cl_arm_integer_dot_product")) return "cl_arm_integer_dot_product";
@@ -301,14 +369,17 @@ std::string Backend::int_dot_mode() const {
 }
 
 bool Backend::supports_command_buffer() const {
+    if (!is_opencl()) return false;
     return query_command_buffer_support(ctx.platform, ctx.device).supported;
 }
 
 bool Backend::supports_command_buffer_mutable_dispatch() const {
+    if (!is_opencl()) return false;
     return query_command_buffer_support(ctx.platform, ctx.device).mutable_dispatch_supported;
 }
 
 std::string Backend::command_buffer_mode() const {
+    if (!is_opencl()) return "unsupported";
     return query_command_buffer_support(ctx.platform, ctx.device).mode;
 }
 

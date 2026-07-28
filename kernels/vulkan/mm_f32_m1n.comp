@@ -1,0 +1,31 @@
+// C[1,N] = A[1,K] * B[K,N], row-major F32 decode matmul (M = 1).
+// One invocation per output column; B reads are coalesced across the wave.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { float A[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BBuf { float B[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer CBuf { float C[]; };
+
+layout(push_constant) uniform Push {
+    uint K;
+    uint N;
+} p;
+
+void main() {
+    const uint n = gl_GlobalInvocationID.x;
+    if (n >= p.N) return;
+    float acc = 0.0;
+    uint k = 0u;
+    for (; k + 4u <= p.K; k += 4u) {
+        acc += A[k] * B[k * p.N + n];
+        acc += A[k + 1u] * B[(k + 1u) * p.N + n];
+        acc += A[k + 2u] * B[(k + 2u) * p.N + n];
+        acc += A[k + 3u] * B[(k + 3u) * p.N + n];
+    }
+    for (; k < p.K; ++k) {
+        acc += A[k] * B[k * p.N + n];
+    }
+    C[n] = acc;
+}

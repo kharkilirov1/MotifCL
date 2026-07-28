@@ -1,0 +1,32 @@
+// Embedding weight backward: grad_weight[vocab, d] = sum_t (indices[t] == vocab) * grad_out[t, d].
+// One invocation per (vocab, d) output element; loops over token_count.
+// Matches kernels/embedding.cl:embedding_weight_backward_f32_i32.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer IBuf { int indices[]; };
+layout(std430, set = 0, binding = 1) readonly buffer GBuf { float grad_out[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OBuf { float grad_weight[]; };
+
+layout(push_constant) uniform Push {
+    int vocab_size;
+    int embed_dim;
+    int token_count;
+    int n;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    if (gid >= p.n) return;
+    const int vocab = gid / p.embed_dim;
+    const int d = gid - vocab * p.embed_dim;
+    if (vocab >= p.vocab_size) return;
+    float acc = 0.0;
+    for (int t = 0; t < p.token_count; ++t) {
+        if (indices[t] == vocab) {
+            acc += grad_out[t * p.embed_dim + d];
+        }
+    }
+    grad_weight[gid] = acc;
+}

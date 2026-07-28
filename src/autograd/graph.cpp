@@ -26,7 +26,9 @@ struct PendingReplayLaunch {
     GraphKernelLaunchInfo command;
     bool has_command = false;
     std::function<void(const std::unordered_map<int, cl_mem>&,
-                       const std::vector<std::pair<int, int>>&)>
+                       const std::vector<std::pair<int, int>>&,
+                       const std::vector<GraphScalarArgOverride>&,
+                       const std::vector<GraphLocalArgOverride>&)>
         replay;
 };
 
@@ -97,85 +99,6 @@ std::vector<GraphKernelLaunchInfo> flatten_driver_kernel_launches(const Captured
     return launches;
 }
 
-bool kernel_binding_matches(const std::string& binding_kernel_name, const std::string& launch_kernel_name) {
-    return binding_kernel_name.empty() || binding_kernel_name == launch_kernel_name;
-}
-
-const GraphScalarArgOverride* find_scalar_override(const std::vector<GraphScalarArgOverride>& overrides,
-                                                   const GraphKernelLaunchInfo& launch,
-                                                   int arg_index) {
-    for (const auto& override_arg : overrides) {
-        if (override_arg.arg_index == arg_index &&
-            kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) {
-            return &override_arg;
-        }
-    }
-    return nullptr;
-}
-
-const GraphLocalArgOverride* find_local_override(const std::vector<GraphLocalArgOverride>& overrides,
-                                                 const GraphKernelLaunchInfo& launch,
-                                                 int arg_index) {
-    for (const auto& override_arg : overrides) {
-        if (override_arg.arg_index == arg_index &&
-            kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) {
-            return &override_arg;
-        }
-    }
-    return nullptr;
-}
-
-void apply_replay_kernel_args(const CapturedGraph& graph,
-                              const std::vector<std::size_t>& schedule,
-                              const std::vector<GraphScalarArgOverride>& scalar_overrides,
-                              const std::vector<GraphLocalArgOverride>& local_overrides) {
-    for (std::size_t index : schedule) {
-        const auto& node = graph.nodes().at(index);
-        for (const auto& launch : node.kernel_launches()) {
-            if (!launch.kernel) continue;
-
-            for (const auto& arg : launch.scalar_args) {
-                const auto* override_arg = find_scalar_override(scalar_overrides, launch, arg.first);
-                const auto& bytes = override_arg ? override_arg->bytes : arg.second;
-                MCL_CHECK_CL(clSetKernelArg(launch.kernel,
-                                            static_cast<cl_uint>(arg.first),
-                                            bytes.size(),
-                                            bytes.empty() ? nullptr : bytes.data()));
-            }
-            for (const auto& override_arg : scalar_overrides) {
-                if (!kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) continue;
-                const bool already_captured = std::any_of(launch.scalar_args.begin(), launch.scalar_args.end(),
-                                                          [&](const auto& arg) {
-                                                              return arg.first == override_arg.arg_index;
-                                                          });
-                if (already_captured) continue;
-                MCL_CHECK_CL(clSetKernelArg(launch.kernel,
-                                            static_cast<cl_uint>(override_arg.arg_index),
-                                            override_arg.bytes.size(),
-                                            override_arg.bytes.empty() ? nullptr : override_arg.bytes.data()));
-            }
-
-            for (const auto& arg : launch.local_args) {
-                const auto* override_arg = find_local_override(local_overrides, launch, arg.first);
-                const std::size_t bytes = override_arg ? override_arg->bytes : arg.second;
-                MCL_CHECK_CL(clSetKernelArg(launch.kernel, static_cast<cl_uint>(arg.first), bytes, nullptr));
-            }
-            for (const auto& override_arg : local_overrides) {
-                if (!kernel_binding_matches(override_arg.kernel_name, launch.kernel_name)) continue;
-                const bool already_captured = std::any_of(launch.local_args.begin(), launch.local_args.end(),
-                                                          [&](const auto& arg) {
-                                                              return arg.first == override_arg.arg_index;
-                                                          });
-                if (already_captured) continue;
-                MCL_CHECK_CL(clSetKernelArg(launch.kernel,
-                                            static_cast<cl_uint>(override_arg.arg_index),
-                                            override_arg.bytes,
-                                            nullptr));
-            }
-        }
-    }
-}
-
 std::vector<std::pair<int, int>> map_kernel_buffer_args_to_tensors(const PendingReplayLaunch& launch,
                                                                    const std::vector<int>& tensor_ids,
                                                                    const std::unordered_map<int, TensorSpec>& specs) {
@@ -206,9 +129,11 @@ void GraphNodeInfo::replay() const {
     replay({});
 }
 
-void GraphNodeInfo::replay(const std::unordered_map<int, cl_mem>& tensor_bindings) const {
+void GraphNodeInfo::replay(const std::unordered_map<int, cl_mem>& tensor_bindings,
+                           const std::vector<GraphScalarArgOverride>& scalar_overrides,
+                           const std::vector<GraphLocalArgOverride>& local_overrides) const {
     MCL_CHECK(replayable && replay_fn, "graph node is not replayable: " + op);
-    replay_fn(tensor_bindings);
+    replay_fn(tensor_bindings, scalar_overrides, local_overrides);
 }
 
 bool CapturedGraph::replayable() const {
@@ -541,8 +466,13 @@ void record_op(const std::string& op, std::vector<int> inputs, std::vector<int> 
             }
         }
         node.command_buffer_recordable = all_driver_recordable || (node.op == "view" && launches.empty());
-        node.replay_fn = [launches = std::move(launches), arg_maps = std::move(arg_maps)](const std::unordered_map<int, cl_mem>& bindings) {
-            for (std::size_t i = 0; i < launches.size(); ++i) launches[i].replay(bindings, arg_maps[i]);
+        node.replay_fn = [launches = std::move(launches), arg_maps = std::move(arg_maps)](
+                             const std::unordered_map<int, cl_mem>& bindings,
+                             const std::vector<GraphScalarArgOverride>& scalar_overrides,
+                             const std::vector<GraphLocalArgOverride>& local_overrides) {
+            for (std::size_t i = 0; i < launches.size(); ++i) {
+                launches[i].replay(bindings, arg_maps[i], scalar_overrides, local_overrides);
+            }
         };
     }
     g_pending_replay_launches.clear();
@@ -591,8 +521,13 @@ void record_replay_op(const std::string& op,
             }
         }
         node.command_buffer_recordable = all_driver_recordable;
-        node.replay_fn = [launches = std::move(launches), arg_maps = std::move(arg_maps), replay = std::move(replay)](const std::unordered_map<int, cl_mem>& bindings) {
-            for (std::size_t i = 0; i < launches.size(); ++i) launches[i].replay(bindings, arg_maps[i]);
+        node.replay_fn = [launches = std::move(launches), arg_maps = std::move(arg_maps), replay = std::move(replay)](
+                             const std::unordered_map<int, cl_mem>& bindings,
+                             const std::vector<GraphScalarArgOverride>& scalar_overrides,
+                             const std::vector<GraphLocalArgOverride>& local_overrides) {
+            for (std::size_t i = 0; i < launches.size(); ++i) {
+                launches[i].replay(bindings, arg_maps[i], scalar_overrides, local_overrides);
+            }
             replay();
         };
     }
@@ -606,7 +541,9 @@ void record_kernel_launch(const std::string& kernel_name, std::function<void()> 
     if (!g_graph_capture_active) return;
     PendingReplayLaunch launch;
     launch.replay = [replay = std::move(replay)](const std::unordered_map<int, cl_mem>&,
-                                                 const std::vector<std::pair<int, int>>&) {
+                                                 const std::vector<std::pair<int, int>>&,
+                                                 const std::vector<GraphScalarArgOverride>&,
+                                                 const std::vector<GraphLocalArgOverride>&) {
         replay();
     };
     g_pending_replay_launches.push_back(std::move(launch));
@@ -615,7 +552,9 @@ void record_kernel_launch(const std::string& kernel_name, std::function<void()> 
 void record_kernel_launch(const std::string& kernel_name,
                           std::vector<std::pair<int, cl_mem>> buffer_args,
                           std::function<void(const std::unordered_map<int, cl_mem>&,
-                                             const std::vector<std::pair<int, int>>&)>
+                                             const std::vector<std::pair<int, int>>&,
+                                             const std::vector<GraphScalarArgOverride>&,
+                                             const std::vector<GraphLocalArgOverride>&)>
                               replay) {
     (void)kernel_name;
     if (!g_graph_capture_active) return;
@@ -627,7 +566,9 @@ void record_kernel_launch(const std::string& kernel_name,
 
 void record_kernel_launch(GraphKernelLaunchInfo launch,
                           std::function<void(const std::unordered_map<int, cl_mem>&,
-                                             const std::vector<std::pair<int, int>>&)>
+                                             const std::vector<std::pair<int, int>>&,
+                                             const std::vector<GraphScalarArgOverride>&,
+                                             const std::vector<GraphLocalArgOverride>&)>
                               replay) {
     if (!g_graph_capture_active) return;
     PendingReplayLaunch pending;
@@ -696,9 +637,8 @@ void GraphExecutor::execute() {
         return;
     }
     execution_mode_ = "host_replay_fallback";
-    apply_replay_kernel_args(graph_, cached_schedule_, bound_scalar_args_, bound_local_args_);
     for (std::size_t index : cached_schedule_) {
-        graph_.nodes().at(index).replay(active_bindings);
+        graph_.nodes().at(index).replay(active_bindings, bound_scalar_args_, bound_local_args_);
     }
     ++executions_;
 }
@@ -765,12 +705,6 @@ void GraphExecutor::clear_bindings() {
 void GraphExecutor::initialize_temporary_arena() {
     if (!graph_temporary_arena_enabled() || runtime_plan_.buffer_plan.allocations.empty()) return;
 
-    std::unordered_set<int> temporary_ids;
-    for (const auto& node : graph_.nodes()) {
-        for (int id : node.temporaries) temporary_ids.insert(id);
-    }
-    if (temporary_ids.empty()) return;
-
     std::shared_ptr<OpenCLContextState> state;
     for (std::size_t index : cached_schedule_) {
         for (const auto& launch : graph_.nodes().at(index).kernel_launches()) {
@@ -783,12 +717,32 @@ void GraphExecutor::initialize_temporary_arena() {
     }
     if (!state || !state->valid()) return;
 
+    std::unordered_map<int, int> aliases;
+    std::unordered_set<int> consumed_ids;
+    std::unordered_set<int> final_roots;
+    std::unordered_set<int> forced_arena_ids;
+    for (const auto& node : graph_.nodes()) {
+        for (int input : node.inputs) consumed_ids.insert(input);
+        if (node.op == "view" && !node.inputs.empty()) {
+            const int root = resolve_alias(aliases, node.inputs.front());
+            for (int output : node.outputs) aliases[output] = root;
+        }
+        for (int temporary : node.temporaries) forced_arena_ids.insert(temporary);
+    }
+    for (const auto& node : graph_.nodes()) {
+        for (int output : node.outputs) {
+            if (consumed_ids.find(output) == consumed_ids.end()) {
+                final_roots.insert(resolve_alias(aliases, output));
+            }
+        }
+    }
+
     constexpr std::size_t kArenaAlignment = 256;
     struct ArenaAllocation {
         std::size_t allocation_id = 0;
         std::size_t bytes = 0;
         std::size_t offset = 0;
-        std::vector<int> temporary_tensor_ids;
+        std::vector<int> tensor_ids;
     };
     std::vector<ArenaAllocation> arena_allocations;
     std::size_t total_bytes = 0;
@@ -797,9 +751,13 @@ void GraphExecutor::initialize_temporary_arena() {
         arena_allocation.allocation_id = allocation.allocation_id;
         arena_allocation.bytes = allocation.bytes;
         for (int id : allocation.tensor_ids) {
-            if (temporary_ids.find(id) != temporary_ids.end()) arena_allocation.temporary_tensor_ids.push_back(id);
+            const int root = resolve_alias(aliases, id);
+            if (forced_arena_ids.find(id) != forced_arena_ids.end() ||
+                final_roots.find(root) == final_roots.end()) {
+                arena_allocation.tensor_ids.push_back(id);
+            }
         }
-        if (arena_allocation.temporary_tensor_ids.empty() || arena_allocation.bytes == 0) continue;
+        if (arena_allocation.tensor_ids.empty() || arena_allocation.bytes == 0) continue;
         total_bytes = align_up(total_bytes, kArenaAlignment);
         arena_allocation.offset = total_bytes;
         total_bytes += align_up(arena_allocation.bytes, kArenaAlignment);
@@ -833,7 +791,7 @@ void GraphExecutor::initialize_temporary_arena() {
         auto view_owner = std::shared_ptr<MemHandle>(view, [](MemHandle* mem) {
             if (mem) clReleaseMemObject(mem);
         });
-        for (int id : allocation.temporary_tensor_ids) arena_mem_[id] = view;
+        for (int id : allocation.tensor_ids) arena_mem_[id] = view;
         arena_views_.push_back(std::move(view_owner));
     }
     arena_bytes_ = total_bytes;

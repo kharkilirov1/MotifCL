@@ -1,0 +1,32 @@
+// out[0] = sum(partial[0..count)) / denominator, one wave64 workgroup.
+// Matches kernels/loss.cl mean_reduce_f32.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer PartialBuf { float partial_in[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint count;
+    uint denominator;
+} p;
+
+shared float scratch[64];
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    float acc = 0.0;
+    for (uint i = lane; i < p.count; i += 64u) {
+        acc += partial_in[i];
+    }
+    scratch[lane] = acc;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) scratch[lane] += scratch[lane + stride];
+        barrier();
+    }
+    if (lane == 0u) {
+        outv[0] = p.denominator > 0u ? scratch[0] / float(p.denominator) : 0.0;
+    }
+}

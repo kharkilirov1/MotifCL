@@ -1,0 +1,131 @@
+// Fused packed-counter decode + grad_x = grad_out * weight.
+// Register-blocked 32x32 output tile: one wave64 workgroup, each lane owns
+// a 4x4 result tile. The transposed logical weight tile is decoded directly
+// from packed state into LDS; no dense FP32 weight tensor is materialized.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer GradOutBuf { float grad_out[]; };
+layout(std430, set = 0, binding = 1) readonly buffer StateBuf { uint8_t state[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ScaleBuf { float scale[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer GradXBuf { float grad_x[]; };
+
+layout(push_constant) uniform Push {
+    uint C;
+    uint in_features;
+    uint out_features;
+    uint batch;
+} p;
+
+#define RB_M 32
+#define RB_N 32
+#define RB_K 16
+#define RB_THREAD_M 4
+#define RB_THREAD_N 4
+
+shared float Gs[RB_M][RB_K + 1];
+shared float Ws[RB_K][RB_N + 1];
+
+int ternary_from_code(int code, int levels) {
+    if (code < levels) return -1;
+    if (code < 2 * levels) return 0;
+    if (code < 3 * levels) return 1;
+    return code / levels - 1;
+}
+
+void main() {
+    const uint lcol = gl_LocalInvocationID.x;
+    const uint lrow = gl_LocalInvocationID.y;
+    const uint lid = lrow * 8u + lcol;
+    const uint block_in = gl_WorkGroupID.x * RB_N;
+    const uint block_row = gl_WorkGroupID.y * RB_M;
+    const uint groups_per_row = p.in_features / 4u;
+    const int levels = int(2u * p.C - 1u);
+
+    float acc00 = 0.0, acc01 = 0.0, acc02 = 0.0, acc03 = 0.0;
+    float acc10 = 0.0, acc11 = 0.0, acc12 = 0.0, acc13 = 0.0;
+    float acc20 = 0.0, acc21 = 0.0, acc22 = 0.0, acc23 = 0.0;
+    float acc30 = 0.0, acc31 = 0.0, acc32 = 0.0, acc33 = 0.0;
+
+    for (uint kt = 0u; kt < p.out_features; kt += RB_K) {
+        for (uint idx = lid; idx < RB_M * RB_K; idx += 64u) {
+            const uint r = idx / RB_K;
+            const uint kk = idx - r * RB_K;
+            const uint gr = block_row + r;
+            const uint gk = kt + kk;
+            Gs[r][kk] = (gr < p.batch && gk < p.out_features)
+                ? grad_out[gr * p.out_features + gk]
+                : 0.0;
+        }
+
+        // 16 counter rows x eight packed groups per 32-wide input tile =
+        // 128 groups. Each lane decodes two groups into the logical
+        // weight[K,N] tile used by grad_out * weight.
+        for (uint idx = lid; idx < RB_K * (RB_N / 4); idx += 64u) {
+            const uint kr = idx / (RB_N / 4);
+            const uint cg = idx - kr * (RB_N / 4);
+            const uint gk = kt + kr;
+            const uint gc = block_in + cg * 4u;
+            float w0 = 0.0, w1 = 0.0, w2 = 0.0, w3 = 0.0;
+            if (gk < p.out_features && gc < p.in_features) {
+                const uint base = (gk * groups_per_row + gc / 4u) * 3u;
+                const int b0 = int(uint(state[base]));
+                const int b1 = int(uint(state[base + 1u]));
+                const int b2 = int(uint(state[base + 2u]));
+                const float s = scale[gk];
+                w0 = s * float(ternary_from_code(b0 & 0x3F, levels));
+                w1 = s * float(ternary_from_code(
+                    ((b0 >> 6) | (b1 << 2)) & 0x3F, levels));
+                w2 = s * float(ternary_from_code(
+                    ((b1 >> 4) | (b2 << 4)) & 0x3F, levels));
+                w3 = s * float(ternary_from_code(
+                    (b2 >> 2) & 0x3F, levels));
+            }
+            const uint c = cg * 4u;
+            Ws[kr][c] = w0;
+            Ws[kr][c + 1u] = w1;
+            Ws[kr][c + 2u] = w2;
+            Ws[kr][c + 3u] = w3;
+        }
+        barrier();
+
+        const uint rr = lrow * RB_THREAD_M;
+        const uint cc = lcol * RB_THREAD_N;
+        for (uint kk = 0u; kk < RB_K; ++kk) {
+            const float a0 = Gs[rr][kk];
+            const float a1 = Gs[rr + 1u][kk];
+            const float a2 = Gs[rr + 2u][kk];
+            const float a3 = Gs[rr + 3u][kk];
+            const float b0 = Ws[kk][cc];
+            const float b1 = Ws[kk][cc + 1u];
+            const float b2 = Ws[kk][cc + 2u];
+            const float b3 = Ws[kk][cc + 3u];
+            acc00 += a0 * b0; acc01 += a0 * b1; acc02 += a0 * b2; acc03 += a0 * b3;
+            acc10 += a1 * b0; acc11 += a1 * b1; acc12 += a1 * b2; acc13 += a1 * b3;
+            acc20 += a2 * b0; acc21 += a2 * b1; acc22 += a2 * b2; acc23 += a2 * b3;
+            acc30 += a3 * b0; acc31 += a3 * b1; acc32 += a3 * b2; acc33 += a3 * b3;
+        }
+        barrier();
+    }
+
+    const uint row0 = block_row + lrow * RB_THREAD_M;
+    const uint col0 = block_in + lcol * RB_THREAD_N;
+    if (row0 + 0u < p.batch && col0 + 0u < p.in_features) grad_x[(row0 + 0u) * p.in_features + col0 + 0u] = acc00;
+    if (row0 + 0u < p.batch && col0 + 1u < p.in_features) grad_x[(row0 + 0u) * p.in_features + col0 + 1u] = acc01;
+    if (row0 + 0u < p.batch && col0 + 2u < p.in_features) grad_x[(row0 + 0u) * p.in_features + col0 + 2u] = acc02;
+    if (row0 + 0u < p.batch && col0 + 3u < p.in_features) grad_x[(row0 + 0u) * p.in_features + col0 + 3u] = acc03;
+    if (row0 + 1u < p.batch && col0 + 0u < p.in_features) grad_x[(row0 + 1u) * p.in_features + col0 + 0u] = acc10;
+    if (row0 + 1u < p.batch && col0 + 1u < p.in_features) grad_x[(row0 + 1u) * p.in_features + col0 + 1u] = acc11;
+    if (row0 + 1u < p.batch && col0 + 2u < p.in_features) grad_x[(row0 + 1u) * p.in_features + col0 + 2u] = acc12;
+    if (row0 + 1u < p.batch && col0 + 3u < p.in_features) grad_x[(row0 + 1u) * p.in_features + col0 + 3u] = acc13;
+    if (row0 + 2u < p.batch && col0 + 0u < p.in_features) grad_x[(row0 + 2u) * p.in_features + col0 + 0u] = acc20;
+    if (row0 + 2u < p.batch && col0 + 1u < p.in_features) grad_x[(row0 + 2u) * p.in_features + col0 + 1u] = acc21;
+    if (row0 + 2u < p.batch && col0 + 2u < p.in_features) grad_x[(row0 + 2u) * p.in_features + col0 + 2u] = acc22;
+    if (row0 + 2u < p.batch && col0 + 3u < p.in_features) grad_x[(row0 + 2u) * p.in_features + col0 + 3u] = acc23;
+    if (row0 + 3u < p.batch && col0 + 0u < p.in_features) grad_x[(row0 + 3u) * p.in_features + col0 + 0u] = acc30;
+    if (row0 + 3u < p.batch && col0 + 1u < p.in_features) grad_x[(row0 + 3u) * p.in_features + col0 + 1u] = acc31;
+    if (row0 + 3u < p.batch && col0 + 2u < p.in_features) grad_x[(row0 + 3u) * p.in_features + col0 + 2u] = acc32;
+    if (row0 + 3u < p.batch && col0 + 3u < p.in_features) grad_x[(row0 + 3u) * p.in_features + col0 + 3u] = acc33;
+}

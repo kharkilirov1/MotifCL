@@ -878,36 +878,63 @@ bool native_matmul_f32_q4_0_m1_supported(const Tensor& a, const Tensor& b) {
 }
 
 bool vulkan_matmul_f32_m1_supported(const Tensor& a, const Tensor& b) {
-    return a.dtype() == DType::F32 &&
-           b.dtype() == DType::F32 &&
-           a.ndim() == 2 &&
-           b.ndim() == 2 &&
-           a.backend_ptr() == b.backend_ptr() &&
-           a.shape()[0] == 1 &&
-           a.shape()[1] == b.shape()[0] &&
-           a.shape()[1] > 0 &&
-           b.shape()[1] > 0 &&
-           a.shape()[1] <= 64 &&
-           b.shape()[1] <= 64 &&
-           !a.requires_grad() &&
-           !b.requires_grad();
+    const bool base = a.dtype() == DType::F32 &&
+                      b.dtype() == DType::F32 &&
+                      a.ndim() == 2 &&
+                      b.ndim() == 2 &&
+                      a.backend_ptr() == b.backend_ptr() &&
+                      a.shape()[0] == 1 &&
+                      a.shape()[1] == b.shape()[0] &&
+                      a.shape()[1] > 0 &&
+                      b.shape()[1] > 0;
+    if (!base) return false;
+    // Vulkan-backed tensors run the cached device kernels: any shape, autograd OK.
+    if (a.backend().is_vulkan()) return true;
+    // The legacy staged host-roundtrip path (env-selected experiment) keeps
+    // its original narrow envelope.
+    return a.shape()[1] <= 64 && b.shape()[1] <= 64 && !a.requires_grad() && !b.requires_grad();
 }
 
 bool vulkan_matmul_f32_supported(const Tensor& a, const Tensor& b) {
+    const bool base = a.dtype() == DType::F32 &&
+                      b.dtype() == DType::F32 &&
+                      a.ndim() == 2 &&
+                      b.ndim() == 2 &&
+                      a.backend_ptr() == b.backend_ptr() &&
+                      a.shape()[0] > 0 &&
+                      a.shape()[1] > 0 &&
+                      b.shape()[1] > 0 &&
+                      a.shape()[1] == b.shape()[0];
+    if (!base) return false;
+    if (a.backend().is_vulkan()) return true;
+    return a.shape()[1] <= 256 && a.shape()[0] <= 4096 && b.shape()[1] <= 4096 && !a.requires_grad() &&
+           !b.requires_grad();
+}
+
+bool vulkan_matmul_f32_transpose_b_supported(const Tensor& a, const Tensor& b) {
     return a.dtype() == DType::F32 &&
            b.dtype() == DType::F32 &&
            a.ndim() == 2 &&
            b.ndim() == 2 &&
            a.backend_ptr() == b.backend_ptr() &&
+           a.backend().is_vulkan() &&
+           a.shape()[0] > 0 &&
+           a.shape()[1] > 0 &&
+           b.shape()[0] > 0 &&
+           a.shape()[1] == b.shape()[1];
+}
+
+bool vulkan_matmul_f32_transpose_a_supported(const Tensor& a, const Tensor& b) {
+    return a.dtype() == DType::F32 &&
+           b.dtype() == DType::F32 &&
+           a.ndim() == 2 &&
+           b.ndim() == 2 &&
+           a.backend_ptr() == b.backend_ptr() &&
+           a.backend().is_vulkan() &&
            a.shape()[0] > 0 &&
            a.shape()[1] > 0 &&
            b.shape()[1] > 0 &&
-           a.shape()[1] == b.shape()[0] &&
-           a.shape()[1] <= 256 &&
-           a.shape()[0] <= 4096 &&
-           b.shape()[1] <= 4096 &&
-           !a.requires_grad() &&
-           !b.requires_grad();
+           a.shape()[0] == b.shape()[0];
 }
 
 Tensor matmul_native_f32_m1(const Tensor& a, const Tensor& b) {
@@ -990,6 +1017,24 @@ Tensor matmul_vulkan_f32_m1_from_result(const Tensor& a,
     return out;
 }
 
+Tensor matmul_vulkan_f32_m1_device(const Tensor& a, const Tensor& b) {
+    require_matmul_f32(a, b);
+    validate_matmul_args(a, b, "vulkan matmul f32 m1");
+    MCL_CHECK(a.shape()[0] == 1, "vulkan matmul f32 m1 expects lhs M=1");
+    const auto K = static_cast<std::size_t>(a.shape()[1]);
+    const auto N = static_cast<std::size_t>(b.shape()[1]);
+    auto out = Tensor::empty(a.backend(), {1, b.shape()[1]}, DType::F32);
+    const auto result = run_vulkan_f32_m1_matmul(a.backend().vulkan_runtime(),
+                                                a.storage().vulkan_buffer,
+                                                b.storage().vulkan_buffer,
+                                                out.storage().vulkan_buffer,
+                                                K,
+                                                N);
+    MCL_CHECK(result.success, std::string("vulkan matmul f32 m1 failed: ") + result.error);
+    autograd::record_op("matmul_vulkan_f32_m1", {a.id(), b.id()}, {out.id()});
+    return out;
+}
+
 VulkanF32MatmulSmokeResult run_vulkan_f32_tensor_matmul(const Tensor& a, const Tensor& b) {
     require_matmul_f32(a, b);
     validate_matmul_args(a, b, "vulkan matmul f32");
@@ -1020,10 +1065,100 @@ Tensor matmul_vulkan_f32_from_result(const Tensor& a,
     return out;
 }
 
+Tensor matmul_vulkan_f32_device(const Tensor& a, const Tensor& b) {
+    require_matmul_f32(a, b);
+    validate_matmul_args(a, b, "vulkan matmul f32");
+    const auto M = static_cast<std::size_t>(a.shape()[0]);
+    const auto K = static_cast<std::size_t>(a.shape()[1]);
+    const auto N = static_cast<std::size_t>(b.shape()[1]);
+    auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32);
+    const auto result = run_vulkan_f32_matmul(a.backend().vulkan_runtime(),
+                                             a.storage().vulkan_buffer,
+                                             b.storage().vulkan_buffer,
+                                             out.storage().vulkan_buffer,
+                                             M,
+                                             K,
+                                             N);
+    MCL_CHECK(result.success, std::string("vulkan matmul f32 failed: ") + result.error);
+    autograd::record_op("matmul_vulkan_f32", {a.id(), b.id()}, {out.id()});
+    return out;
+}
+
+Tensor matmul_vulkan_f32_transpose_b_device(const Tensor& a, const Tensor& b) {
+    require_matmul_f32(a, b);
+    validate_matmul_args(a, b, "vulkan matmul transpose_b f32", false, true);
+    const auto M = static_cast<std::size_t>(a.shape()[0]);
+    const auto K = static_cast<std::size_t>(a.shape()[1]);
+    const auto N = static_cast<std::size_t>(b.shape()[0]);
+    auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[0]}, DType::F32);
+    const auto result = run_vulkan_f32_matmul_transpose_b(a.backend().vulkan_runtime(),
+                                                         a.storage().vulkan_buffer,
+                                                         b.storage().vulkan_buffer,
+                                                         out.storage().vulkan_buffer,
+                                                         M,
+                                                         K,
+                                                         N);
+    MCL_CHECK(result.success, std::string("vulkan matmul transpose_b f32 failed: ") + result.error);
+    autograd::record_op("matmul_vulkan_f32_transpose_b", {a.id(), b.id()}, {out.id()});
+    return out;
+}
+
+Tensor matmul_vulkan_f32_transpose_a_device(const Tensor& a, const Tensor& b) {
+    require_matmul_f32(a, b);
+    validate_matmul_args(a, b, "vulkan matmul transpose_a f32", true, false);
+    const auto M = static_cast<std::size_t>(a.shape()[1]);
+    const auto K = static_cast<std::size_t>(a.shape()[0]);
+    const auto N = static_cast<std::size_t>(b.shape()[1]);
+    auto out = Tensor::empty(a.backend(), {a.shape()[1], b.shape()[1]}, DType::F32);
+    const auto result = run_vulkan_f32_matmul_transpose_a(a.backend().vulkan_runtime(),
+                                                          a.storage().vulkan_buffer,
+                                                          b.storage().vulkan_buffer,
+                                                          out.storage().vulkan_buffer,
+                                                          M,
+                                                          K,
+                                                          N);
+    MCL_CHECK(result.success, std::string("vulkan matmul transpose_a f32 failed: ") + result.error);
+    autograd::record_op("matmul_vulkan_f32_transpose_a", {a.id(), b.id()}, {out.id()});
+    return out;
+}
+
+// y = a * b^T  (a [M,K], b [N,K], y [M,N])
+//   grad_a = grad_y * b        -> plain matmul
+//   grad_b = grad_y^T * a      -> matmul_transpose_a
+// Without this node a tied LM head (logits = h @ embed^T) silently severs the
+// backward chain on Vulkan: the forward runs, the loss is finite, and nothing
+// upstream of the head ever receives a gradient.
+struct MatMulTransposeBBackward : autograd::Node {
+    Tensor a, b;
+    MatMulTransposeBBackward(Tensor a, Tensor b) : a(std::move(a)), b(std::move(b)) {}
+    std::vector<Tensor> inputs() const override { return {a, b}; }
+    void backward(const Tensor& grad_output) override {
+        if (a.requires_grad()) a.backward(matmul(grad_output, b));
+        if (b.requires_grad()) b.backward(matmul_transpose_a(grad_output, a));
+    }
+};
+
 Tensor matmul_flags(const Tensor& a, const Tensor& b, bool trans_a, bool trans_b) {
     (void)microkernel_runtime_uses_opencl(MicrokernelDomain::Matmul);
     require_matmul_f32(a, b);
     validate_matmul_args(a, b, "matmul", trans_a, trans_b);
+    if (a.backend().is_vulkan()) {
+        if (!trans_a && !trans_b && vulkan_matmul_f32_supported(a, b)) {
+            return matmul_vulkan_f32_device(a, b);
+        }
+        if (!trans_a && trans_b && vulkan_matmul_f32_transpose_b_supported(a, b)) {
+            auto out = matmul_vulkan_f32_transpose_b_device(a, b);
+            if (autograd::is_enabled() && (a.requires_grad() || b.requires_grad())) {
+                out.set_requires_grad(true);
+                out._set_grad_fn(std::make_shared<MatMulTransposeBBackward>(a, b));
+            }
+            return out;
+        }
+        if (trans_a && !trans_b && vulkan_matmul_f32_transpose_a_supported(a, b)) {
+            return matmul_vulkan_f32_transpose_a_device(a, b);
+        }
+        MCL_CHECK(false, "vulkan backend does not support this matmul transpose configuration");
+    }
     int64_t a_m = trans_a ? a.shape()[1] : a.shape()[0];
     int64_t a_k = trans_a ? a.shape()[0] : a.shape()[1];
     int64_t b_n = trans_b ? b.shape()[0] : b.shape()[1];
@@ -1097,14 +1232,36 @@ struct MatMulBackward : autograd::Node {
     }
 };
 
+// f16 x f16 -> f32 matmul backward. grad_output is f32; compute grads through the f32
+// transpose-matmul path (accurate) and cast back to f16 to match the f16 inputs.
+struct F16MatMulBackward : autograd::Node {
+    Tensor a, b;
+    F16MatMulBackward(Tensor a, Tensor b) : a(std::move(a)), b(std::move(b)) {}
+    std::vector<Tensor> inputs() const override { return {a, b}; }
+    void backward(const Tensor& grad_output) override {
+        if (a.requires_grad()) {
+            auto ga = matmul_transpose_b(grad_output, cast_f16_to_f32(b));
+            a.backward(cast_f32_to_f16(ga));
+        }
+        if (b.requires_grad()) {
+            auto gb = matmul_transpose_a(cast_f16_to_f32(a), grad_output);
+            b.backward(cast_f32_to_f16(gb));
+        }
+    }
+};
+
 } // namespace
 
 Tensor matmul(const Tensor& a, const Tensor& b) {
     const auto selected_backend = selected_matmul_backend();
     if (a.dtype() == DType::F16 || b.dtype() == DType::F16) {
         MCL_CHECK(a.dtype() == DType::F16 && b.dtype() == DType::F16, "f16 matmul expects both inputs to be f16");
-        MCL_CHECK(!a.requires_grad() && !b.requires_grad(), "f16 matmul autograd is not implemented; use f32 training path for now");
-        return matmul_f16_accum_f32(a, b);
+        auto out = matmul_f16_accum_f32(a, b);
+        if (autograd::is_enabled() && (a.requires_grad() || b.requires_grad())) {
+            out.set_requires_grad(true);
+            out._set_grad_fn(std::make_shared<F16MatMulBackward>(a, b));
+        }
+        return out;
     }
     if (a.dtype() == DType::F32 && is_k_quant_dtype(b.dtype()) && a.ndim() == 2 && a.shape()[0] == 1) {
         MCL_CHECK(!a.requires_grad() && !b.requires_grad(), "F32/K-quant decode matmul does not support autograd");
@@ -1116,6 +1273,24 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
     }
     if (a.dtype() == DType::F32 && b.dtype() == DType::Q4_0 && a.ndim() == 2 && a.shape()[0] == 1) {
         MCL_CHECK(!a.requires_grad() && !b.requires_grad(), "F32/Q4_0 decode matmul does not support autograd");
+        if (a.backend().is_vulkan()) {
+            validate_matmul_args(a, b, "vulkan f32/q4 decode matmul");
+            validate_scaled_quant_matmul_tensor(b, "vulkan f32/q4 decode matmul", "rhs");
+            MCL_CHECK(b.has_quant_scales() && b.quant_scale_axis() == 1,
+                      "vulkan f32/q4 decode matmul requires col-scales (axis=1)");
+            auto out = Tensor::empty(a.backend(), {1, b.shape()[1]}, DType::F32);
+            const auto result = run_vulkan_matmul_f32q4_m1(
+                a.backend().vulkan_runtime(),
+                a.storage().vulkan_buffer,
+                b.storage().vulkan_buffer,
+                b.quant_scales().storage().vulkan_buffer,
+                out.storage().vulkan_buffer,
+                static_cast<std::size_t>(a.shape()[1]),
+                static_cast<std::size_t>(b.shape()[1]));
+            MCL_CHECK(result.success, std::string("vulkan f32/q4 decode matmul failed: ") + result.error);
+            autograd::record_op("matmul_f32_q4_0_m1_vulkan", {a.id(), b.id()}, {out.id()});
+            return out;
+        }
         if (selected_backend.kind == MicrokernelBackendKind::Native &&
             native_matmul_f32_q4_0_m1_supported(a, b)) {
             return matmul_native_f32_q4_0_m1(a, b);
@@ -1127,6 +1302,65 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
         MCL_CHECK(!a.requires_grad() && !b.requires_grad(), "quantized matmul does not support autograd");
         MCL_CHECK(a.dtype() != DType::Q4_0_COL && b.dtype() != DType::Q4_0_COL,
                   "Q4_0_COL matmul is only supported for F32 x Q4_0_COL M=1 decode");
+        if (a.backend().is_vulkan()) {
+            validate_matmul_args(a, b, "vulkan quant matmul");
+            validate_quant_tensor_args(a, "vulkan quant matmul", "lhs", false);
+            validate_quant_tensor_args(b, "vulkan quant matmul", "rhs", false);
+            // Scalar-scale fallback (no axis scales): Q8_0 x Q8_0 only
+            if (!a.has_quant_scales() && !b.has_quant_scales()) {
+                MCL_CHECK(a.dtype() == DType::Q8_0 && b.dtype() == DType::Q8_0,
+                          "vulkan scalar-scale matmul supports Q8_0 x Q8_0 only");
+                MCL_CHECK(!a.requires_grad() && !b.requires_grad(),
+                          "vulkan scalar-scale matmul does not support autograd");
+                auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32);
+                const auto result = run_vulkan_i8_scaled_matmul(a.backend().vulkan_runtime(),
+                                                               a.storage().vulkan_buffer,
+                                                               b.storage().vulkan_buffer,
+                                                               out.storage().vulkan_buffer,
+                                                               static_cast<std::size_t>(a.shape()[0]),
+                                                               static_cast<std::size_t>(a.shape()[1]),
+                                                               static_cast<std::size_t>(b.shape()[1]),
+                                                               a.quant_scale(),
+                                                               b.quant_scale());
+                MCL_CHECK(result.success, std::string("vulkan scalar-scale q8 matmul failed: ") + result.error);
+                autograd::record_op("matmul_vulkan_q8_0_f32", {a.id(), b.id()}, {out.id()});
+                return out;
+            }
+            // Row/col scaled matmul: Q8_0[rows] x Q8_0/Q4_0[cols]
+            MCL_CHECK(a.has_quant_scales() && b.has_quant_scales(),
+                      "vulkan quant matmul requires row/col scale tensors on both inputs");
+            MCL_CHECK(a.quant_scale_axis() == 0 && b.quant_scale_axis() == 1,
+                      "vulkan quant matmul requires lhs row-scales (axis=0) and rhs col-scales (axis=1)");
+            auto out = Tensor::empty(a.backend(), {a.shape()[0], b.shape()[1]}, DType::F32);
+            VulkanOpResult result;
+            std::string op_name;
+            if (a.dtype() == DType::Q8_0 && b.dtype() == DType::Q8_0) {
+                result = run_vulkan_matmul_q8q8_scaled(
+                    a.backend().vulkan_runtime(),
+                    a.storage().vulkan_buffer, a.quant_scales().storage().vulkan_buffer,
+                    b.storage().vulkan_buffer, b.quant_scales().storage().vulkan_buffer,
+                    out.storage().vulkan_buffer,
+                    static_cast<std::size_t>(a.shape()[0]),
+                    static_cast<std::size_t>(a.shape()[1]),
+                    static_cast<std::size_t>(b.shape()[1]));
+                op_name = "matmul_q8_q8_scaled_vulkan";
+            } else if (a.dtype() == DType::Q8_0 && b.dtype() == DType::Q4_0) {
+                result = run_vulkan_matmul_q8q4_scaled(
+                    a.backend().vulkan_runtime(),
+                    a.storage().vulkan_buffer, a.quant_scales().storage().vulkan_buffer,
+                    b.storage().vulkan_buffer, b.quant_scales().storage().vulkan_buffer,
+                    out.storage().vulkan_buffer,
+                    static_cast<std::size_t>(a.shape()[0]),
+                    static_cast<std::size_t>(a.shape()[1]),
+                    static_cast<std::size_t>(b.shape()[1]));
+                op_name = "matmul_q8_q4_scaled_vulkan";
+            } else {
+                MCL_CHECK(false, "vulkan quant matmul supports Q8_0[rows]xQ8_0/Q4_0[cols] only (yet)");
+            }
+            MCL_CHECK(result.success, std::string(op_name + " failed: ") + result.error);
+            autograd::record_op(op_name, {a.id(), b.id()}, {out.id()});
+            return out;
+        }
         require_matmul_quantized(a, b);
         if (a.dtype() == DType::Q8_0 && is_k_quant_dtype(b.dtype())) return matmul_q8_qk(a, b);
         if (a.has_quant_scales() || b.has_quant_scales()) return matmul_quant_scaled(a, b);
@@ -1136,15 +1370,31 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
         if (a.dtype() == DType::Q4_0 && b.dtype() == DType::Q8_0) return matmul_q4_q8(a, b);
         MCL_CHECK(false, "unsupported quantized matmul dtype combination");
     }
-    if (selected_backend.kind == MicrokernelBackendKind::Vulkan &&
+    if ((a.backend().is_vulkan() || selected_backend.kind == MicrokernelBackendKind::Vulkan) &&
         vulkan_matmul_f32_m1_supported(a, b)) {
+        if (a.backend().is_vulkan()) {
+            auto out = matmul_vulkan_f32_m1_device(a, b);
+            if (autograd::is_enabled() && (a.requires_grad() || b.requires_grad())) {
+                out.set_requires_grad(true);
+                out._set_grad_fn(std::make_shared<MatMulBackward>(a, b));
+            }
+            return out;
+        }
         const auto result = run_vulkan_f32_m1_tensor_matmul(a, b);
         if (result.success) return matmul_vulkan_f32_m1_from_result(a, b, result);
         MCL_CHECK(!strict_vulkan_matmul_required(),
                   std::string("vulkan matmul f32 m1 failed: ") + result.error);
     }
-    if (selected_backend.kind == MicrokernelBackendKind::Vulkan &&
+    if ((a.backend().is_vulkan() || selected_backend.kind == MicrokernelBackendKind::Vulkan) &&
         vulkan_matmul_f32_supported(a, b)) {
+        if (a.backend().is_vulkan()) {
+            auto out = matmul_vulkan_f32_device(a, b);
+            if (autograd::is_enabled() && (a.requires_grad() || b.requires_grad())) {
+                out.set_requires_grad(true);
+                out._set_grad_fn(std::make_shared<MatMulBackward>(a, b));
+            }
+            return out;
+        }
         const auto result = run_vulkan_f32_tensor_matmul(a, b);
         if (result.success) return matmul_vulkan_f32_from_result(a, b, result);
         MCL_CHECK(!strict_vulkan_matmul_required(),
@@ -1154,6 +1404,7 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
         native_matmul_f32_m1_supported(a, b)) {
         return matmul_native_f32_m1(a, b);
     }
+    MCL_CHECK(!a.backend().is_vulkan(), "vulkan backend does not support this matmul shape");
     auto out = matmul_flags(a, b, false, false);
     if (autograd::is_enabled() && (a.requires_grad() || b.requires_grad())) {
         out.set_requires_grad(true);

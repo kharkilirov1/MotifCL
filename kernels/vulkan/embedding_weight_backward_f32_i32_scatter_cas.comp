@@ -1,0 +1,49 @@
+// Embedding weight backward via software-float-atomic scatter (compare-and-swap).
+// Same O(tokens * embed_dim) work as embedding_weight_backward_f32_i32_scatter,
+// but emulates the float atomicAdd with an integer atomicCompSwap loop instead
+// of relying on VK_EXT_shader_atomic_float. This is the portable fast path for
+// GPUs whose driver lacks (or mis-implements) native float atomics — notably
+// GCN4 (Radeon RX 580), where the native extension is exposed but collapses
+// every scattered add onto a single address. Integer atomicCompSwap on an SSBO
+// is core Vulkan 1.0 and works correctly on that hardware.
+//
+// The grad_weight buffer MUST be zero-filled by the host before this kernel runs
+// (the CAS accumulates into the existing value). Because 0.0f has an all-zero
+// bit pattern, a float zero-fill (zero_f32) is equivalent to a uint zero-fill,
+// so the buffer can be shared with the float-typed kernels unchanged.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer IBuf { int indices[]; };
+layout(std430, set = 0, binding = 1) readonly buffer GBuf { float grad_out[]; };
+// grad_weight aliased as uint so we can use integer atomicCompSwap; the stored
+// bits are still IEEE-754 floats (round-tripped via floatBitsToUint/uintBitsToFloat).
+layout(std430, set = 0, binding = 2) buffer OBuf { uint grad_weight[]; };
+
+layout(push_constant) uniform Push {
+    int vocab_size;
+    int embed_dim;
+    int token_count;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    const int total = p.token_count * p.embed_dim;
+    if (gid >= total) return;
+    const int t = gid / p.embed_dim;
+    const int d = gid - t * p.embed_dim;
+    const int idx = indices[t];
+    if (idx < 0 || idx >= p.vocab_size) return;  // OOB index contributes 0
+    const uint row = uint(idx * p.embed_dim + d);
+    const float val = grad_out[gid];
+    // Software float atomicAdd: read-modify-write guarded by integer CAS. The
+    // loop retries until no other invocation raced our slot in between.
+    uint old = grad_weight[row];
+    uint assumed;
+    do {
+        assumed = old;
+        const uint next = floatBitsToUint(uintBitsToFloat(assumed) + val);
+        old = atomicCompSwap(grad_weight[row], assumed, next);
+    } while (old != assumed);
+}

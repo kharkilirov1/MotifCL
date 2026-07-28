@@ -1,0 +1,169 @@
+// Wave64 subgroup-optimized Q8_0/Q4_0 KV-cache GQA.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KBuf { uint8_t k_raw[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VBuf { uint8_t v_raw[]; };
+layout(std430, set = 0, binding = 3) readonly buffer KSBuf { float k_scales[]; };
+layout(std430, set = 0, binding = 4) readonly buffer VSBuf { float v_scales[]; };
+layout(std430, set = 0, binding = 5) readonly buffer MaskBuf { uint8_t mask_bytes[]; };
+layout(std430, set = 0, binding = 6) writeonly buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint batch;
+    uint query_tokens;
+    uint key_tokens;
+    uint key_stride;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    uint v_head_dim;
+    uint causal;
+    uint query_offset;
+    uint sliding_window;
+    uint mask_layout;
+    uint mask_mode;
+    uint mask_dtype;
+    uint kv_dtype;
+    float scale;
+} p;
+
+shared float scores[1024];
+shared float row_max_shared;
+shared float inv_sum_shared;
+shared uint valid_shared;
+
+uint mask_index(uint b, uint tq, uint tk) {
+    if (p.mask_layout == 1u) return tq * p.key_tokens + tk;
+    if (p.mask_layout == 2u) return b * p.key_tokens + tk;
+    if (p.mask_layout == 3u) return (b * p.query_tokens + tq) * p.key_tokens + tk;
+    if (p.mask_layout == 4u) return b * p.key_tokens + tk;
+    if (p.mask_layout == 5u) return tq * p.key_tokens + tk;
+    return tq * p.key_tokens + tk;
+}
+
+uint mask_code(uint idx) {
+    if (p.mask_dtype == 3u) return uint(mask_bytes[idx]);
+    const uint base = idx * 4u;
+    return uint(mask_bytes[base]) |
+           (uint(mask_bytes[base + 1u]) << 8u) |
+           (uint(mask_bytes[base + 2u]) << 16u) |
+           (uint(mask_bytes[base + 3u]) << 24u);
+}
+
+bool mask_blocks(uint idx) {
+    if (p.mask_dtype == 0u || p.mask_mode != 0u) return false;
+    if (p.mask_dtype == 1u) return uintBitsToFloat(mask_code(idx)) != 0.0;
+    return mask_code(idx) != 0u;
+}
+
+float mask_bias(uint idx) {
+    return (p.mask_dtype == 1u && p.mask_mode != 0u) ? uintBitsToFloat(mask_code(idx)) : 0.0;
+}
+
+bool key_allowed(uint b, uint tq, uint tk) {
+    const uint abs_query = p.query_offset + tq;
+    if (p.causal != 0u && tk > abs_query) return false;
+    if (p.sliding_window != 0u) {
+        const uint min_key = abs_query + 1u > p.sliding_window
+            ? abs_query + 1u - p.sliding_window
+            : 0u;
+        if (tk < min_key) return false;
+    }
+    return !mask_blocks(mask_index(b, tq, tk));
+}
+
+float load_k(uint row, uint logical_index) {
+    if (p.kv_dtype == 1u) {
+        int code = int(uint(k_raw[logical_index]));
+        if (code >= 128) code -= 256;
+        return float(code) * k_scales[row];
+    }
+    const uint packed = uint(k_raw[logical_index >> 1u]);
+    const uint code = (logical_index & 1u) == 0u ? (packed & 15u) : ((packed >> 4u) & 15u);
+    return float(int(code) - 8) * k_scales[row];
+}
+
+float load_v(uint row, uint logical_index) {
+    if (p.kv_dtype == 1u) {
+        int code = int(uint(v_raw[logical_index]));
+        if (code >= 128) code -= 256;
+        return float(code) * v_scales[row];
+    }
+    const uint packed = uint(v_raw[logical_index >> 1u]);
+    const uint code = (logical_index & 1u) == 0u ? (packed & 15u) : ((packed >> 4u) & 15u);
+    return float(int(code) - 8) * v_scales[row];
+}
+
+void main() {
+    const uint tq = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint b = gl_WorkGroupID.z;
+    const uint lane = gl_LocalInvocationID.x;
+    if (b >= p.batch || tq >= p.query_tokens || h >= p.n_head) return;
+
+    const uint kv_head = h / (p.n_head / p.n_kv_head);
+    const uint q_channels = p.n_head * p.head_dim;
+    const uint k_channels = p.n_kv_head * p.head_dim;
+    const uint v_channels = p.n_kv_head * p.v_head_dim;
+    const uint out_channels = p.n_head * p.v_head_dim;
+    const uint q_base = (b * p.query_tokens + tq) * q_channels + h * p.head_dim;
+    const uint k_head_offset = kv_head * p.head_dim;
+    const uint v_head_offset = kv_head * p.v_head_dim;
+    const float neg_inf = -3.402823466e+38;
+
+    float lane_max = neg_inf;
+    uint lane_valid = 0u;
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        float score = neg_inf;
+        if (key_allowed(b, tq, tk)) {
+            const uint row = b * p.key_stride + tk;
+            const uint k_base = row * k_channels + k_head_offset;
+            float dot = 0.0;
+            for (uint d = 0u; d < p.head_dim; ++d) {
+                dot += q[q_base + d] * load_k(row, k_base + d);
+            }
+            score = dot * p.scale + mask_bias(mask_index(b, tq, tk));
+            lane_max = max(lane_max, score);
+            lane_valid += 1u;
+        }
+        scores[tk] = score;
+    }
+    const float row_max = subgroupMax(lane_max);
+    const uint valid = subgroupAdd(lane_valid);
+    if (lane == 0u) {
+        row_max_shared = row_max;
+        valid_shared = valid;
+    }
+    barrier();
+
+    float lane_sum = 0.0;
+    if (valid_shared != 0u) {
+        for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+            const float e = scores[tk] == neg_inf ? 0.0 : exp(scores[tk] - row_max_shared);
+            scores[tk] = e;
+            lane_sum += e;
+        }
+    }
+    const float sum = subgroupAdd(lane_sum);
+    if (lane == 0u) inv_sum_shared = sum > 0.0 ? 1.0 / sum : 0.0;
+    barrier();
+
+    const uint out_base = (b * p.query_tokens + tq) * out_channels + h * p.v_head_dim;
+    for (uint d = lane; d < p.v_head_dim; d += 64u) {
+        float acc = 0.0;
+        if (valid_shared != 0u) {
+            for (uint tk = 0u; tk < p.key_tokens; ++tk) {
+                const uint row = b * p.key_stride + tk;
+                acc += scores[tk] *
+                    load_v(row, row * v_channels + v_head_offset + d);
+            }
+        }
+        outv[out_base + d] = acc * inv_sum_shared;
+    }
+}

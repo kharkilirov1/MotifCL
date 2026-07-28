@@ -17,6 +17,7 @@ Tensor causal_mask(const Tensor& scores, float mask_value = -1.0e30f);
 Tensor attention_scores(const Tensor& q, const Tensor& k, float scale);
 Tensor attention_apply(const Tensor& probs, const Tensor& v);
 QKV qkv_split(const Tensor& packed, int64_t q_dim, int64_t kv_dim);
+QKV qkv_split(const Tensor& packed, int64_t q_dim, int64_t k_dim, int64_t v_dim);
 Tensor rope(const Tensor& x, int n_head, int64_t batch_size, int64_t seq_len,
             float theta = 10000.0f, int64_t rotary_dim = 0, int64_t token_offset = 0);
 Tensor rope_positions(const Tensor& x, const Tensor& positions, int n_head,

@@ -1,0 +1,44 @@
+// Softmax cross-entropy per-row losses. Subgroup reduction variant.
+#version 450
+
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer LogitsBuf { float logits[]; };
+layout(std430, set = 0, binding = 1) readonly buffer TargetsBuf { int targets[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer PartialBuf { float partial_loss[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint cols;
+} p;
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (row >= p.rows) return;
+    const uint base = row * p.cols;
+
+    float maxv = -3.402823466e+38;
+    for (uint c = lane; c < p.cols; c += 64u) {
+        maxv = max(maxv, logits[base + c]);
+    }
+    maxv = subgroupMax(maxv);
+
+    float sum = 0.0;
+    for (uint c = lane; c < p.cols; c += 64u) {
+        sum += exp(logits[base + c] - maxv);
+    }
+    sum = subgroupAdd(sum);
+
+    if (lane == 0u) {
+        const int target = targets[row];
+        if (target < 0 || uint(target) >= p.cols) {
+            partial_loss[row] = 0.0;
+        } else {
+            partial_loss[row] = log(sum) + maxv - logits[base + uint(target)];
+        }
+    }
+}

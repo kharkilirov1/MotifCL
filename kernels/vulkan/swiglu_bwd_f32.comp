@@ -1,0 +1,36 @@
+// SwiGLU backward over packed [rows, 2*hidden] (gate | up):
+//   dgate = dy * up * (sig + gate * sig * (1 - sig))
+//   dup   = dy * gate * sig
+// Matches kernels/activation.cl swiglu_backward_f32. One invocation per
+// packed element (both halves).
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer PackedBuf { float packed_in[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DyBuf { float dy[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer DPackedBuf { float dpacked[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint hidden;
+} p;
+
+void main() {
+    const uint gid = gl_GlobalInvocationID.x;
+    const uint total = p.rows * p.hidden * 2u;
+    if (gid >= total) return;
+    const uint row = gid / (p.hidden * 2u);
+    const uint col2 = gid - row * (p.hidden * 2u);
+    const uint col = col2 < p.hidden ? col2 : col2 - p.hidden;
+    const uint base = row * (p.hidden * 2u);
+    const float gate = packed_in[base + col];
+    const float up = packed_in[base + p.hidden + col];
+    const float go = dy[row * p.hidden + col];
+    const float sig = 1.0 / (1.0 + exp(-gate));
+    if (col2 < p.hidden) {
+        dpacked[gid] = go * up * (sig + gate * sig * (1.0 - sig));
+    } else {
+        dpacked[gid] = go * gate * sig;
+    }
+}

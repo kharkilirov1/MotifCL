@@ -43,14 +43,14 @@ bool strict_vulkan_elementwise_required() {
 }
 
 bool vulkan_add_supported(const Tensor& a, const Tensor& b) {
-    return a.dtype() == DType::F32 &&
-           b.dtype() == DType::F32 &&
-           a.shape() == b.shape() &&
-           a.backend_ptr() == b.backend_ptr() &&
-           a.numel() > 0 &&
-           a.numel() <= static_cast<int64_t>(1u << 20u) &&
-           !a.requires_grad() &&
-           !b.requires_grad();
+    const bool base = a.dtype() == DType::F32 &&
+                      b.dtype() == DType::F32 &&
+                      a.shape() == b.shape() &&
+                      a.backend_ptr() == b.backend_ptr() &&
+                      a.numel() > 0;
+    if (!base) return false;
+    if (a.backend().is_vulkan()) return true;
+    return a.numel() <= static_cast<int64_t>(1u << 20u) && !a.requires_grad() && !b.requires_grad();
 }
 
 Tensor add_vulkan_f32(const Tensor& a, const Tensor& b, const VulkanF32TensorResult& result) {
@@ -62,8 +62,51 @@ Tensor add_vulkan_f32(const Tensor& a, const Tensor& b, const VulkanF32TensorRes
     return out;
 }
 
+Tensor add_vulkan_f32_device(const Tensor& a, const Tensor& b) {
+    auto out = Tensor::empty(a.backend(), a.shape(), DType::F32);
+    const auto result = run_vulkan_add(a.backend().vulkan_runtime(),
+                                       a.storage().vulkan_buffer,
+                                       b.storage().vulkan_buffer,
+                                       out.storage().vulkan_buffer,
+                                       static_cast<std::size_t>(a.numel()));
+    MCL_CHECK(result.success, std::string("vulkan add f32 failed: ") + result.error);
+    autograd::record_op("add_vulkan_f32", {a.id(), b.id()}, {out.id()});
+    return out;
+}
+
+// sub Vulkan helpers — mirror add. Reused for inverse coupling in reversible blocks.
+bool vulkan_sub_supported(const Tensor& a, const Tensor& b) {
+    const bool base = a.dtype() == DType::F32 &&
+                      b.dtype() == DType::F32 &&
+                      a.shape() == b.shape() &&
+                      a.backend_ptr() == b.backend_ptr() &&
+                      a.numel() > 0;
+    if (!base) return false;
+    // sub on Vulkan only needs the device-resident path (no standalone vector
+    // fallback for host-staging tensors — call sites use real Vulkan backends).
+    return a.backend().is_vulkan();
+}
+
+Tensor sub_vulkan_f32_device(const Tensor& a, const Tensor& b) {
+    auto out = Tensor::empty(a.backend(), a.shape(), DType::F32);
+    const auto result = run_vulkan_sub(a.backend().vulkan_runtime(),
+                                       a.storage().vulkan_buffer,
+                                       b.storage().vulkan_buffer,
+                                       out.storage().vulkan_buffer,
+                                       static_cast<std::size_t>(a.numel()));
+    MCL_CHECK(result.success, std::string("vulkan sub f32 failed: ") + result.error);
+    autograd::record_op("sub_vulkan_f32", {a.id(), b.id()}, {out.id()});
+    return out;
+}
+
 Tensor elementwise_binary(const Tensor& a, const Tensor& b, const std::string& kernel_name) {
     require_f32_same_shape(a, b, kernel_name.c_str());
+    // add/sub have dedicated Vulkan device paths; mul/div (and any future
+    // elementwise binary) still go through the OpenCL kernel cache. Refuse
+    // Vulkan here so the failure is loud instead of a null-context crash.
+    MCL_CHECK(!a.backend().is_vulkan(),
+              std::string(kernel_name) + " is not Vulkan-native yet (only add/sub have Vulkan device paths; "
+              "use OpenCL backend or wait for the binary-op slice)");
     auto out = Tensor::empty(a.backend(), a.shape(), DType::F32);
     auto k = a.backend().kernels.get(kernel_name);
     int n = static_cast<int>(a.numel());
@@ -157,6 +200,21 @@ Tensor reduce_broadcast_gradient(const Tensor& grad, const Shape& target_shape) 
 Tensor elementwise_scalar(const Tensor& x, float value, const std::string& kernel_name) {
     MCL_CHECK(x.dtype() == DType::F32, kernel_name + " supports f32 only");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    // Vulkan device-resident path for the two scalar kernels that the backward
+    // chain (SubBackward/MulBackward/DivBackward/ScalarBackward) needs.
+    if (x.backend().is_vulkan()) {
+        const auto n = static_cast<std::size_t>(x.numel());
+        const auto result = kernel_name == "mul_scalar_f32"
+            ? run_vulkan_mul_scalar(x.backend().vulkan_runtime(),
+                                    x.storage().vulkan_buffer,
+                                    out.storage().vulkan_buffer, n, value)
+            : run_vulkan_add_scalar(x.backend().vulkan_runtime(),
+                                    x.storage().vulkan_buffer,
+                                    out.storage().vulkan_buffer, n, value);
+        MCL_CHECK(result.success, std::string("vulkan ") + kernel_name + " failed: " + result.error);
+        autograd::record_op(kernel_name, {x.id()}, {out.id()});
+        return out;
+    }
     auto k = x.backend().kernels.get(kernel_name);
     int n = static_cast<int>(x.numel());
     k.set_arg(0, x.buffer());
@@ -339,8 +397,13 @@ Tensor ones_like(const Tensor& x) { return Tensor::ones(x.backend(), x.shape(), 
 Tensor add(const Tensor& a, const Tensor& b) {
     if (a.shape() != b.shape()) return add_broadcast(a, b);
     const auto selected_backend = selected_elementwise_backend();
-    if (selected_backend.kind == MicrokernelBackendKind::Vulkan &&
+    if ((a.backend().is_vulkan() || selected_backend.kind == MicrokernelBackendKind::Vulkan) &&
         vulkan_add_supported(a, b)) {
+        if (a.backend().is_vulkan()) {
+            auto out = add_vulkan_f32_device(a, b);
+            attach_binary_grad(out, a, b, std::make_shared<AddBackward>(a, b));
+            return out;
+        }
         const auto a_host = a.to_vector<float>();
         const auto b_host = b.to_vector<float>();
         const auto result = run_vulkan_add(a_host, b_host);
@@ -348,6 +411,7 @@ Tensor add(const Tensor& a, const Tensor& b) {
         MCL_CHECK(!strict_vulkan_elementwise_required(),
                   std::string("vulkan add f32 failed: ") + result.error);
     }
+    MCL_CHECK(!a.backend().is_vulkan(), "vulkan backend does not support this add shape");
     auto out = elementwise_binary(a, b, "add_f32");
     attach_binary_grad(out, a, b, std::make_shared<AddBackward>(a, b));
     return out;
@@ -379,6 +443,12 @@ Tensor add_broadcast(const Tensor& a, const Tensor& b) {
 }
 
 Tensor sub(const Tensor& a, const Tensor& b) {
+    if (a.shape() == b.shape() && a.backend().is_vulkan() && vulkan_sub_supported(a, b)) {
+        auto out = sub_vulkan_f32_device(a, b);
+        attach_binary_grad(out, a, b, std::make_shared<SubBackward>(a, b));
+        return out;
+    }
+    MCL_CHECK(!a.backend().is_vulkan(), "vulkan backend does not support this sub shape");
     auto out = elementwise_binary(a, b, "sub_f32");
     attach_binary_grad(out, a, b, std::make_shared<SubBackward>(a, b));
     return out;
@@ -452,6 +522,14 @@ Tensor scale(const Tensor& x, float alpha) {
 
 void scale_inplace(Tensor& x, float alpha) {
     MCL_CHECK(x.dtype() == DType::F32, "scale_inplace supports f32 only");
+    // OpenCL-only in-place kernel; Vulkan has run_vulkan_mul_scalar but it
+    // requires distinct input/output buffers (readonly+writeonly aliasing in
+    // one dispatch is UB). Gradient clipping (training_utils.cpp) and mixed-
+    // precision unscaling (mixed_precision.cpp) on Vulkan require an in-place
+    // Vulkan kernel — Slice gap, see VULKAN_PORT_PROTOCOL.md.
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "scale_inplace is not Vulkan-native yet (needs an in-place device kernel; "
+              "use scale() + assign or OpenCL backend)");
     auto k = x.backend().kernels.get("scale_f32");
     int n = static_cast<int>(x.numel());
     k.set_arg(0, x.buffer());
@@ -463,6 +541,9 @@ void scale_inplace(Tensor& x, float alpha) {
 
 void add_inplace(Tensor& dst, const Tensor& src) {
     require_f32_same_shape(dst, src, "add_inplace");
+    MCL_CHECK(!dst.backend().is_vulkan(),
+              "add_inplace is not Vulkan-native yet (needs an in-place device kernel; "
+              "use add() + assign or OpenCL backend)");
     auto k = dst.backend().kernels.get("add_inplace_f32");
     int n = static_cast<int>(dst.numel());
     k.set_arg(0, dst.buffer());
@@ -478,6 +559,22 @@ Tensor add_bias_rows(const Tensor& x, const Tensor& bias) {
     MCL_CHECK(x.shape()[1] == bias.shape()[0], "bias dimension mismatch");
     MCL_CHECK(x.backend_ptr() == bias.backend_ptr(), "add_bias_rows requires tensors on same backend");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+    if (x.backend().is_vulkan()) {
+        const auto result = run_vulkan_add_bias_rows(
+            x.backend().vulkan_runtime(),
+            x.storage().vulkan_buffer,
+            bias.storage().vulkan_buffer,
+            out.storage().vulkan_buffer,
+            static_cast<std::size_t>(x.shape()[0]),
+            static_cast<std::size_t>(x.shape()[1]));
+        MCL_CHECK(result.success, std::string("vulkan add_bias_rows failed: ") + result.error);
+        autograd::record_op("add_bias_rows_vulkan_f32", {x.id(), bias.id()}, {out.id()});
+        if (autograd::is_enabled() && (x.requires_grad() || bias.requires_grad())) {
+            out.set_requires_grad(true);
+            out._set_grad_fn(std::make_shared<AddBiasRowsBackward>(x, bias));
+        }
+        return out;
+    }
     auto k = x.backend().kernels.get("add_bias_rows_f32");
     int rows = static_cast<int>(x.shape()[0]);
     int cols = static_cast<int>(x.shape()[1]);
@@ -501,6 +598,8 @@ Tensor mul_rows(const Tensor& x, const Tensor& scale) {
     MCL_CHECK(x.ndim() == 2 && scale.ndim() == 1, "mul_rows expects x [rows, cols] and scale [cols]");
     MCL_CHECK(x.shape()[1] == scale.shape()[0], "mul_rows scale dimension mismatch");
     MCL_CHECK(x.backend_ptr() == scale.backend_ptr(), "mul_rows requires tensors on same backend");
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "mul_rows is not Vulkan-native yet (use OpenCL backend)");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     auto k = x.backend().kernels.get("mul_rows_f32");
     int rows = static_cast<int>(x.shape()[0]);
@@ -521,6 +620,8 @@ Tensor add_bias_gelu_rows(const Tensor& x, const Tensor& bias) {
     MCL_CHECK(x.ndim() == 2 && bias.ndim() == 1, "add_bias_gelu_rows expects x [rows, cols] and bias [cols]");
     MCL_CHECK(x.shape()[1] == bias.shape()[0], "add_bias_gelu_rows bias dimension mismatch");
     MCL_CHECK(x.backend_ptr() == bias.backend_ptr(), "add_bias_gelu_rows requires tensors on same backend");
+    MCL_CHECK(!x.backend().is_vulkan(),
+              "add_bias_gelu_rows is not Vulkan-native yet (use OpenCL backend)");
     auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
     auto k = x.backend().kernels.get("add_bias_gelu_rows_f32");
     int rows = static_cast<int>(x.shape()[0]);

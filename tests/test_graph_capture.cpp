@@ -171,7 +171,13 @@ int main() {
             backend.finish();
             if (static_step.executions() != 1) return 43;
             const float replay_loss = static_step.loss().item();
-            if (!std::isfinite(captured_loss) || !std::isfinite(replay_loss)) return 44;
+            if (!std::isfinite(captured_loss) || !std::isfinite(replay_loss)) {
+                std::cerr << "graph_capture: non-finite loss on static-step replay: captured="
+                          << captured_loss << " replay=" << replay_loss
+                          << " arena_bindings=" << static_step.arena_binding_count()
+                          << " arena_bytes=" << static_step.arena_bytes() << '\n';
+                return 44;
+            }
             if (std::fabs(captured_loss - replay_loss) < 1e-7f) return 45;
 
             std::vector<float> x2_host = {-1.0f, 3.0f, 2.0f, -0.5f};
@@ -184,7 +190,11 @@ int main() {
             });
             backend.finish();
             if (static_step.executions() != 2 || static_step.bound_tensor_count() != 2) return 47;
-            if (!std::isfinite(rebound_loss)) return 48;
+            if (!std::isfinite(rebound_loss)) {
+                std::cerr << "graph_capture: non-finite loss after rebinding: rebound="
+                          << rebound_loss << '\n';
+                return 48;
+            }
         }
 
         ag::GraphCaptureGuard guard;

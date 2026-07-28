@@ -1,0 +1,31 @@
+// Token + position embedding: out[bt, d] = token_weight[token_ids[bt], d] + pos_weight[bt%T, d].
+// One invocation per output element. Matches kernels/embedding.cl:token_position_embedding_f32_i32.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer TWBuf { float token_weight[]; };
+layout(std430, set = 0, binding = 1) readonly buffer PWBuf { float pos_weight[]; };
+layout(std430, set = 0, binding = 2) readonly buffer IBuf { int token_ids[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer OBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    int vocab_size;
+    int seq_len;
+    int embed_dim;
+    int n;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    if (gid >= p.n) return;
+    const int d = gid % p.embed_dim;
+    const int token_linear = gid / p.embed_dim;
+    const int pos = token_linear % p.seq_len;
+    const int token_id = token_ids[token_linear];
+    float tok = 0.0;
+    if (token_id >= 0 && token_id < p.vocab_size) {
+        tok = token_weight[token_id * p.embed_dim + d];
+    }
+    outv[gid] = tok + pos_weight[pos * p.embed_dim + d];
+}

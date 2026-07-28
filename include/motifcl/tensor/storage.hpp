@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <motifcl/runtime/buffer.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 
 namespace motifcl {
 
@@ -20,6 +21,7 @@ public:
     Storage& operator=(Storage&&) noexcept = default;
 
     Buffer buffer;
+    VulkanBuffer vulkan_buffer;
     std::size_t nbytes = 0;
     bool pooled = false;
 };

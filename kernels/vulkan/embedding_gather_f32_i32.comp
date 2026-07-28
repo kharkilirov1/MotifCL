@@ -1,0 +1,29 @@
+// Embedding gather: out[token, d] = weight[indices[token], d] (0 when index OOB).
+// One invocation per output element (coalesced). Mirrors the OpenCL formula in
+// kernels/embedding.cl:embedding_gather_f32_i32 bit-for-bit.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer WBuf { float weight[]; };
+layout(std430, set = 0, binding = 1) readonly buffer IBuf { int indices[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    int vocab_size;
+    int embed_dim;
+    int n;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    if (gid >= p.n) return;
+    const int token = gid / p.embed_dim;
+    const int d = gid - token * p.embed_dim;
+    const int idx = indices[token];
+    if (idx < 0 || idx >= p.vocab_size) {
+        outv[gid] = 0.0;
+    } else {
+        outv[gid] = weight[idx * p.embed_dim + d];
+    }
+}

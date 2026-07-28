@@ -38,7 +38,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise ImportError(
         "Failed to import motifcl native extension. Ensure the wheel was built for "
-        "this Python version and required OpenCL/compiler runtime DLLs are available."
+        "this Python version and required Vulkan/OpenCL/compiler runtime DLLs are available."
     ) from exc
 
 

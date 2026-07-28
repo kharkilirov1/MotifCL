@@ -1,0 +1,51 @@
+// Row softmax with max-subtraction, one wave64 workgroup per row.
+// Shared-memory reductions (Polaris has no subgroup reduce).
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint cols;
+} p;
+
+shared float scratch[64];
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (row >= p.rows) return;
+    const uint base = row * p.cols;
+
+    float maxv = -3.402823466e+38;
+    for (uint c = lane; c < p.cols; c += 64u) {
+        maxv = max(maxv, x[base + c]);
+    }
+    scratch[lane] = maxv;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) scratch[lane] = max(scratch[lane], scratch[lane + stride]);
+        barrier();
+    }
+    maxv = scratch[0];
+    barrier();
+
+    float sum = 0.0;
+    for (uint c = lane; c < p.cols; c += 64u) {
+        sum += exp(x[base + c] - maxv);
+    }
+    scratch[lane] = sum;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) scratch[lane] += scratch[lane + stride];
+        barrier();
+    }
+    const float inv_sum = 1.0 / scratch[0];
+
+    for (uint c = lane; c < p.cols; c += 64u) {
+        outv[base + c] = exp(x[base + c] - maxv) * inv_sum;
+    }
+}

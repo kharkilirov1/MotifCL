@@ -1,0 +1,41 @@
+// Decode packed counter state -> dense ternary weight, matching
+// kernels/compact_counter.cl decode_counter_state_weight_f32:
+//   w[row, g*4+k] = scale[row] * t   with t = code/(2C-1) - 1.
+// One invocation per packed group of 4 weights.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer StateBuf { uint8_t state[]; };
+layout(std430, set = 0, binding = 1) readonly buffer ScaleBuf { float scale[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer WBuf { float w[]; };
+
+layout(push_constant) uniform Push {
+    int C;
+    int in_features;
+    int n_groups;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    if (gid >= p.n_groups) return;
+    const int gpr = p.in_features / 4;
+    const int row = gid / gpr;
+    const int g = gid - row * gpr;
+    const int base = gid * 3;
+    const int b0 = int(uint(state[base]));
+    const int b1 = int(uint(state[base + 1]));
+    const int b2 = int(uint(state[base + 2]));
+    int cc[4];
+    cc[0] = b0 & 0x3F;
+    cc[1] = ((b0 >> 6) | (b1 << 2)) & 0x3F;
+    cc[2] = ((b1 >> 4) | (b2 << 4)) & 0x3F;
+    cc[3] = (b2 >> 2) & 0x3F;
+    const int lv = 2 * p.C - 1;
+    const float s = scale[row];
+    for (int k = 0; k < 4; ++k) {
+        const int t = cc[k] / lv - 1;
+        w[row * p.in_features + g * 4 + k] = s * float(t);
+    }
+}

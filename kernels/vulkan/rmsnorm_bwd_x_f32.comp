@@ -1,0 +1,53 @@
+// RMSNorm backward w.r.t. x, one wave64 workgroup per row:
+//   inv = rsqrt(mean(x^2) + eps); dot = sum(dy * w * x)
+//   dx  = dy * w * inv - x * inv^3 * dot / cols
+// Matches kernels/norm.cl rmsnorm_backward_x_wg_f32.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) readonly buffer WBuf { float w[]; };
+layout(std430, set = 0, binding = 2) readonly buffer DyBuf { float dy[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer DxBuf { float dx[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint cols;
+    float eps;
+} p;
+
+shared float scratch_ss[64];
+shared float scratch_dot[64];
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (row >= p.rows) return;
+    const uint base = row * p.cols;
+
+    float ss = 0.0;
+    float dot = 0.0;
+    for (uint c = lane; c < p.cols; c += 64u) {
+        const float xv = x[base + c];
+        ss += xv * xv;
+        dot += dy[base + c] * w[c] * xv;
+    }
+    scratch_ss[lane] = ss;
+    scratch_dot[lane] = dot;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            scratch_ss[lane] += scratch_ss[lane + stride];
+            scratch_dot[lane] += scratch_dot[lane + stride];
+        }
+        barrier();
+    }
+    const float inv = inversesqrt(scratch_ss[0] / float(p.cols) + p.eps);
+    dot = scratch_dot[0];
+
+    for (uint c = lane; c < p.cols; c += 64u) {
+        const uint idx = base + c;
+        dx[idx] = dy[idx] * w[c] * inv - x[idx] * inv * inv * inv * dot / float(p.cols);
+    }
+}

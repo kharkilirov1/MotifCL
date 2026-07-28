@@ -1,0 +1,18 @@
+// Elementwise sub: out = a - b, one invocation per element (coalesced).
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { float a[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BBuf { float b[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+} p;
+
+void main() {
+    const uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+    outv[gid] = a[gid] - b[gid];
+}

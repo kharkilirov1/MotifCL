@@ -1,0 +1,51 @@
+// RoPE (interleaved pair layout): for each output element, either copy (d >= rd)
+// or apply the even/odd rotation pair. Reused for backward via the inverse flag
+// (rotating by -angle), matching the OpenCL rope_impl reuse pattern.
+// Mirrors kernels/attention.cl:rope_f32.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer OBuf { float outv[]; };
+
+layout(push_constant) uniform Push {
+    int batch;
+    int tokens;
+    int channels;
+    int n_head;
+    int head_dim;
+    int rotary_dim;
+    int token_offset;
+    float theta;
+    int inverse;   // 0 forward, 1 backward (negate angle)
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    const int total = p.batch * p.tokens * p.channels;
+    if (gid >= total) return;
+    const int d = gid % p.head_dim;
+    const int c = gid % p.channels;
+    const int token = (gid / p.channels) % p.tokens;
+    const int b = gid / (p.tokens * p.channels);
+    const int head = c / p.head_dim;
+    if (head >= p.n_head) return;
+    int rd = p.rotary_dim <= 0 ? p.head_dim : p.rotary_dim;
+    rd = min(rd, p.head_dim);
+    rd = rd - (rd & 1);
+    if (d >= rd) {
+        outv[gid] = x[gid];
+        return;
+    }
+    const int pair_d = d & ~1;
+    const float exponent = float(pair_d) / float(p.head_dim);
+    float angle = float(p.token_offset + token) / pow(p.theta, exponent);
+    if (p.inverse != 0) angle = -angle;
+    const float cs = cos(angle);
+    const float sn = sin(angle);
+    const int base = (b * p.tokens + token) * p.channels + head * p.head_dim;
+    const float even = x[base + pair_d];
+    const float odd  = x[base + pair_d + 1];
+    outv[gid] = (d == pair_d) ? (even * cs - odd * sn) : (even * sn + odd * cs);
+}

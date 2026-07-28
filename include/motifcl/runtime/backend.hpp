@@ -7,11 +7,17 @@
 #include <motifcl/runtime/opencl_context.hpp>
 #include <motifcl/runtime/program.hpp>
 #include <motifcl/runtime/profiler.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
 
 namespace motifcl {
 
 struct BackendLifetime {
     bool alive = true;
+};
+
+enum class BackendKind {
+    OpenCL,
+    Vulkan,
 };
 
 class KernelCache {
@@ -50,10 +56,17 @@ public:
     Backend& operator=(Backend&& other) noexcept;
 
     static Backend create_opencl(const std::string& kernel_dir = "");
+    static Backend create_vulkan();
     static Backend create() { return create_opencl(); }
 
-    void finish() const { ctx.finish(); }
-    DeviceInfo device_info() const { return ctx.info(); }
+    BackendKind kind() const { return kind_; }
+    bool is_opencl() const { return kind_ == BackendKind::OpenCL; }
+    bool is_vulkan() const { return kind_ == BackendKind::Vulkan; }
+    VulkanRuntime& vulkan_runtime();
+    const VulkanRuntime& vulkan_runtime() const;
+
+    void finish() const;
+    DeviceInfo device_info() const;
     bool supports_integer_dot() const;
     std::string int_dot_mode() const;
     bool supports_command_buffer() const;
@@ -62,6 +75,8 @@ public:
     std::shared_ptr<BackendLifetime> lifetime_handle() const { return lifetime_; }
 
 private:
+    BackendKind kind_ = BackendKind::OpenCL;
+    std::shared_ptr<VulkanRuntime> vulkan_runtime_;
     std::shared_ptr<BackendLifetime> lifetime_ = std::make_shared<BackendLifetime>();
 };
 
