@@ -243,6 +243,12 @@ int main() {
         throw;
     }
 
+    // HF-parsed configs defer weight init (real loads fill weights from disk); this
+    // weightless smoke test forwards random-init models, so opt back in explicitly.
+    cfg.transformer.skip_weight_init = false;
+    gemma4_cfg.transformer.skip_weight_init = false;
+    qwen35_cfg.transformer.skip_weight_init = false;
+
     auto qwen35_hybrid = motifcl::nn::make_hf_hybrid_transformer_model(backend, qwen35_cfg);
     std::vector<int32_t> qwen35_token_values{65, 66, 67};
     auto qwen35_tokens = motifcl::Tensor::from_cpu(backend, {1, 3}, motifcl::DType::I32, qwen35_token_values.data());
