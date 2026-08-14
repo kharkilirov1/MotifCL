@@ -7963,6 +7963,193 @@ VulkanOpResult run_vulkan_add(VulkanRuntime& runtime,
                                    static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
 }
 
+VulkanOpResult run_vulkan_mul(VulkanRuntime& runtime,
+                              const VulkanBuffer& a,
+                              const VulkanBuffer& b,
+                              VulkanBuffer& out,
+                              std::size_t elements) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) { result.error = message; return result; };
+    if (elements == 0) return fail("Vulkan mul requires non-zero element count");
+    const auto nbytes = elements * sizeof(float);
+    if (a.nbytes() < nbytes || b.nbytes() < nbytes || out.nbytes() < nbytes) {
+        return fail("Vulkan mul buffer is too small");
+    }
+    const struct { std::uint32_t n; } push{static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&a, &b, &out};
+    return runtime.dispatch_cached(vkspirv::k_mul_f32, vkspirv::k_mul_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_silu(VulkanRuntime& runtime,
+                               const VulkanBuffer& x,
+                               VulkanBuffer& out,
+                               std::size_t elements) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) { result.error = message; return result; };
+    if (elements == 0) return fail("Vulkan SiLU requires non-zero element count");
+    const auto nbytes = elements * sizeof(float);
+    if (x.nbytes() < nbytes || out.nbytes() < nbytes) return fail("Vulkan SiLU buffer is too small");
+    const struct { std::uint32_t n; } push{static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &out};
+    return runtime.dispatch_cached(vkspirv::k_silu_f32, vkspirv::k_silu_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_silu_backward(VulkanRuntime& runtime,
+                                        const VulkanBuffer& x,
+                                        const VulkanBuffer& grad_out,
+                                        VulkanBuffer& grad_x,
+                                        std::size_t elements) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) { result.error = message; return result; };
+    if (elements == 0) return fail("Vulkan SiLU backward requires non-zero element count");
+    const auto nbytes = elements * sizeof(float);
+    if (x.nbytes() < nbytes || grad_out.nbytes() < nbytes || grad_x.nbytes() < nbytes) {
+        return fail("Vulkan SiLU backward buffer is too small");
+    }
+    const struct { std::uint32_t n; } push{static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &grad_out, &grad_x};
+    return runtime.dispatch_cached(vkspirv::k_silu_bwd_f32, vkspirv::k_silu_bwd_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_sigmoid(VulkanRuntime& runtime,
+                                  const VulkanBuffer& x,
+                                  VulkanBuffer& out,
+                                  std::size_t elements) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) { result.error = message; return result; };
+    if (elements == 0) return fail("Vulkan sigmoid requires non-zero element count");
+    const auto nbytes = elements * sizeof(float);
+    if (x.nbytes() < nbytes || out.nbytes() < nbytes) return fail("Vulkan sigmoid buffer is too small");
+    const struct { std::uint32_t n; } push{static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &out};
+    return runtime.dispatch_cached(vkspirv::k_sigmoid_f32, vkspirv::k_sigmoid_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_sigmoid_backward(VulkanRuntime& runtime,
+                                           const VulkanBuffer& y,
+                                           const VulkanBuffer& grad_out,
+                                           VulkanBuffer& grad_x,
+                                           std::size_t elements) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) { result.error = message; return result; };
+    if (elements == 0) return fail("Vulkan sigmoid backward requires non-zero element count");
+    const auto nbytes = elements * sizeof(float);
+    if (y.nbytes() < nbytes || grad_out.nbytes() < nbytes || grad_x.nbytes() < nbytes) {
+        return fail("Vulkan sigmoid backward buffer is too small");
+    }
+    const struct { std::uint32_t n; } push{static_cast<std::uint32_t>(elements)};
+    const std::vector<const VulkanBuffer*> buffers = {&y, &grad_out, &grad_x};
+    return runtime.dispatch_cached(vkspirv::k_sigmoid_bwd_f32, vkspirv::k_sigmoid_bwd_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_fog_block_product(VulkanRuntime& runtime,
+                                            const VulkanBuffer& value,
+                                            const VulkanBuffer& addressed,
+                                            VulkanBuffer& out,
+                                            std::size_t rows,
+                                            std::size_t d_model) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) { result.error = message; return result; };
+    if (rows == 0 || d_model == 0 || (d_model & 1u) != 0) {
+        return fail("FOG block-product requires rows>0 and even d_model");
+    }
+    const auto nbytes = rows * d_model * sizeof(float);
+    if (value.nbytes() < nbytes || addressed.nbytes() < nbytes || out.nbytes() < nbytes) {
+        return fail("FOG block-product buffer is too small");
+    }
+    const struct { std::uint32_t rows; std::uint32_t d_model; }
+        push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(d_model)};
+    const std::vector<const VulkanBuffer*> buffers = {&value, &addressed, &out};
+    return runtime.dispatch_cached(vkspirv::k_fog_block_product_f32, vkspirv::k_fog_block_product_f32_words,
+                                   buffers, &push, sizeof(push), static_cast<std::uint32_t>(rows), 1, 1);
+}
+
+VulkanOpResult run_vulkan_fog_block_product_backward(VulkanRuntime& runtime,
+                                                     const VulkanBuffer& value,
+                                                     const VulkanBuffer& addressed,
+                                                     const VulkanBuffer& grad_out,
+                                                     VulkanBuffer& grad_value,
+                                                     VulkanBuffer& grad_addressed,
+                                                     std::size_t rows,
+                                                     std::size_t d_model) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) { result.error = message; return result; };
+    if (rows == 0 || d_model == 0 || (d_model & 1u) != 0) {
+        return fail("FOG block-product backward requires rows>0 and even d_model");
+    }
+    const auto nbytes = rows * d_model * sizeof(float);
+    if (value.nbytes() < nbytes || addressed.nbytes() < nbytes || grad_out.nbytes() < nbytes ||
+        grad_value.nbytes() < nbytes || grad_addressed.nbytes() < nbytes) {
+        return fail("FOG block-product backward buffer is too small");
+    }
+    const struct { std::uint32_t rows; std::uint32_t d_model; }
+        push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(d_model)};
+    const std::vector<const VulkanBuffer*> buffers = {&value, &addressed, &grad_out, &grad_value, &grad_addressed};
+    return runtime.dispatch_cached(vkspirv::k_fog_block_product_bwd_f32, vkspirv::k_fog_block_product_bwd_f32_words,
+                                   buffers, &push, sizeof(push), static_cast<std::uint32_t>(rows), 1, 1);
+}
+
+VulkanOpResult run_vulkan_fog_hard_route7(VulkanRuntime& runtime,
+                                          const VulkanBuffer& logits,
+                                          const std::vector<const VulkanBuffer*>& candidates,
+                                          VulkanBuffer& out,
+                                          std::size_t rows,
+                                          std::size_t d_model) {
+    VulkanOpResult result;
+    auto fail=[&](const std::string& msg){result.error=msg;return result;};
+    if(rows==0||d_model==0||candidates.size()!=7) return fail("FOG route7 invalid geometry/candidate count");
+    if(logits.nbytes()<rows*7*sizeof(float)||out.nbytes()<rows*d_model*sizeof(float)) return fail("FOG route7 buffer too small");
+    for(auto* c:candidates) if(c==nullptr||c->nbytes()<rows*d_model*sizeof(float)) return fail("FOG route7 candidate buffer too small");
+    const struct{std::uint32_t rows;std::uint32_t d;} push{static_cast<std::uint32_t>(rows),static_cast<std::uint32_t>(d_model)};
+    std::vector<const VulkanBuffer*> buffers; buffers.reserve(9); buffers.push_back(&logits); buffers.insert(buffers.end(),candidates.begin(),candidates.end()); buffers.push_back(&out);
+    return runtime.dispatch_cached(vkspirv::k_fog_hard_route7_f32,vkspirv::k_fog_hard_route7_f32_words,buffers,&push,sizeof(push),static_cast<std::uint32_t>((rows*d_model+63)/64),1,1);
+}
+
+VulkanOpResult run_vulkan_fog_hard_route7_candidate_backward(VulkanRuntime& runtime,
+                                                             const VulkanBuffer& logits,
+                                                             const VulkanBuffer& grad_out,
+                                                             VulkanBuffer& grad_candidate,
+                                                             std::size_t rows,
+                                                             std::size_t d_model,
+                                                             std::uint32_t candidate) {
+    VulkanOpResult result;
+    auto fail=[&](const std::string& msg){result.error=msg;return result;};
+    if(rows==0||d_model==0||candidate>=7) return fail("FOG route7 candidate backward invalid args");
+    const auto nb=rows*d_model*sizeof(float);
+    if(logits.nbytes()<rows*7*sizeof(float)||grad_out.nbytes()<nb||grad_candidate.nbytes()<nb) return fail("FOG route7 candidate backward buffer too small");
+    const struct{std::uint32_t rows;std::uint32_t d;std::uint32_t candidate;} push{static_cast<std::uint32_t>(rows),static_cast<std::uint32_t>(d_model),candidate};
+    const std::vector<const VulkanBuffer*> buffers={&logits,&grad_out,&grad_candidate};
+    return runtime.dispatch_cached(vkspirv::k_fog_hard_route7_candidate_bwd_f32,vkspirv::k_fog_hard_route7_candidate_bwd_f32_words,buffers,&push,sizeof(push),static_cast<std::uint32_t>((rows*d_model+63)/64),1,1);
+}
+
+VulkanOpResult run_vulkan_fog_hard_route7_logits_backward(VulkanRuntime& runtime,
+                                                          const VulkanBuffer& logits,
+                                                          const std::vector<const VulkanBuffer*>& candidates,
+                                                          const VulkanBuffer& grad_out,
+                                                          VulkanBuffer& grad_logits,
+                                                          std::size_t rows,
+                                                          std::size_t d_model) {
+    VulkanOpResult result;
+    auto fail=[&](const std::string& msg){result.error=msg;return result;};
+    if(rows==0||d_model==0||candidates.size()!=7) return fail("FOG route7 logits backward invalid args");
+    const auto nb=rows*d_model*sizeof(float);
+    if(logits.nbytes()<rows*7*sizeof(float)||grad_out.nbytes()<nb||grad_logits.nbytes()<rows*7*sizeof(float)) return fail("FOG route7 logits backward buffer too small");
+    for(auto* c:candidates) if(c==nullptr||c->nbytes()<nb) return fail("FOG route7 logits backward candidate too small");
+    const struct{std::uint32_t rows;std::uint32_t d;} push{static_cast<std::uint32_t>(rows),static_cast<std::uint32_t>(d_model)};
+    std::vector<const VulkanBuffer*> buffers; buffers.reserve(10); buffers.push_back(&logits); buffers.insert(buffers.end(),candidates.begin(),candidates.end()); buffers.push_back(&grad_out); buffers.push_back(&grad_logits);
+    return runtime.dispatch_cached(vkspirv::k_fog_hard_route7_logits_bwd_f32,vkspirv::k_fog_hard_route7_logits_bwd_f32_words,buffers,&push,sizeof(push),static_cast<std::uint32_t>(rows),1,1);
+}
+
 VulkanOpResult run_vulkan_mul_scalar(VulkanRuntime& runtime,
                                      const VulkanBuffer& x,
                                      VulkanBuffer& out,

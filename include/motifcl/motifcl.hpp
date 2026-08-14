@@ -56,3 +56,7 @@
 #include <motifcl/gguf.hpp>
 
 namespace mcl = motifcl;
+
+#include <motifcl/nn/fog_v3.hpp>
+
+#include <motifcl/ops/fog.hpp>

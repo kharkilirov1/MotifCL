@@ -7,6 +7,9 @@ set(MOTIFCL_EXAMPLES
     06_motif_lora
     07_long_train_checkpoint
     08_shakespeare_10m_train
+    09_fog_v3_rx580_pretrain
+    10_fog_v3_operator_gate
+    11_fog_v3_structured_machine_gate
 )
 
 foreach(example ${MOTIFCL_EXAMPLES})

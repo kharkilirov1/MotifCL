@@ -1,0 +1,14 @@
+// SiLU backward: dx = dy * sigmoid(x) * (1 + x * (1 - sigmoid(x))).
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DyBuf { float dy[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer DxBuf { float dx[]; };
+layout(push_constant) uniform Push { uint n; } p;
+void main() {
+    const uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+    const float v = x[gid];
+    const float s = 1.0 / (1.0 + exp(-v));
+    dx[gid] = dy[gid] * s * (1.0 + v * (1.0 - s));
+}

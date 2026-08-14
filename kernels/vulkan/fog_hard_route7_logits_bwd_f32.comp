@@ -1,0 +1,38 @@
+// Straight-through router gradient: forward is argmax, d(weights)/d(logits)
+// follows a 7-way softmax, exactly matching hard + p - stopgrad(p).
+#version 450
+layout(local_size_x = 64) in;
+layout(std430,set=0,binding=0) readonly buffer L { float logits[]; };
+layout(std430,set=0,binding=1) readonly buffer C0 { float c0[]; };
+layout(std430,set=0,binding=2) readonly buffer C1 { float c1[]; };
+layout(std430,set=0,binding=3) readonly buffer C2 { float c2[]; };
+layout(std430,set=0,binding=4) readonly buffer C3 { float c3[]; };
+layout(std430,set=0,binding=5) readonly buffer C4 { float c4[]; };
+layout(std430,set=0,binding=6) readonly buffer C5 { float c5[]; };
+layout(std430,set=0,binding=7) readonly buffer C6 { float c6[]; };
+layout(std430,set=0,binding=8) readonly buffer G { float grad_out[]; };
+layout(std430,set=0,binding=9) writeonly buffer DL { float grad_logits[]; };
+layout(push_constant) uniform Push { uint rows; uint d; } p;
+shared float red[64];
+shared float gp[7];
+float pick(uint k,uint idx){
+    if(k==0u)return c0[idx]; if(k==1u)return c1[idx]; if(k==2u)return c2[idx];
+    if(k==3u)return c3[idx]; if(k==4u)return c4[idx]; if(k==5u)return c5[idx]; return c6[idx];
+}
+void main(){
+    uint row=gl_WorkGroupID.x; uint lid=gl_LocalInvocationID.x; if(row>=p.rows)return;
+    uint xbase=row*p.d;
+    for(uint k=0u;k<7u;++k){
+        float s=0.0; for(uint j=lid;j<p.d;j+=64u) s += grad_out[xbase+j]*pick(k,xbase+j);
+        red[lid]=s; barrier();
+        for(uint st=32u;st>0u;st>>=1u){if(lid<st)red[lid]+=red[lid+st];barrier();}
+        if(lid==0u) gp[k]=red[0]; barrier();
+    }
+    if(lid<7u){
+        uint lb=row*7u; float mx=logits[lb]; for(uint k=1u;k<7u;++k)mx=max(mx,logits[lb+k]);
+        float z=0.0; for(uint k=0u;k<7u;++k)z+=exp(logits[lb+k]-mx);
+        float mean=0.0; for(uint k=0u;k<7u;++k){float pk=exp(logits[lb+k]-mx)/z; mean+=pk*gp[k];}
+        float pi=exp(logits[lb+lid]-mx)/z;
+        grad_logits[lb+lid]=pi*(gp[lid]-mean);
+    }
+}

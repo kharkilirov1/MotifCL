@@ -1,0 +1,36 @@
+// FOG BLOCK_PRODUCT over adjacent real/imag pairs with per-row L2 normalization.
+// value/read: [rows, d_model], d_model even. out has fixed L2 norm sqrt(d_model).
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) readonly buffer ValueBuf { float value[]; };
+layout(std430, set = 0, binding = 1) readonly buffer ReadBuf { float readv[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+layout(push_constant) uniform Push { uint rows; uint d_model; } p;
+shared float scratch[64];
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lid = gl_LocalInvocationID.x;
+    if (row >= p.rows) return;
+    float ss = 0.0;
+    const uint base = row * p.d_model;
+    // First pass writes raw complex products and accumulates squared norm.
+    for (uint j = lid * 2u; j + 1u < p.d_model; j += 128u) {
+        const float vr = value[base + j];
+        const float vi = value[base + j + 1u];
+        const float rr = readv[base + j];
+        const float ri = readv[base + j + 1u];
+        const float zr = vr * rr - vi * ri;
+        const float zi = vr * ri + vi * rr;
+        outv[base + j] = zr;
+        outv[base + j + 1u] = zi;
+        ss += zr * zr + zi * zi;
+    }
+    scratch[lid] = ss;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lid < stride) scratch[lid] += scratch[lid + stride];
+        barrier();
+    }
+    const float inv = sqrt(float(p.d_model)) * inversesqrt(max(scratch[0], 1.0e-20));
+    for (uint j = lid; j < p.d_model; j += 64u) outv[base + j] *= inv;
+}

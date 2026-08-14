@@ -617,6 +617,63 @@ VulkanOpResult run_vulkan_add(VulkanRuntime& runtime,
                               const VulkanBuffer& b,
                               VulkanBuffer& out,
                               std::size_t elements);
+VulkanOpResult run_vulkan_mul(VulkanRuntime& runtime,
+                              const VulkanBuffer& a,
+                              const VulkanBuffer& b,
+                              VulkanBuffer& out,
+                              std::size_t elements);
+VulkanOpResult run_vulkan_silu(VulkanRuntime& runtime,
+                               const VulkanBuffer& x,
+                               VulkanBuffer& out,
+                               std::size_t elements);
+VulkanOpResult run_vulkan_silu_backward(VulkanRuntime& runtime,
+                                        const VulkanBuffer& x,
+                                        const VulkanBuffer& grad_out,
+                                        VulkanBuffer& grad_x,
+                                        std::size_t elements);
+VulkanOpResult run_vulkan_sigmoid(VulkanRuntime& runtime,
+                                  const VulkanBuffer& x,
+                                  VulkanBuffer& out,
+                                  std::size_t elements);
+VulkanOpResult run_vulkan_sigmoid_backward(VulkanRuntime& runtime,
+                                           const VulkanBuffer& y,
+                                           const VulkanBuffer& grad_out,
+                                           VulkanBuffer& grad_x,
+                                           std::size_t elements);
+VulkanOpResult run_vulkan_fog_block_product(VulkanRuntime& runtime,
+                                            const VulkanBuffer& value,
+                                            const VulkanBuffer& addressed,
+                                            VulkanBuffer& out,
+                                            std::size_t rows,
+                                            std::size_t d_model);
+VulkanOpResult run_vulkan_fog_block_product_backward(VulkanRuntime& runtime,
+                                                     const VulkanBuffer& value,
+                                                     const VulkanBuffer& addressed,
+                                                     const VulkanBuffer& grad_out,
+                                                     VulkanBuffer& grad_value,
+                                                     VulkanBuffer& grad_addressed,
+                                                     std::size_t rows,
+                                                     std::size_t d_model);
+VulkanOpResult run_vulkan_fog_hard_route7(VulkanRuntime& runtime,
+                                          const VulkanBuffer& logits,
+                                          const std::vector<const VulkanBuffer*>& candidates,
+                                          VulkanBuffer& out,
+                                          std::size_t rows,
+                                          std::size_t d_model);
+VulkanOpResult run_vulkan_fog_hard_route7_candidate_backward(VulkanRuntime& runtime,
+                                                             const VulkanBuffer& logits,
+                                                             const VulkanBuffer& grad_out,
+                                                             VulkanBuffer& grad_candidate,
+                                                             std::size_t rows,
+                                                             std::size_t d_model,
+                                                             std::uint32_t candidate);
+VulkanOpResult run_vulkan_fog_hard_route7_logits_backward(VulkanRuntime& runtime,
+                                                          const VulkanBuffer& logits,
+                                                          const std::vector<const VulkanBuffer*>& candidates,
+                                                          const VulkanBuffer& grad_out,
+                                                          VulkanBuffer& grad_logits,
+                                                          std::size_t rows,
+                                                          std::size_t d_model);
 // Elementwise scalar multiply/add: out = x * alpha / out = x + value.
 // Needed by scale/mul_scalar/add_scalar ops and the SubBackward/MulBackward/
 // DivBackward/ScalarBackward chains on Vulkan (closes the C2 review gap).

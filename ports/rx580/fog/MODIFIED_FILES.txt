@@ -1,0 +1,45 @@
+NEW FILES
+FOG_RX580_QUICKSTART_RU.md
+examples/cpp/09_fog_v3_rx580_pretrain.cpp
+examples/cpp/10_fog_v3_operator_gate.cpp
+examples/cpp/11_fog_v3_structured_machine_gate.cpp
+include/motifcl/nn/fog_v3.hpp
+include/motifcl/ops/fog.hpp
+kernels/vulkan/fog_block_product_bwd_f32.comp
+kernels/vulkan/fog_block_product_f32.comp
+kernels/vulkan/fog_hard_route7_candidate_bwd_f32.comp
+kernels/vulkan/fog_hard_route7_f32.comp
+kernels/vulkan/fog_hard_route7_logits_bwd_f32.comp
+kernels/vulkan/mul_f32.comp
+kernels/vulkan/sigmoid_bwd_f32.comp
+kernels/vulkan/sigmoid_f32.comp
+kernels/vulkan/silu_bwd_f32.comp
+kernels/vulkan/silu_f32.comp
+ports/rx580/fog/MODIFIED_FILES.txt
+ports/rx580/fog/PORT_MANIFEST.json
+ports/rx580/fog/PORT_STATUS.md
+ports/rx580/fog/README_RU.md
+ports/rx580/fog/build-fog-vulkan.ps1
+ports/rx580/fog/check-fog-rx580.ps1
+ports/rx580/fog/setup-and-check-fog-rx580.ps1
+ports/rx580/fog/tinystories_3k_bpe.json
+ports/rx580/fog/train-fog-v3.ps1
+src/nn/fog_v3.cpp
+src/ops/fog.cpp
+tests/test_fog_ops.cpp
+tools/fog/prepare_token_stream.py
+
+MODIFIED FILES
+CMakeLists.txt
+README.md
+examples/cpp/CMakeLists.txt
+include/motifcl/motifcl.hpp
+include/motifcl/ops/activation.hpp
+include/motifcl/runtime/vulkan_backend.hpp
+src/ops/activation.cpp
+src/ops/basic_ops.cpp
+src/runtime/vulkan_backend.cpp
+tests/CMakeLists.txt
+
+DELETED FILES
+

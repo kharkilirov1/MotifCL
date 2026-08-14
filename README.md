@@ -200,3 +200,9 @@ witness — tests, frozen pre-run forecasts, raw logs committed next to results,
 results reported first-class. The repo, not the author, answers technical questions.
 Status: **frozen** (July 2026) — out of money and hardware, not out of ideas.
 Everything reproduces from a cold clone.
+
+## FOG v3 on Radeon RX 580 (Vulkan port)
+
+A native Vulkan port of the FOG `register_machine_v3` research path is available under [`ports/rx580/fog`](ports/rx580/fog/README_RU.md). It targets MotifCL `main` and reuses the existing Vulkan transformer/autograd stack rather than requiring ROCm.
+
+Russian quick start: [`FOG_RX580_QUICKSTART_RU.md`](FOG_RX580_QUICKSTART_RU.md).

@@ -113,6 +113,7 @@ set(MOTIFCL_SOURCES
     src/tensor/allocator.cpp
     src/tensor/tensor.cpp
     src/ops/basic_ops.cpp
+    src/ops/fog.cpp
     src/ops/matmul.cpp
     src/ops/reduce.cpp
     src/ops/indexing.cpp
@@ -134,6 +135,7 @@ set(MOTIFCL_SOURCES
     src/solver/ternary_solver.cpp
     src/nn/reversible.cpp
     src/nn/embedding.cpp
+    src/nn/fog_v3.cpp
     src/nn/rmsnorm.cpp
     src/nn/attention.cpp
     src/nn/transformer.cpp

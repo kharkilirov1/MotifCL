@@ -1,0 +1,23 @@
+// Hard argmax route over seven [rows,d] candidates.
+#version 450
+layout(local_size_x = 64) in;
+layout(std430,set=0,binding=0) readonly buffer L { float logits[]; };
+layout(std430,set=0,binding=1) readonly buffer C0 { float c0[]; };
+layout(std430,set=0,binding=2) readonly buffer C1 { float c1[]; };
+layout(std430,set=0,binding=3) readonly buffer C2 { float c2[]; };
+layout(std430,set=0,binding=4) readonly buffer C3 { float c3[]; };
+layout(std430,set=0,binding=5) readonly buffer C4 { float c4[]; };
+layout(std430,set=0,binding=6) readonly buffer C5 { float c5[]; };
+layout(std430,set=0,binding=7) readonly buffer C6 { float c6[]; };
+layout(std430,set=0,binding=8) writeonly buffer O { float outv[]; };
+layout(push_constant) uniform Push { uint rows; uint d; } p;
+float pick(uint k,uint idx){
+    if(k==0u)return c0[idx]; if(k==1u)return c1[idx]; if(k==2u)return c2[idx];
+    if(k==3u)return c3[idx]; if(k==4u)return c4[idx]; if(k==5u)return c5[idx]; return c6[idx];
+}
+void main(){
+    uint gid=gl_GlobalInvocationID.x; uint n=p.rows*p.d; if(gid>=n)return;
+    uint row=gid/p.d; uint base=row*7u; uint best=0u; float bv=logits[base];
+    for(uint k=1u;k<7u;++k){float v=logits[base+k]; if(v>bv){bv=v;best=k;}}
+    outv[gid]=pick(best,gid);
+}

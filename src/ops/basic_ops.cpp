@@ -456,6 +456,19 @@ Tensor sub(const Tensor& a, const Tensor& b) {
 
 Tensor mul(const Tensor& a, const Tensor& b) {
     if (a.shape() != b.shape()) return mul_broadcast(a, b);
+    require_f32_same_shape(a, b, "mul");
+    if (a.backend().is_vulkan()) {
+        auto out = Tensor::empty(a.backend(), a.shape(), DType::F32);
+        const auto result = run_vulkan_mul(a.backend().vulkan_runtime(),
+                                           a.storage().vulkan_buffer,
+                                           b.storage().vulkan_buffer,
+                                           out.storage().vulkan_buffer,
+                                           static_cast<std::size_t>(a.numel()));
+        MCL_CHECK(result.success, std::string("vulkan mul f32 failed: ") + result.error);
+        autograd::record_op("mul_vulkan_f32", {a.id(), b.id()}, {out.id()});
+        attach_binary_grad(out, a, b, std::make_shared<MulBackward>(a, b));
+        return out;
+    }
     auto out = elementwise_binary(a, b, "mul_f32");
     attach_binary_grad(out, a, b, std::make_shared<MulBackward>(a, b));
     return out;

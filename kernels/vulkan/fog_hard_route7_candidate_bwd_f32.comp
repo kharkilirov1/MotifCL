@@ -1,0 +1,13 @@
+// Direct candidate gradient under hard forward selection.
+#version 450
+layout(local_size_x = 64) in;
+layout(std430,set=0,binding=0) readonly buffer L { float logits[]; };
+layout(std430,set=0,binding=1) readonly buffer G { float grad_out[]; };
+layout(std430,set=0,binding=2) writeonly buffer D { float grad_candidate[]; };
+layout(push_constant) uniform Push { uint rows; uint d; uint candidate; } p;
+void main(){
+    uint gid=gl_GlobalInvocationID.x; uint n=p.rows*p.d; if(gid>=n)return;
+    uint row=gid/p.d; uint base=row*7u; uint best=0u; float bv=logits[base];
+    for(uint k=1u;k<7u;++k){float v=logits[base+k]; if(v>bv){bv=v;best=k;}}
+    grad_candidate[gid]=(best==p.candidate)?grad_out[gid]:0.0;
+}

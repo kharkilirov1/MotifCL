@@ -7,9 +7,11 @@
 #include <motifcl/runtime/microkernel.hpp>
 #include <motifcl/runtime/vulkan_backend.hpp>
 
+#include <cmath>
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace motifcl {
 
@@ -81,6 +83,25 @@ struct GeluBackwardNode : autograd::Node {
     std::vector<Tensor> inputs() const override { return {x}; }
     void backward(const Tensor& grad_output) override {
         if (x.requires_grad()) x.backward(gelu_backward_op(x, grad_output));
+    }
+};
+
+struct SiluBackwardNode : autograd::Node {
+    Tensor x;
+    explicit SiluBackwardNode(Tensor x_value) : x(std::move(x_value)) {}
+    std::vector<Tensor> inputs() const override { return {x}; }
+    void backward(const Tensor& grad_output) override {
+        if (x.requires_grad()) x.backward(silu_backward_op(x, grad_output));
+    }
+};
+
+struct SigmoidBackwardNode : autograd::Node {
+    Tensor y;
+    Tensor x;
+    SigmoidBackwardNode(Tensor y_value, Tensor x_value) : y(std::move(y_value)), x(std::move(x_value)) {}
+    std::vector<Tensor> inputs() const override { return {x}; }
+    void backward(const Tensor& grad_output) override {
+        if (x.requires_grad()) x.backward(sigmoid_backward_op(y, grad_output));
     }
 };
 
@@ -180,7 +201,98 @@ Tensor gelu_backward_op(const Tensor& x, const Tensor& grad_out) {
     return unary_backward_kernel(x, grad_out, "gelu_backward_f32");
 }
 
-Tensor silu(const Tensor& x) { return unary(x, "silu_f32"); }
+Tensor silu(const Tensor& x) {
+    Tensor out;
+    if (x.backend().is_vulkan()) {
+        MCL_CHECK(x.dtype() == DType::F32, "silu supports f32 only");
+        out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+        const auto result = run_vulkan_silu(x.backend().vulkan_runtime(),
+                                            x.storage().vulkan_buffer,
+                                            out.storage().vulkan_buffer,
+                                            static_cast<std::size_t>(x.numel()));
+        MCL_CHECK(result.success, std::string("vulkan silu failed: ") + result.error);
+        autograd::record_op("silu_vulkan_f32", {x.id()}, {out.id()});
+    } else {
+        out = unary(x, "silu_f32");
+    }
+    if (autograd::is_enabled() && x.requires_grad()) {
+        out.set_requires_grad(true);
+        out._set_grad_fn(std::make_shared<SiluBackwardNode>(x));
+    }
+    return out;
+}
+
+Tensor silu_backward_op(const Tensor& x, const Tensor& grad_out) {
+    if (x.backend().is_vulkan()) {
+        MCL_CHECK(x.dtype() == DType::F32 && grad_out.dtype() == DType::F32, "silu_backward supports f32 only");
+        MCL_CHECK(x.shape() == grad_out.shape(), "silu_backward shape mismatch");
+        auto out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+        const auto result = run_vulkan_silu_backward(x.backend().vulkan_runtime(),
+                                                     x.storage().vulkan_buffer,
+                                                     grad_out.storage().vulkan_buffer,
+                                                     out.storage().vulkan_buffer,
+                                                     static_cast<std::size_t>(x.numel()));
+        MCL_CHECK(result.success, std::string("vulkan silu backward failed: ") + result.error);
+        autograd::record_op("silu_backward_vulkan_f32", {x.id(), grad_out.id()}, {out.id()});
+        return out;
+    }
+    // Reuse an explicit host/OpenCL expression through primitive ops so the
+    // formula is identical to the Vulkan kernel and remains differentiability-independent.
+    const auto xv = x.to_vector<float>();
+    const auto gv = grad_out.to_vector<float>();
+    std::vector<float> dx(xv.size());
+    for (std::size_t i = 0; i < xv.size(); ++i) {
+        const float s = 1.0f / (1.0f + std::exp(-xv[i]));
+        dx[i] = gv[i] * s * (1.0f + xv[i] * (1.0f - s));
+    }
+    return Tensor::from_cpu(x.backend(), x.shape(), DType::F32, dx.data());
+}
+
+Tensor sigmoid(const Tensor& x) {
+    MCL_CHECK(x.dtype() == DType::F32, "sigmoid supports f32 only");
+    Tensor out;
+    if (x.backend().is_vulkan()) {
+        out = Tensor::empty(x.backend(), x.shape(), DType::F32);
+        const auto result = run_vulkan_sigmoid(x.backend().vulkan_runtime(),
+                                               x.storage().vulkan_buffer,
+                                               out.storage().vulkan_buffer,
+                                               static_cast<std::size_t>(x.numel()));
+        MCL_CHECK(result.success, std::string("vulkan sigmoid failed: ") + result.error);
+        autograd::record_op("sigmoid_vulkan_f32", {x.id()}, {out.id()});
+    } else {
+        const auto xv = x.to_vector<float>();
+        std::vector<float> y(xv.size());
+        for (std::size_t i = 0; i < xv.size(); ++i) y[i] = 1.0f / (1.0f + std::exp(-xv[i]));
+        out = Tensor::from_cpu(x.backend(), x.shape(), DType::F32, y.data());
+        autograd::record_op("sigmoid_host_f32", {x.id()}, {out.id()}, false);
+    }
+    if (autograd::is_enabled() && x.requires_grad()) {
+        out.set_requires_grad(true);
+        out._set_grad_fn(std::make_shared<SigmoidBackwardNode>(out, x));
+    }
+    return out;
+}
+
+Tensor sigmoid_backward_op(const Tensor& y, const Tensor& grad_out) {
+    MCL_CHECK(y.dtype() == DType::F32 && grad_out.dtype() == DType::F32, "sigmoid_backward supports f32 only");
+    MCL_CHECK(y.shape() == grad_out.shape(), "sigmoid_backward shape mismatch");
+    if (y.backend().is_vulkan()) {
+        auto out = Tensor::empty(y.backend(), y.shape(), DType::F32);
+        const auto result = run_vulkan_sigmoid_backward(y.backend().vulkan_runtime(),
+                                                        y.storage().vulkan_buffer,
+                                                        grad_out.storage().vulkan_buffer,
+                                                        out.storage().vulkan_buffer,
+                                                        static_cast<std::size_t>(y.numel()));
+        MCL_CHECK(result.success, std::string("vulkan sigmoid backward failed: ") + result.error);
+        autograd::record_op("sigmoid_backward_vulkan_f32", {y.id(), grad_out.id()}, {out.id()});
+        return out;
+    }
+    const auto yv = y.to_vector<float>();
+    const auto gv = grad_out.to_vector<float>();
+    std::vector<float> dx(yv.size());
+    for (std::size_t i = 0; i < yv.size(); ++i) dx[i] = gv[i] * yv[i] * (1.0f - yv[i]);
+    return Tensor::from_cpu(y.backend(), y.shape(), DType::F32, dx.data());
+}
 
 Tensor swiglu(const Tensor& packed) {
     MCL_CHECK(packed.dtype() == DType::F32, "swiglu supports f32 only");
