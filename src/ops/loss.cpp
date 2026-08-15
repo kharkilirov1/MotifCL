@@ -3,6 +3,8 @@
 #include <motifcl/autograd/graph.hpp>
 #include <motifcl/autograd/node.hpp>
 #include <motifcl/core/error.hpp>
+#include <motifcl/ops/basic_ops.hpp>
+#include <motifcl/ops/indexing.hpp>
 #include <motifcl/runtime/backend.hpp>
 #include <motifcl/runtime/vulkan_backend.hpp>
 
@@ -51,6 +53,12 @@ struct SoftmaxCrossEntropyBackwardNode : autograd::Node {
 Tensor mse_loss(const Tensor& pred, const Tensor& target) {
     MCL_CHECK(pred.dtype() == DType::F32 && target.dtype() == DType::F32, "mse_loss supports f32 only");
     MCL_CHECK(pred.shape() == target.shape(), "mse_loss shape mismatch");
+    if (pred.backend().is_vulkan()) {
+        // Vulkan-native: mean((pred-target)^2) via sub/mul/mean_all. Gradients
+        // flow through the composed autograd chain (mean -> mul -> sub).
+        auto diff = sub(pred, target);
+        return mean_all(mul(diff, diff));
+    }
     int n = static_cast<int>(pred.numel());
     int chunks = (n + kChunk - 1) / kChunk;
     auto partial = Tensor::empty(pred.backend(), {chunks}, DType::F32);

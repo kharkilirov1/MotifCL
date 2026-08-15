@@ -49,11 +49,12 @@ int main(int argc, char** argv) {
     try {
         const std::string token_path = argc > 1 ? argv[1] : "data/fog_train.i32";
         const int steps = arg_int(argv, argc, 2, 1000);
-        const int batch = arg_int(argv, argc, 3, 2);
+        const int batch = arg_int(argv, argc, 3, 8);
         const int seq = arg_int(argv, argc, 4, 128);
         const float lr = arg_float(argv, argc, 5, 3e-4f);
         const std::string checkpoint = argc > 6 ? argv[6] : "checkpoints/fog_v3_rx580_lexical.mclp";
         const int save_every = arg_int(argv, argc, 7, 250);
+        const std::string resume_path = argc > 8 ? argv[8] : checkpoint;
 
         constexpr int vocab = 8192;
         auto tokens = read_i32(token_path);
@@ -83,9 +84,9 @@ int main(int argc, char** argv) {
         auto params = model.parameters();
         auto train_params = model.lexical_parameters();
 
-        if (std::filesystem::exists(checkpoint)) {
-            motifcl::load_parameters(params, backend, checkpoint);
-            std::cout << "resume weights=" << checkpoint << " (Adam moments restart)\n";
+        if (std::filesystem::exists(resume_path)) {
+            motifcl::load_parameters(params, backend, resume_path);
+            std::cout << "resume weights=" << resume_path << " (Adam moments restart)\n";
         }
         motifcl::optim::Adam opt(train_params, lr, 0.9f, 0.95f, 1e-8f, 0.01f);
 
@@ -102,7 +103,17 @@ int main(int argc, char** argv) {
         float first_loss = 0.0f;
         float last_loss = 0.0f;
 
+        const int warmup_steps = std::min(steps / 20, 500);
         for (int step = 1; step <= steps; ++step) {
+            float cur_lr = lr;
+            if (step <= warmup_steps) {
+                cur_lr = lr * static_cast<float>(step) / static_cast<float>(std::max(1, warmup_steps));
+            } else {
+                const float progress = static_cast<float>(step - warmup_steps) / static_cast<float>(std::max(1, steps - warmup_steps));
+                cur_lr = lr * (0.1f + 0.9f * 0.5f * (1.0f + std::cos(3.14159265358979323846f * progress)));
+            }
+            opt.set_lr(cur_lr);
+
             for (int b = 0; b < batch; ++b) {
                 const auto start = start_dist(rng);
                 for (int t = 0; t < seq; ++t) {
@@ -135,10 +146,11 @@ int main(int argc, char** argv) {
             if (step == 1) first_loss = lv;
             last_loss = lv;
 
-            if (step == 1 || step % 10 == 0 || step == steps) {
+            if (step == 1 || step % 50 == 0 || step == steps) {
                 const double tps = 1000.0 * static_cast<double>(batch * seq) / ms;
                 std::cout << "step=" << step << "/" << steps
                           << " loss=" << std::setprecision(6) << lv
+                          << " lr=" << std::scientific << std::setprecision(2) << cur_lr << std::defaultfloat
                           << " ms=" << std::setprecision(5) << ms
                           << " tok/s=" << std::setprecision(6) << tps << "\n";
             }

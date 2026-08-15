@@ -28,6 +28,7 @@
 #include <motifcl/ops/loss.hpp>
 #include <motifcl/ops/optim.hpp>
 #include <motifcl/autograd/graph.hpp>
+#include <motifcl/autograd/node.hpp>
 #include <motifcl/ops/quant.hpp>
 #include <motifcl/autograd/backward.hpp>
 #include <motifcl/nn/module.hpp>

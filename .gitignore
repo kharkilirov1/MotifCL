@@ -8,6 +8,7 @@ out/
 
 # Local model weights (GGUF etc.)
 models/
+checkpoints/
 
 # Local review/build artifacts
 build_review*/

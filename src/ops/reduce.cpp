@@ -2,6 +2,7 @@
 
 #include <motifcl/autograd/graph.hpp>
 #include <motifcl/core/error.hpp>
+#include <motifcl/ops/matmul.hpp>
 #include <motifcl/runtime/backend.hpp>
 
 #include <string>
@@ -16,11 +17,13 @@ constexpr std::size_t kReduceWorkgroup = 256;
 Tensor sum_rows(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::F32, "sum_rows supports f32 only");
     MCL_CHECK(x.ndim() == 2, "sum_rows expects rank-2 tensor");
-    // OpenCL-only reduction; needed by AddBiasRowsBackward/AddBiasGeluRowsBackward
-    // on Vulkan (which are themselves OpenCL-only today, so the chain refuses
-    // earlier — but guard here too for direct callers).
-    MCL_CHECK(!x.backend().is_vulkan(),
-              "sum_rows is not Vulkan-native yet (use OpenCL backend)");
+    if (x.backend().is_vulkan()) {
+        // Vulkan-native: ones[1, rows] @ x[rows, cols] -> [1, cols] -> [cols].
+        // Reuses the M=1 matmul kernel; gradients flow back through the matmul node.
+        auto ones = Tensor::full(x.backend(), {1, x.shape()[0]}, 1.0f, DType::F32);
+        auto reduced = matmul(ones, x);
+        return reduced.view({x.shape()[1]});
+    }
     auto out = Tensor::empty(x.backend(), {x.shape()[1]}, DType::F32);
     auto k = x.backend().kernels.get("sum_rows_f32");
     int rows = static_cast<int>(x.shape()[0]);

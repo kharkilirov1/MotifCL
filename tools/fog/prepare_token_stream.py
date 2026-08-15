@@ -64,6 +64,7 @@ def main():
     src.add_argument("--tinystories", type=int)
     ap.add_argument("--field", default="text")
     ap.add_argument("--output", required=True)
+    ap.add_argument("--skip-docs", type=int, default=0)
     ap.add_argument("--max-docs", type=int, default=0)
     args = ap.parse_args()
 
@@ -78,10 +79,14 @@ def main():
     texts = iter_tinystories(args.tinystories) if args.tinystories else iter_texts(Path(args.input), args.field)
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    skipped = 0
     docs = 0
     tokens = 0
     with out_path.open("wb") as f:
         for text in texts:
+            if args.skip_docs and skipped < args.skip_docs:
+                skipped += 1
+                continue
             if args.max_docs and docs >= args.max_docs:
                 break
             ids = tok.encode(text).ids

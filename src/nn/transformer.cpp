@@ -3133,7 +3133,7 @@ Tensor ModernTransformerBlock::forward_with_cache_replay(const Tensor& x,
             return forward_with_cache_eager(x, kv_cache, batch_size, seq_len, nullptr);
         }
     }
-    if (cache.capture_failed) {
+    if (cache.capture_failed || x.backend().is_vulkan()) {
         return forward_with_cache_eager(x, kv_cache, batch_size, seq_len, nullptr);
     }
 
@@ -3328,7 +3328,7 @@ Tensor ModernTransformerBlock::forward_with_cache_packed_per_layer_input_replay(
                                                                    packed_per_layer_input, layer_index, token_count);
         }
     }
-    if (cache.capture_failed) {
+    if (cache.capture_failed || x.backend().is_vulkan()) {
         return forward_with_cache_packed_per_layer_input_eager(x, kv_cache, batch_size, seq_len,
                                                                packed_per_layer_input, layer_index, token_count);
     }
@@ -3513,7 +3513,7 @@ Tensor ModernTransformerBlock::decode_tail_after_attention_replay(const Tensor& 
             return decode_tail_after_attention(h);
         }
     }
-    if (cache.capture_failed) {
+    if (cache.capture_failed || h.backend().is_vulkan()) {
         return decode_tail_after_attention(h);
     }
 
@@ -3640,7 +3640,7 @@ Tensor ModernTransformerBlock::decode_tail_after_attention_packed_replay(const T
             return decode_tail_after_attention_packed(h, packed_per_layer_input, layer_index, token_count);
         }
     }
-    if (cache.capture_failed) {
+    if (cache.capture_failed || h.backend().is_vulkan()) {
         return decode_tail_after_attention_packed(h, packed_per_layer_input, layer_index, token_count);
     }
 

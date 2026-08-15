@@ -89,23 +89,35 @@ int argmax_row(const float* p,int n){int best=0;for(int i=1;i<n;++i)if(p[i]>p[be
 struct Eval { float accuracy=0.f; float block_fraction=0.f; };
 
 Eval evaluate(motifcl::nn::FogV3Model& model,motifcl::Backend& backend,int n_states,int depth,int examples,std::uint32_t seed){
+    motifcl::autograd::NoGradGuard no_grad;
     std::mt19937 rng(seed);
     int correct=0,total=0,block=0,routes=0;
     const int vocab=model.config.vocab_size;
+    auto& runtime = backend.vulkan_runtime();
     while(total<examples){
         const int bs=std::min(64,examples-total);
         auto bh=make_batch(n_states,bs,depth,rng);
         auto q=motifcl::Tensor::from_cpu(backend,{bs},motifcl::DType::I32,bh.query.data());
         auto k=motifcl::Tensor::from_cpu(backend,{bs,n_states},motifcl::DType::I32,bh.keys.data());
         auto v=motifcl::Tensor::from_cpu(backend,{bs,n_states},motifcl::DType::I32,bh.values.data());
+        const bool batched = runtime.batch_begin();
         auto state=model.initial_state(q);
+        motifcl::Tensor last_route;
         for(int t=0;t<depth;++t){
             auto step=model.structured_step(state,k,v,bs,n_states);
-            const auto lh=step.operator_logits.to_vector<float>();
-            for(int b=0;b<bs;++b){ if(argmax_row(lh.data()+static_cast<std::size_t>(b*7),7)==2) ++block; ++routes; }
             state=step.state;
+            if(t+1==depth) last_route=step.operator_logits;
         }
-        const auto logits=model.direct_vocab_logits(state.value).to_vector<float>();
+        auto logits_tensor=model.direct_vocab_logits(state.value);
+        if(batched){
+            const auto submit = runtime.batch_end();
+            if(!submit.success) throw std::runtime_error("Vulkan eval batch failed: " + submit.error);
+        }
+        if(last_route.valid()){
+            const auto lh=last_route.to_vector<float>();
+            for(int b=0;b<bs;++b){ if(argmax_row(lh.data()+static_cast<std::size_t>(b*7),7)==2) ++block; ++routes; }
+        }
+        const auto logits=logits_tensor.to_vector<float>();
         for(int b=0;b<bs;++b){
             const int pred=argmax_row(logits.data()+static_cast<std::size_t>(b*vocab),vocab);
             if(pred==bh.target[static_cast<std::size_t>(b)]) ++correct;
@@ -144,6 +156,7 @@ int main(int argc,char** argv){
                  <<" steps="<<steps<<" batch="<<batch<<" states="<<n_states<<" lr="<<lr<<"\n";
         float first_loss=0.f,last_loss=0.f;
         std::uniform_int_distribution<int> depth_dist(1,3);
+        auto& runtime = backend.vulkan_runtime();
         for(int step_i=1;step_i<=steps;++step_i){
             const int depth=depth_dist(rng);
             auto bh=make_batch(n_states,batch,depth,rng);
@@ -151,12 +164,18 @@ int main(int argc,char** argv){
             auto k=Tensor::from_cpu(backend,{batch,n_states},DType::I32,bh.keys.data());
             auto v=Tensor::from_cpu(backend,{batch,n_states},DType::I32,bh.values.data());
             auto target=Tensor::from_cpu(backend,{batch},DType::I32,bh.target.data());
+            const bool batched = runtime.batch_begin();
             auto state=model.initial_state(q);
             Tensor last_route;
             for(int t=0;t<depth;++t){ auto rs=model.structured_step(state,k,v,batch,n_states); state=rs.state; last_route=rs.operator_logits; }
             auto logits=model.direct_vocab_logits(state.value);
             auto loss=softmax_cross_entropy(logits,target);
-            loss.backward(); opt.step(); opt.zero_grad(); backend.finish();
+            loss.backward(); opt.step(); opt.zero_grad();
+            if(batched){
+                const auto submit = runtime.batch_end();
+                if(!submit.success) throw std::runtime_error("Vulkan train batch failed: " + submit.error);
+            }
+            backend.finish();
             const float lv=loss.item(); if(step_i==1)first_loss=lv; last_loss=lv;
             if(step_i==1 || step_i%25==0 || step_i==steps){
                 const auto lh=last_route.to_vector<float>(); int block=0;

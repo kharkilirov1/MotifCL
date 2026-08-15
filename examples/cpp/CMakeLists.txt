@@ -10,6 +10,13 @@ set(MOTIFCL_EXAMPLES
     09_fog_v3_rx580_pretrain
     10_fog_v3_operator_gate
     11_fog_v3_structured_machine_gate
+    12_fog_v3_reasoning_sft
+    13_fog_v3_inference
+    14_fog_v3_logic_demo
+    15_fog_v3_e2e_prompt
+    16_fog_v3_ablation_test
+    17_fog_v3_ghost_room_test
+    18_fog_v3_fairy_tale_logic
 )
 
 foreach(example ${MOTIFCL_EXAMPLES})

@@ -2,11 +2,12 @@
 param(
     [Parameter(Mandatory=$true)][string]$TokenFile,
     [int]$Steps = 1000,
-    [int]$Batch = 2,
+    [int]$Batch = 8,
     [int]$Seq = 128,
     [double]$Lr = 0.0003,
     [string]$Checkpoint = "checkpoints\fog_v3_rx580_lexical.mclp",
-    [int]$SaveEvery = 250
+    [int]$SaveEvery = 250,
+    [string]$ResumeFrom = ""
 )
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
@@ -15,5 +16,9 @@ if (-not (Test-Path $exe)) { throw "Trainer not built. Run ports/rx580/fog/build
 $env:MOTIFCL_REQUIRE_VULKAN_COMPUTE = "1"
 $env:MOTIFCL_REQUIRE_VULKAN_MATMUL = "1"
 $env:MOTIFCL_REQUIRE_VULKAN_ATTENTION = "1"
-& $exe $TokenFile $Steps $Batch $Seq $Lr $Checkpoint $SaveEvery
+if ($ResumeFrom -ne "") {
+    & $exe $TokenFile $Steps $Batch $Seq $Lr $Checkpoint $SaveEvery $ResumeFrom
+} else {
+    & $exe $TokenFile $Steps $Batch $Seq $Lr $Checkpoint $SaveEvery
+}
 if ($LASTEXITCODE -ne 0) { throw "FOG training failed with exit code $LASTEXITCODE" }

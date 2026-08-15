@@ -177,7 +177,7 @@ Tensor::Tensor(Backend& backend, Shape shape, DType dtype, std::shared_ptr<Stora
     impl_->strides = contiguous_strides(impl_->shape);
     impl_->dtype = dtype;
     impl_->offset = offset;
-    if (autograd::is_enabled() || autograd::is_graph_capturing()) {
+    if (autograd::is_graph_capturing()) {
         const cl_mem mem = (backend.is_opencl() && impl_->storage && impl_->storage->buffer.valid())
             ? impl_->storage->buffer.raw()
             : nullptr;

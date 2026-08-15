@@ -1,0 +1,35 @@
+{
+  "date": "2026-08-14",
+  "project_version": "0.6.0",
+  "status": "MODEL_READY",
+  "architecture": "register_machine_v3",
+  "reference_parameters": 10245433,
+  "checkpoint": "checkpoints/fog_machine_v3_10m_init.pt",
+  "checkpoint_sha256": "2b5ecb6bbe08b4ad8a08a87c79e8fb3aee4acc1b546892ea2f99b7e16e80c17f",
+  "checkpoint_bytes": 41029313,
+  "strict_reload": true,
+  "machine_hard_routing": true,
+  "reasoning_steps": 8,
+  "core_regression": {
+    "passed": 121,
+    "skipped": 2,
+    "warnings": 18
+  },
+  "decisive_evidence": {
+    "exp_036": "high-dimensional JVP relation discovery through d_model=320 and real FOG transition probe",
+    "exp_037": "3/3 seeds exact generated-value recurrence at depths 1,2,3,4,6,8"
+  },
+  "source_hashes": {
+    "fog_lmw/config.py": "9a94d3806173dfea9bbede21536bccd57da1a4c7cb6bd81cc1b959a2c1803ab4",
+    "fog_lmw/model.py": "dc1b5890dec59a412a9faac1383fbc0bd93e11ad4d02466506eb72079fc1825d",
+    "fog_lmw/registers.py": "3160d7a95765d685788daf1ef528843b3a15ae646903bb9921b57b6573a2586f",
+    "fog_lmw/structural.py": "9db4a738762e37ad85d6b0334abae3764da7e8760317d85f55c280e14494e554",
+    "fog_lmw/presets.py": "1ed3cefee2d779bd5e1b63e7b7995fc80ef98a73d0c2d8639337ff60b69b7751",
+    "build_fog_machine.py": "b41b1426b33f19b4a952239556d79aed2fdf99ff13eb0809612cd1167390857c",
+    "train_real.py": "0e6a72d7151ad7065700e9ee11ecff993e60ae1a4385701ecc9febcb3e1a1599",
+    "register_machine_v3_generated_value_experiment.py": "2faa6edbc7459030c77349400bc7b4e9348d4850711bbd7c724b8528b23c53a0",
+    "highdim_jvp_relation_discovery_experiment.py": "17eef819bc777daaec02796dfa86aabac71e9bc2396a6299ac9115f843d94d98",
+    "research/MODEL_READY_V3.md": "0c154267a6275f5cfc02640dc0818e1403aae580511c40ff5a0787ebad6025f9"
+  },
+  "claim_boundary": "Build-ready/research-training-ready architecture and initialization; not yet a trained natural-language reasoner."
+}

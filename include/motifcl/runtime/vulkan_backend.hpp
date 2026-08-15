@@ -184,6 +184,9 @@ public:
     // Microseconds; negative when no timed submission is available.
     double last_gpu_time_us() const;
 
+    // Wait for all queued Vulkan GPU commands to finish execution.
+    void finish() const;
+
     // Dispatch capture/replay: while capturing, every cached-path dispatch is
     // recorded (and still executed). Replay re-records the whole sequence
     // into one primary command buffer and submits once. No OpenCL objects

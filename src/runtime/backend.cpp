@@ -327,6 +327,7 @@ const VulkanRuntime& Backend::vulkan_runtime() const {
 
 void Backend::finish() const {
     if (is_opencl() && ctx.valid()) ctx.finish();
+    if (is_vulkan() && vulkan_runtime_ && vulkan_runtime_->available()) vulkan_runtime_->finish();
 }
 
 DeviceInfo Backend::device_info() const {

@@ -175,6 +175,17 @@ void Adam::step() {
     ++step_count_;
     std::vector<AdamUpdateRef> group;
     group.reserve(8);
+    if (!params_.empty() && params_.front() && params_.front()->data.valid() &&
+        params_.front()->data.backend().is_vulkan()) {
+        // Vulkan-native per-tensor Adam path (fused m/v update kernel).
+        for (std::size_t i = 0; i < params_.size(); ++i) {
+            auto* p = params_[i];
+            if (!p || !p->trainable || !p->data.grad()) continue;
+            adam_update_fast(p->data, *p->data.grad(), m_[i], v_[i],
+                             lr_, beta1_, beta2_, eps_, step_count_, weight_decay_);
+        }
+        return;
+    }
     if (state_.valid()) {
         adam_update_state(state_, beta1_, beta2_);
     }

@@ -77,6 +77,33 @@ using VkCommandBuffer = struct VkCommandBuffer_T*;
 using PFN_vkVoidFunction = void (*)();
 
 constexpr VkResult VK_SUCCESS = 0;
+
+inline const char* vk_result_str(VkResult res) {
+    switch (res) {
+        case 0: return "VK_SUCCESS";
+        case 1: return "VK_NOT_READY";
+        case 2: return "VK_TIMEOUT";
+        case 3: return "VK_EVENT_SET";
+        case 4: return "VK_EVENT_RESET";
+        case 5: return "VK_INCOMPLETE";
+        case -1: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+        case -2: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+        case -3: return "VK_ERROR_INITIALIZATION_FAILED";
+        case -4: return "VK_ERROR_DEVICE_LOST";
+        case -5: return "VK_ERROR_MEMORY_MAP_FAILED";
+        case -6: return "VK_ERROR_LAYER_NOT_PRESENT";
+        case -7: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+        case -8: return "VK_ERROR_FEATURE_NOT_PRESENT";
+        case -9: return "VK_ERROR_INCOMPATIBLE_DRIVER";
+        case -10: return "VK_ERROR_TOO_MANY_OBJECTS";
+        case -11: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+        case -12: return "VK_ERROR_FRAGMENTED_POOL";
+        case -13: return "VK_ERROR_UNKNOWN";
+        case -1000069000: return "VK_ERROR_OUT_OF_POOL_MEMORY";
+        case -1000072003: return "VK_ERROR_INVALID_EXTERNAL_HANDLE";
+        default: return "VK_UNKNOWN_RESULT";
+    }
+}
 constexpr VkStructureType VK_STRUCTURE_TYPE_APPLICATION_INFO = 0;
 constexpr VkStructureType VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO = 1;
 constexpr VkStructureType VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO = 2;
@@ -140,6 +167,9 @@ constexpr VkFlags VK_ACCESS_SHADER_WRITE_BIT = 0x00000040u;
 constexpr VkFlags VK_ACCESS_TRANSFER_WRITE_BIT = 0x00001000u;
 
 constexpr VkFlags VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT = 0x00000001u;
+constexpr VkFlags VK_COMMAND_POOL_CREATE_TRANSIENT_BIT = 0x00000001u;
+constexpr VkFlags VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT = 0x00000002u;
+constexpr VkFlags VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT = 0x00000001u;
 
 constexpr std::uint32_t vk_make_api_version(std::uint32_t variant,
                                             std::uint32_t major,
@@ -4588,6 +4618,7 @@ struct VulkanRuntime::Impl {
         VkDescriptorSetLayout set_layout = nullptr;
         VkPipelineLayout pipeline_layout = nullptr;
     };
+    std::map<std::uint32_t, VkDescriptorSetLayout> set_layout_cache;
     // (binding_count, push_constant_bytes) -> layouts
     std::map<std::pair<std::uint32_t, std::uint32_t>, LayoutEntry> layout_cache;
     // (spirv pointer, word count, binding_count, push_constant_bytes) -> pipeline.
@@ -4639,18 +4670,29 @@ struct VulkanRuntime::Impl {
     };
     std::map<std::pair<std::size_t, bool>, std::vector<PooledBuffer>> buffer_pool;
     std::size_t buffer_pool_bytes = 0;
+    std::size_t buffer_pool_allocations = 0;
 
-    static constexpr std::size_t kBufferPoolCapBytes = 1024u * 1024u * 1024u;
+    static constexpr std::size_t kBufferPoolCapBytes = 2048u * 1024u * 1024u;
+    static constexpr std::size_t kBufferPoolMaxAllocations = 2048;
+    static constexpr std::size_t kBufferPoolMaxPerBucket = 128;
 
     void pool_release(VkBuffer buffer, VkDeviceMemory memory, std::size_t capacity, bool host_visible) {
-        if (!device || !ready || capacity == 0 ||
+        if (!device || !ready || capacity == 0) {
+            if (buffer && destroy_buffer) destroy_buffer(device, buffer, nullptr);
+            if (memory && free_memory) free_memory(device, memory, nullptr);
+            return;
+        }
+        auto& bucket = buffer_pool[{capacity, host_visible}];
+        if (buffer_pool_allocations >= kBufferPoolMaxAllocations ||
+            bucket.size() >= kBufferPoolMaxPerBucket ||
             buffer_pool_bytes + capacity > kBufferPoolCapBytes) {
             if (buffer && destroy_buffer) destroy_buffer(device, buffer, nullptr);
             if (memory && free_memory) free_memory(device, memory, nullptr);
             return;
         }
-        buffer_pool[{capacity, host_visible}].push_back(PooledBuffer{buffer, memory});
+        bucket.push_back(PooledBuffer{buffer, memory});
         buffer_pool_bytes += capacity;
+        ++buffer_pool_allocations;
     }
 
     bool pool_acquire(std::size_t capacity, bool host_visible, VkBuffer& buffer, VkDeviceMemory& memory) {
@@ -4660,6 +4702,7 @@ struct VulkanRuntime::Impl {
         memory = it->second.back().memory;
         it->second.pop_back();
         buffer_pool_bytes -= capacity;
+        --buffer_pool_allocations;
         return true;
     }
 
@@ -4672,6 +4715,7 @@ struct VulkanRuntime::Impl {
         }
         buffer_pool.clear();
         buffer_pool_bytes = 0;
+        buffer_pool_allocations = 0;
     }
 
     // Dispatch capture state (see VulkanDispatchRecording).
@@ -4714,11 +4758,14 @@ struct VulkanRuntime::Impl {
             if (entry.second.pipeline_layout && destroy_pipeline_layout) {
                 destroy_pipeline_layout(device, entry.second.pipeline_layout, nullptr);
             }
-            if (entry.second.set_layout && destroy_descriptor_set_layout) {
-                destroy_descriptor_set_layout(device, entry.second.set_layout, nullptr);
-            }
         }
         layout_cache.clear();
+        for (auto& entry : set_layout_cache) {
+            if (entry.second && destroy_descriptor_set_layout) {
+                destroy_descriptor_set_layout(device, entry.second, nullptr);
+            }
+        }
+        set_layout_cache.clear();
         for (auto pool : descriptor_pools) {
             if (pool && destroy_descriptor_pool) destroy_descriptor_pool(device, pool, nullptr);
         }
@@ -4782,7 +4829,7 @@ struct VulkanRuntime::Impl {
         const VkCommandPoolCreateInfo pool_info{
             VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             nullptr,
-            0,
+            VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT | VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
             queue_family,
         };
         if (create_command_pool(device, &pool_info, nullptr, &fast_command_pool) != VK_SUCCESS ||
@@ -4885,10 +4932,9 @@ struct VulkanRuntime::Impl {
         return true;
     }
 
-    LayoutEntry* get_layout(std::uint32_t binding_count, std::uint32_t push_bytes) {
-        const auto key = std::make_pair(binding_count, push_bytes);
-        auto it = layout_cache.find(key);
-        if (it != layout_cache.end()) return &it->second;
+    VkDescriptorSetLayout get_set_layout(std::uint32_t binding_count) {
+        auto it = set_layout_cache.find(binding_count);
+        if (it != set_layout_cache.end()) return it->second;
 
         std::vector<VkDescriptorSetLayoutBinding> bindings;
         bindings.reserve(binding_count);
@@ -4908,26 +4954,39 @@ struct VulkanRuntime::Impl {
             binding_count,
             bindings.data(),
         };
-        LayoutEntry entry;
-        if (create_descriptor_set_layout(device, &set_layout_info, nullptr, &entry.set_layout) != VK_SUCCESS ||
-            !entry.set_layout) {
-            fast_error = "vkCreateDescriptorSetLayout failed for cached dispatch";
+        VkDescriptorSetLayout set_layout = nullptr;
+        const VkResult rc = create_descriptor_set_layout(device, &set_layout_info, nullptr, &set_layout);
+        if (rc != VK_SUCCESS || !set_layout) {
+            fast_error = "vkCreateDescriptorSetLayout failed for cached dispatch (" + std::string(vk_result_str(rc)) + " / " + std::to_string(rc) + ")";
             return nullptr;
         }
+        set_layout_cache.emplace(binding_count, set_layout);
+        return set_layout;
+    }
+
+    LayoutEntry* get_layout(std::uint32_t binding_count, std::uint32_t push_bytes) {
+        const auto key = std::make_pair(binding_count, push_bytes);
+        auto it = layout_cache.find(key);
+        if (it != layout_cache.end()) return &it->second;
+
+        VkDescriptorSetLayout set_layout = get_set_layout(binding_count);
+        if (!set_layout) return nullptr;
+
         const VkPushConstantRange push_range{VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes};
         const VkPipelineLayoutCreateInfo layout_info{
             VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             nullptr,
             0,
             1,
-            &entry.set_layout,
+            &set_layout,
             push_bytes > 0 ? 1u : 0u,
             push_bytes > 0 ? &push_range : nullptr,
         };
-        if (create_pipeline_layout(device, &layout_info, nullptr, &entry.pipeline_layout) != VK_SUCCESS ||
-            !entry.pipeline_layout) {
-            destroy_descriptor_set_layout(device, entry.set_layout, nullptr);
-            fast_error = "vkCreatePipelineLayout failed for cached dispatch";
+        LayoutEntry entry;
+        entry.set_layout = set_layout;
+        const VkResult rc = create_pipeline_layout(device, &layout_info, nullptr, &entry.pipeline_layout);
+        if (rc != VK_SUCCESS || !entry.pipeline_layout) {
+            fast_error = "vkCreatePipelineLayout failed for cached dispatch (" + std::string(vk_result_str(rc)) + " / " + std::to_string(rc) + ")";
             return nullptr;
         }
         auto emplaced = layout_cache.emplace(key, entry);
@@ -5041,7 +5100,7 @@ struct VulkanRuntime::Impl {
     }
 
     bool begin_fast_commands(bool timed) {
-        if (reset_command_pool(device, fast_command_pool, 0) != VK_SUCCESS) {
+        if (reset_command_pool(device, fast_command_pool, VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT) != VK_SUCCESS) {
             fast_error = "vkResetCommandPool failed for cached dispatch";
             return false;
         }
@@ -5080,7 +5139,11 @@ struct VulkanRuntime::Impl {
         result.device_name = device_name;
         auto fail_submit = [&](const std::string& message) {
             recycle_inflight_sets();
-            result.error = message;
+            result.error = message + " [pools=" + std::to_string(descriptor_pools.size()) +
+                           " pipe_cache=" + std::to_string(pipeline_cache.size()) +
+                           " set_cache=" + std::to_string(set_layout_cache.size()) +
+                           " pool_allocs=" + std::to_string(buffer_pool_allocations) +
+                           " pool_bytes=" + std::to_string(buffer_pool_bytes) + "]";
             result.success = false;
             return result;
         };
@@ -5101,14 +5164,17 @@ struct VulkanRuntime::Impl {
             0,
             nullptr,
         };
-        if (queue_submit(queue, 1, &submit_info, fast_fence) != VK_SUCCESS) {
-            return fail_submit("vkQueueSubmit failed for cached dispatch");
+        const VkResult submit_rc = queue_submit(queue, 1, &submit_info, fast_fence);
+        if (submit_rc != VK_SUCCESS) {
+            return fail_submit("vkQueueSubmit failed for cached dispatch (" + std::string(vk_result_str(submit_rc)) + " / " + std::to_string(submit_rc) + ")");
         }
-        if (wait_for_fences(device, 1, &fast_fence, 1, ~std::uint64_t{0}) != VK_SUCCESS) {
-            return fail_submit("vkWaitForFences failed for cached dispatch");
+        const VkResult wait_rc = wait_for_fences(device, 1, &fast_fence, 1, ~std::uint64_t{0});
+        if (wait_rc != VK_SUCCESS) {
+            return fail_submit("vkWaitForFences failed for cached dispatch (" + std::string(vk_result_str(wait_rc)) + " / " + std::to_string(wait_rc) + ")");
         }
-        if (reset_fences(device, 1, &fast_fence) != VK_SUCCESS) {
-            return fail_submit("vkResetFences failed for cached dispatch");
+        const VkResult reset_rc = reset_fences(device, 1, &fast_fence);
+        if (reset_rc != VK_SUCCESS) {
+            return fail_submit("vkResetFences failed for cached dispatch (" + std::string(vk_result_str(reset_rc)) + " / " + std::to_string(reset_rc) + ")");
         }
         last_gpu_us = -1.0;
         if (batch_timed) {
@@ -5242,7 +5308,7 @@ struct VulkanRuntime::Impl {
         if (batch_dispatch_count == 0) {
             // Nothing recorded; discard the empty command buffer.
             end_command_buffer(fast_command_buffer);
-            reset_command_pool(device, fast_command_pool, 0);
+            reset_command_pool(device, fast_command_pool, VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT);
             recycle_inflight_sets();
             result.success = true;
             return result;
@@ -5342,7 +5408,7 @@ struct VulkanRuntime::Impl {
 
     bool run_transfer(VkBuffer src, VkBuffer dst, VkDeviceSize src_offset, VkDeviceSize dst_offset,
                       VkDeviceSize size, std::string& error_out) {
-        if (reset_command_pool(device, transfer_command_pool, 0) != VK_SUCCESS) {
+        if (reset_command_pool(device, transfer_command_pool, VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT) != VK_SUCCESS) {
             error_out = "vkResetCommandPool failed for staging transfer";
             return false;
         }
@@ -5373,16 +5439,19 @@ struct VulkanRuntime::Impl {
             0,
             nullptr,
         };
-        if (queue_submit(queue, 1, &submit_info, transfer_fence) != VK_SUCCESS) {
-            error_out = "vkQueueSubmit failed for staging transfer";
+        const VkResult submit_rc = queue_submit(queue, 1, &submit_info, transfer_fence);
+        if (submit_rc != VK_SUCCESS) {
+            error_out = "vkQueueSubmit failed for staging transfer (" + std::string(vk_result_str(submit_rc)) + " / " + std::to_string(submit_rc) + ")";
             return false;
         }
-        if (wait_for_fences(device, 1, &transfer_fence, 1, ~std::uint64_t{0}) != VK_SUCCESS) {
-            error_out = "vkWaitForFences failed for staging transfer";
+        const VkResult wait_rc = wait_for_fences(device, 1, &transfer_fence, 1, ~std::uint64_t{0});
+        if (wait_rc != VK_SUCCESS) {
+            error_out = "vkWaitForFences failed for staging transfer (" + std::string(vk_result_str(wait_rc)) + " / " + std::to_string(wait_rc) + ")";
             return false;
         }
-        if (reset_fences(device, 1, &transfer_fence) != VK_SUCCESS) {
-            error_out = "vkResetFences failed for staging transfer";
+        const VkResult reset_rc = reset_fences(device, 1, &transfer_fence);
+        if (reset_rc != VK_SUCCESS) {
+            error_out = "vkResetFences failed for staging transfer (" + std::string(vk_result_str(reset_rc)) + " / " + std::to_string(reset_rc) + ")";
             return false;
         }
         return true;
@@ -6262,6 +6331,12 @@ double VulkanRuntime::last_gpu_time_us() const {
     return impl_ ? impl_->last_gpu_us : -1.0;
 }
 
+void VulkanRuntime::finish() const {
+    if (impl_ && impl_->device && impl_->queue && impl_->queue_wait_idle) {
+        impl_->queue_wait_idle(impl_->queue);
+    }
+}
+
 struct VulkanBuffer::Impl {
     std::shared_ptr<VulkanRuntime::Impl> runtime;
     VkBuffer buffer = nullptr;
@@ -6414,14 +6489,13 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
             served = impl_->pool_acquire(bucket, true, pooled_buffer, pooled_memory);
             served_host_visible = true;
         } else {
-            // Either class works (host-visible maps directly, device-local
-            // goes through staging); prefer device-local VRAM.
-            if (impl_->pool_acquire(bucket, false, pooled_buffer, pooled_memory)) {
-                served = true;
-                served_host_visible = false;
-            } else if (impl_->pool_acquire(bucket, true, pooled_buffer, pooled_memory)) {
+            // Prefer host-visible (direct memcpy, zero staging overhead), fallback to device-local staging
+            if (impl_->pool_acquire(bucket, true, pooled_buffer, pooled_memory)) {
                 served = true;
                 served_host_visible = true;
+            } else if (impl_->pool_acquire(bucket, false, pooled_buffer, pooled_memory)) {
+                served = true;
+                served_host_visible = false;
             }
         }
         if (served) {
@@ -6463,46 +6537,53 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
         return 0xffffffffu;
     };
 
-    std::uint32_t memory_type = 0xffffffffu;
-    bool host_visible = false;
-    if (!force_host_visible) {
-        memory_type = pick_type(kMemDeviceLocalBit, kMemHostVisibleBit);
+    std::vector<std::uint32_t> candidate_types;
+    candidate_types.reserve(4);
+    if (force_host_visible) {
+        const auto t = pick_type(kMemHostVisibleBit | kMemHostCoherentBit, 0);
+        if (t != 0xffffffffu) candidate_types.push_back(t);
+    } else {
+        // 1. Device-local BAR (VRAM + direct host mapping)
+        const auto t_bar = pick_type(kMemDeviceLocalBit | kMemHostVisibleBit | kMemHostCoherentBit, 0);
+        if (t_bar != 0xffffffffu) candidate_types.push_back(t_bar);
+
+        // 2. Host-visible coherent (system GTT RAM, fast direct mapping)
+        const auto t_host = pick_type(kMemHostVisibleBit | kMemHostCoherentBit, 0);
+        if (t_host != 0xffffffffu && t_host != t_bar) candidate_types.push_back(t_host);
+
+        // 3. Pure device-local (VRAM via staging)
+        const auto t_dev = pick_type(kMemDeviceLocalBit, 0);
+        if (t_dev != 0xffffffffu && t_dev != t_bar && t_dev != t_host) candidate_types.push_back(t_dev);
     }
-    if (memory_type == 0xffffffffu) {
-        memory_type = pick_type(kMemHostVisibleBit | kMemHostCoherentBit, 0);
-        host_visible = memory_type != 0xffffffffu;
+    for (std::uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
+        if ((memory_requirements.memoryTypeBits & (1u << i)) == 0) continue;
+        if (std::find(candidate_types.begin(), candidate_types.end(), i) == candidate_types.end()) {
+            candidate_types.push_back(i);
+        }
     }
-    if (memory_type == 0xffffffffu) {
+
+    if (candidate_types.empty()) {
         impl_->destroy_buffer(impl_->device, buffer, nullptr);
         throw std::runtime_error("No suitable Vulkan memory type for storage buffer");
     }
-    const VkMemoryAllocateInfo allocate_info{
-        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        nullptr,
-        memory_requirements.size,
-        memory_type,
-    };
+
     VkDeviceMemory memory = nullptr;
-    if (impl_->allocate_memory(impl_->device, &allocate_info, nullptr, &memory) != VK_SUCCESS || !memory) {
-        // Device-local heap may be exhausted; retry in host-visible memory.
-        if (!host_visible) {
-            memory_type = pick_type(kMemHostVisibleBit | kMemHostCoherentBit, 0);
-            if (memory_type != 0xffffffffu) {
-                const VkMemoryAllocateInfo retry_info{
-                    VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                    nullptr,
-                    memory_requirements.size,
-                    memory_type,
-                };
-                if (impl_->allocate_memory(impl_->device, &retry_info, nullptr, &memory) == VK_SUCCESS && memory) {
-                    host_visible = true;
-                }
-            }
+    bool host_visible = false;
+    for (const auto mem_type : candidate_types) {
+        const VkMemoryAllocateInfo allocate_info{
+            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            nullptr,
+            memory_requirements.size,
+            mem_type,
+        };
+        if (impl_->allocate_memory(impl_->device, &allocate_info, nullptr, &memory) == VK_SUCCESS && memory) {
+            host_visible = (memory_properties.memoryTypes[mem_type].propertyFlags & kMemHostVisibleBit) != 0;
+            break;
         }
-        if (!memory) {
-            impl_->destroy_buffer(impl_->device, buffer, nullptr);
-            throw std::runtime_error("vkAllocateMemory failed");
-        }
+    }
+    if (!memory) {
+        impl_->destroy_buffer(impl_->device, buffer, nullptr);
+        throw std::runtime_error("vkAllocateMemory failed for all compatible memory types");
     }
     if (impl_->bind_buffer_memory(impl_->device, buffer, memory, 0) != VK_SUCCESS) {
         impl_->free_memory(impl_->device, memory, nullptr);

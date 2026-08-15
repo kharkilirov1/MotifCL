@@ -66,7 +66,7 @@ void main() {
     }
     maxv = subgroupMax(maxv);
 
-    subgroupMemoryBarrier();
+    barrier();
     float sum = 0.0;
     for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
         const float e = probs[tk] == -3.402823466e+38
@@ -79,7 +79,7 @@ void main() {
     const float inv_sum = 1.0 / sum;
 
     // dp[tk] = dout . v_row, and the row dot = sum(dp * p).
-    subgroupMemoryBarrier();
+    barrier();
     float dot_dp_p = 0.0;
     for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
         const float prob = probs[tk] * inv_sum;
@@ -96,7 +96,7 @@ void main() {
     }
     dot_dp_p = subgroupAdd(dot_dp_p);
 
-    subgroupMemoryBarrier();
+    barrier();
     for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
         const float prob = probs[tk];
         const float ds = prob * (dps[tk] - dot_dp_p);
@@ -104,7 +104,7 @@ void main() {
         ds_out[row_base + tk] = ds;
         dps[tk] = ds;
     }
-    subgroupMemoryBarrier();
+    barrier();
 
     // Fused dQ: consume shared ds before leaving the (batch, query, head)
     // workgroup instead of launching and feeding a separate global-memory pass.

@@ -40,6 +40,7 @@ TransformerConfig backbone_config(const FogV3Config& cfg) {
     tc.use_mlp_bias = true;
     tc.causal = true;
     tc.norm_first = true;
+    tc.split_qkv_projections = true;
     return tc;
 }
 

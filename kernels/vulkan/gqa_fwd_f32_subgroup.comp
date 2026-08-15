@@ -52,11 +52,7 @@ void main() {
     }
     maxv = subgroupMax(maxv);
 
-    // Pass 2: exp + per-lane sum, then subgroup sum. Still need barrier()
-    // between pass 1 writes to probs[] and pass 2 reads — but subgroupMax
-    // is a wave-wide op that synchronizes the wave, which on a single-wave
-    // workgroup (local_size_x=64 == subgroupSize) acts as the barrier.
-    subgroupMemoryBarrier();
+    barrier();
     float sum = 0.0;
     for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
         const float e = exp(probs[tk] - maxv);
@@ -66,10 +62,7 @@ void main() {
     sum = subgroupAdd(sum);
     const float inv_sum = 1.0 / sum;
 
-    // Pass 3 reuses probs[] written by pass 2; subgroupAdd above synchronized
-    // the wave, then pass 2 wrote probs[tk] (per-lane distinct indices), then
-    // we need another barrier so all writes are visible before pass 3 reads.
-    subgroupMemoryBarrier();
+    barrier();
     for (uint d = lane; d < p.head_dim; d += 64u) {
         float acc = 0.0;
         for (uint tk = 0u; tk < p.key_tokens; ++tk) {
