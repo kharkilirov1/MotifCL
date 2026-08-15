@@ -17,6 +17,7 @@ set(MOTIFCL_EXAMPLES
     16_fog_v3_ablation_test
     17_fog_v3_ghost_room_test
     18_fog_v3_fairy_tale_logic
+    19_fog_v3_advanced_logic_suite
 )
 
 foreach(example ${MOTIFCL_EXAMPLES})
