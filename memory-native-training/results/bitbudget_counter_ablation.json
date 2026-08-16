@@ -1,0 +1,538 @@
+[
+  {
+    "C": 3,
+    "states": 15,
+    "logical_bits": 4,
+    "mode": "direct",
+    "median_hit_step": 999999,
+    "mean_final_acc": 0.98125,
+    "mean_final_mse": 0.017874888516962527,
+    "mean_state_entropy_bits": 3.0354098796844484,
+    "trials": [
+      {
+        "C": 3,
+        "states": 15,
+        "logical_bits": 4,
+        "mode": "direct",
+        "seed": 0,
+        "hit_step": null,
+        "final_acc": 0.98046875,
+        "final_mse": 0.01834121346473694,
+        "state_entropy_bits": 3.024268627166748
+      },
+      {
+        "C": 3,
+        "states": 15,
+        "logical_bits": 4,
+        "mode": "direct",
+        "seed": 1,
+        "hit_step": null,
+        "final_acc": 0.96875,
+        "final_mse": 0.030629193410277367,
+        "state_entropy_bits": 3.171780586242676
+      },
+      {
+        "C": 3,
+        "states": 15,
+        "logical_bits": 4,
+        "mode": "direct",
+        "seed": 2,
+        "hit_step": null,
+        "final_acc": 0.984375,
+        "final_mse": 0.01477434765547514,
+        "state_entropy_bits": 2.9714550971984863
+      },
+      {
+        "C": 3,
+        "states": 15,
+        "logical_bits": 4,
+        "mode": "direct",
+        "seed": 3,
+        "hit_step": null,
+        "final_acc": 0.984375,
+        "final_mse": 0.014535432681441307,
+        "state_entropy_bits": 3.076521873474121
+      },
+      {
+        "C": 3,
+        "states": 15,
+        "logical_bits": 4,
+        "mode": "direct",
+        "seed": 4,
+        "hit_step": null,
+        "final_acc": 0.98828125,
+        "final_mse": 0.01109425537288189,
+        "state_entropy_bits": 2.93302321434021
+      }
+    ]
+  },
+  {
+    "C": 3,
+    "states": 15,
+    "logical_bits": 4,
+    "mode": "ternary",
+    "median_hit_step": 999999,
+    "mean_final_acc": 0.9703125,
+    "mean_final_mse": 0.028630819544196127,
+    "mean_state_entropy_bits": 3.087717294692993,
+    "trials": [
+      {
+        "C": 3,
+        "states": 15,
+        "logical_bits": 4,
+        "mode": "ternary",
+        "seed": 0,
+        "hit_step": null,
+        "final_acc": 0.9765625,
+        "final_mse": 0.022897958755493164,
+        "state_entropy_bits": 2.9792284965515137
+      },
+      {
+        "C": 3,
+        "states": 15,
+        "logical_bits": 4,
+        "mode": "ternary",
+        "seed": 1,
+        "hit_step": null,
+        "final_acc": 0.98046875,
+        "final_mse": 0.019275672733783722,
+        "state_entropy_bits": 3.2581164836883545
+      },
+      {
+        "C": 3,
+        "states": 15,
+        "logical_bits": 4,
+        "mode": "ternary",
+        "seed": 2,
+        "hit_step": null,
+        "final_acc": 0.9453125,
+        "final_mse": 0.05424024909734726,
+        "state_entropy_bits": 3.185429573059082
+      },
+      {
+        "C": 3,
+        "states": 15,
+        "logical_bits": 4,
+        "mode": "ternary",
+        "seed": 3,
+        "hit_step": null,
+        "final_acc": 0.96875,
+        "final_mse": 0.028340810909867287,
+        "state_entropy_bits": 3.087761402130127
+      },
+      {
+        "C": 3,
+        "states": 15,
+        "logical_bits": 4,
+        "mode": "ternary",
+        "seed": 4,
+        "hit_step": null,
+        "final_acc": 0.98046875,
+        "final_mse": 0.018399406224489212,
+        "state_entropy_bits": 2.9280505180358887
+      }
+    ]
+  },
+  {
+    "C": 5,
+    "states": 27,
+    "logical_bits": 5,
+    "mode": "direct",
+    "median_hit_step": 999999,
+    "mean_final_acc": 0.99140625,
+    "mean_final_mse": 0.007847015652805567,
+    "mean_state_entropy_bits": 3.5625092506408693,
+    "trials": [
+      {
+        "C": 5,
+        "states": 27,
+        "logical_bits": 5,
+        "mode": "direct",
+        "seed": 0,
+        "hit_step": null,
+        "final_acc": 0.99609375,
+        "final_mse": 0.003923099022358656,
+        "state_entropy_bits": 3.6471903324127197
+      },
+      {
+        "C": 5,
+        "states": 27,
+        "logical_bits": 5,
+        "mode": "direct",
+        "seed": 1,
+        "hit_step": null,
+        "final_acc": 0.98828125,
+        "final_mse": 0.009581715799868107,
+        "state_entropy_bits": 3.5519042015075684
+      },
+      {
+        "C": 5,
+        "states": 27,
+        "logical_bits": 5,
+        "mode": "direct",
+        "seed": 2,
+        "hit_step": 729,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 3.476318359375
+      },
+      {
+        "C": 5,
+        "states": 27,
+        "logical_bits": 5,
+        "mode": "direct",
+        "seed": 3,
+        "hit_step": null,
+        "final_acc": 0.984375,
+        "final_mse": 0.014393454417586327,
+        "state_entropy_bits": 3.5444083213806152
+      },
+      {
+        "C": 5,
+        "states": 27,
+        "logical_bits": 5,
+        "mode": "direct",
+        "seed": 4,
+        "hit_step": null,
+        "final_acc": 0.98828125,
+        "final_mse": 0.011336809024214745,
+        "state_entropy_bits": 3.5927250385284424
+      }
+    ]
+  },
+  {
+    "C": 5,
+    "states": 27,
+    "logical_bits": 5,
+    "mode": "ternary",
+    "median_hit_step": 999999,
+    "mean_final_acc": 0.990625,
+    "mean_final_mse": 0.008769366890192032,
+    "mean_state_entropy_bits": 3.4761812686920166,
+    "trials": [
+      {
+        "C": 5,
+        "states": 27,
+        "logical_bits": 5,
+        "mode": "ternary",
+        "seed": 0,
+        "hit_step": null,
+        "final_acc": 0.99609375,
+        "final_mse": 0.0037827789783477783,
+        "state_entropy_bits": 3.3628830909729004
+      },
+      {
+        "C": 5,
+        "states": 27,
+        "logical_bits": 5,
+        "mode": "ternary",
+        "seed": 1,
+        "hit_step": 766,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 3.5225107669830322
+      },
+      {
+        "C": 5,
+        "states": 27,
+        "logical_bits": 5,
+        "mode": "ternary",
+        "seed": 2,
+        "hit_step": null,
+        "final_acc": 0.98046875,
+        "final_mse": 0.017718467861413956,
+        "state_entropy_bits": 3.6618669033050537
+      },
+      {
+        "C": 5,
+        "states": 27,
+        "logical_bits": 5,
+        "mode": "ternary",
+        "seed": 3,
+        "hit_step": null,
+        "final_acc": 0.98828125,
+        "final_mse": 0.010106459259986877,
+        "state_entropy_bits": 3.4916744232177734
+      },
+      {
+        "C": 5,
+        "states": 27,
+        "logical_bits": 5,
+        "mode": "ternary",
+        "seed": 4,
+        "hit_step": null,
+        "final_acc": 0.98828125,
+        "final_mse": 0.012239128351211548,
+        "state_entropy_bits": 3.3419711589813232
+      }
+    ]
+  },
+  {
+    "C": 8,
+    "states": 45,
+    "logical_bits": 6,
+    "mode": "direct",
+    "median_hit_step": 794,
+    "mean_final_acc": 0.99765625,
+    "mean_final_mse": 0.0020899045281112193,
+    "mean_state_entropy_bits": 3.9901224613189696,
+    "trials": [
+      {
+        "C": 8,
+        "states": 45,
+        "logical_bits": 6,
+        "mode": "direct",
+        "seed": 0,
+        "hit_step": 767,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 3.8657145500183105
+      },
+      {
+        "C": 8,
+        "states": 45,
+        "logical_bits": 6,
+        "mode": "direct",
+        "seed": 1,
+        "hit_step": 752,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 3.901890993118286
+      },
+      {
+        "C": 8,
+        "states": 45,
+        "logical_bits": 6,
+        "mode": "direct",
+        "seed": 2,
+        "hit_step": 794,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 4.058155536651611
+      },
+      {
+        "C": 8,
+        "states": 45,
+        "logical_bits": 6,
+        "mode": "direct",
+        "seed": 3,
+        "hit_step": null,
+        "final_acc": 0.9921875,
+        "final_mse": 0.006812061183154583,
+        "state_entropy_bits": 4.160581111907959
+      },
+      {
+        "C": 8,
+        "states": 45,
+        "logical_bits": 6,
+        "mode": "direct",
+        "seed": 4,
+        "hit_step": null,
+        "final_acc": 0.99609375,
+        "final_mse": 0.003637461457401514,
+        "state_entropy_bits": 3.9642701148986816
+      }
+    ]
+  },
+  {
+    "C": 8,
+    "states": 45,
+    "logical_bits": 6,
+    "mode": "ternary",
+    "median_hit_step": 737,
+    "mean_final_acc": 0.996875,
+    "mean_final_mse": 0.003071306552737951,
+    "mean_state_entropy_bits": 3.968145656585693,
+    "trials": [
+      {
+        "C": 8,
+        "states": 45,
+        "logical_bits": 6,
+        "mode": "ternary",
+        "seed": 0,
+        "hit_step": 722,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 3.935337781906128
+      },
+      {
+        "C": 8,
+        "states": 45,
+        "logical_bits": 6,
+        "mode": "ternary",
+        "seed": 1,
+        "hit_step": 737,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 4.0093817710876465
+      },
+      {
+        "C": 8,
+        "states": 45,
+        "logical_bits": 6,
+        "mode": "ternary",
+        "seed": 2,
+        "hit_step": null,
+        "final_acc": 0.98828125,
+        "final_mse": 0.01135113462805748,
+        "state_entropy_bits": 4.092513084411621
+      },
+      {
+        "C": 8,
+        "states": 45,
+        "logical_bits": 6,
+        "mode": "ternary",
+        "seed": 3,
+        "hit_step": 681,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 3.907306432723999
+      },
+      {
+        "C": 8,
+        "states": 45,
+        "logical_bits": 6,
+        "mode": "ternary",
+        "seed": 4,
+        "hit_step": null,
+        "final_acc": 0.99609375,
+        "final_mse": 0.0040053981356322765,
+        "state_entropy_bits": 3.8961892127990723
+      }
+    ]
+  },
+  {
+    "C": 11,
+    "states": 63,
+    "logical_bits": 6,
+    "mode": "direct",
+    "median_hit_step": 783,
+    "mean_final_acc": 0.9984375,
+    "mean_final_mse": 0.0014807370491325856,
+    "mean_state_entropy_bits": 4.247212600708008,
+    "trials": [
+      {
+        "C": 11,
+        "states": 63,
+        "logical_bits": 6,
+        "mode": "direct",
+        "seed": 0,
+        "hit_step": 783,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 4.1250457763671875
+      },
+      {
+        "C": 11,
+        "states": 63,
+        "logical_bits": 6,
+        "mode": "direct",
+        "seed": 1,
+        "hit_step": 690,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 4.142685890197754
+      },
+      {
+        "C": 11,
+        "states": 63,
+        "logical_bits": 6,
+        "mode": "direct",
+        "seed": 2,
+        "hit_step": null,
+        "final_acc": 0.99609375,
+        "final_mse": 0.0039447275921702385,
+        "state_entropy_bits": 4.424647808074951
+      },
+      {
+        "C": 11,
+        "states": 63,
+        "logical_bits": 6,
+        "mode": "direct",
+        "seed": 3,
+        "hit_step": null,
+        "final_acc": 0.99609375,
+        "final_mse": 0.003458957653492689,
+        "state_entropy_bits": 4.389795303344727
+      },
+      {
+        "C": 11,
+        "states": 63,
+        "logical_bits": 6,
+        "mode": "direct",
+        "seed": 4,
+        "hit_step": 689,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 4.15388822555542
+      }
+    ]
+  },
+  {
+    "C": 11,
+    "states": 63,
+    "logical_bits": 6,
+    "mode": "ternary",
+    "median_hit_step": 721,
+    "mean_final_acc": 0.99921875,
+    "mean_final_mse": 0.000813177227973938,
+    "mean_state_entropy_bits": 4.13519515991211,
+    "trials": [
+      {
+        "C": 11,
+        "states": 63,
+        "logical_bits": 6,
+        "mode": "ternary",
+        "seed": 0,
+        "hit_step": 742,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 4.028937339782715
+      },
+      {
+        "C": 11,
+        "states": 63,
+        "logical_bits": 6,
+        "mode": "ternary",
+        "seed": 1,
+        "hit_step": 721,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 4.169028282165527
+      },
+      {
+        "C": 11,
+        "states": 63,
+        "logical_bits": 6,
+        "mode": "ternary",
+        "seed": 2,
+        "hit_step": null,
+        "final_acc": 0.99609375,
+        "final_mse": 0.00406588613986969,
+        "state_entropy_bits": 4.277948379516602
+      },
+      {
+        "C": 11,
+        "states": 63,
+        "logical_bits": 6,
+        "mode": "ternary",
+        "seed": 3,
+        "hit_step": 636,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 4.107352256774902
+      },
+      {
+        "C": 11,
+        "states": 63,
+        "logical_bits": 6,
+        "mode": "ternary",
+        "seed": 4,
+        "hit_step": 707,
+        "final_acc": 1.0,
+        "final_mse": 0.0,
+        "state_entropy_bits": 4.092709541320801
+      }
+    ]
+  }
+]

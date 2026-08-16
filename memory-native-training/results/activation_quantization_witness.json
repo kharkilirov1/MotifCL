@@ -1,0 +1,218 @@
+[
+  {
+    "activation": "fp",
+    "effective_bits_per_element": 16.0,
+    "median_hit_step": 999999,
+    "mean_final_acc": 0.97734375,
+    "mean_final_mse": 0.04246844798326492,
+    "trials": [
+      {
+        "activation": "fp",
+        "seed": 0,
+        "bits": 16,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 16.0,
+        "hit_step": null,
+        "final_acc": 0.978515625,
+        "final_mse": 0.03906409814953804
+      },
+      {
+        "activation": "fp",
+        "seed": 1,
+        "bits": 16,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 16.0,
+        "hit_step": null,
+        "final_acc": 0.9765625,
+        "final_mse": 0.04408162832260132
+      },
+      {
+        "activation": "fp",
+        "seed": 2,
+        "bits": 16,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 16.0,
+        "hit_step": null,
+        "final_acc": 0.978515625,
+        "final_mse": 0.04026778042316437
+      },
+      {
+        "activation": "fp",
+        "seed": 3,
+        "bits": 16,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 16.0,
+        "hit_step": null,
+        "final_acc": 0.9794921875,
+        "final_mse": 0.04014145955443382
+      },
+      {
+        "activation": "fp",
+        "seed": 4,
+        "bits": 16,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 16.0,
+        "hit_step": null,
+        "final_acc": 0.9736328125,
+        "final_mse": 0.04878727346658707
+      }
+    ]
+  },
+  {
+    "activation": "int8",
+    "effective_bits_per_element": 8.5,
+    "median_hit_step": 999999,
+    "mean_final_acc": 0.9787109375,
+    "mean_final_mse": 0.04032370001077652,
+    "trials": [
+      {
+        "activation": "int8",
+        "seed": 0,
+        "bits": 8,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 8.5,
+        "hit_step": null,
+        "final_acc": 0.97265625,
+        "final_mse": 0.05093050375580788
+      },
+      {
+        "activation": "int8",
+        "seed": 1,
+        "bits": 8,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 8.5,
+        "hit_step": null,
+        "final_acc": 0.9833984375,
+        "final_mse": 0.03209071233868599
+      },
+      {
+        "activation": "int8",
+        "seed": 2,
+        "bits": 8,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 8.5,
+        "hit_step": null,
+        "final_acc": 0.982421875,
+        "final_mse": 0.033279672265052795
+      },
+      {
+        "activation": "int8",
+        "seed": 3,
+        "bits": 8,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 8.5,
+        "hit_step": null,
+        "final_acc": 0.9755859375,
+        "final_mse": 0.04574146121740341
+      },
+      {
+        "activation": "int8",
+        "seed": 4,
+        "bits": 8,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 8.5,
+        "hit_step": null,
+        "final_acc": 0.9794921875,
+        "final_mse": 0.039576150476932526
+      }
+    ]
+  },
+  {
+    "activation": "int4",
+    "effective_bits_per_element": 4.5,
+    "median_hit_step": 999999,
+    "mean_final_acc": 0.9767578125,
+    "mean_final_mse": 0.04371281787753105,
+    "trials": [
+      {
+        "activation": "int4",
+        "seed": 0,
+        "bits": 4,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 4.5,
+        "hit_step": null,
+        "final_acc": 0.96875,
+        "final_mse": 0.0573604516685009
+      },
+      {
+        "activation": "int4",
+        "seed": 1,
+        "bits": 4,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 4.5,
+        "hit_step": null,
+        "final_acc": 0.982421875,
+        "final_mse": 0.03366413712501526
+      },
+      {
+        "activation": "int4",
+        "seed": 2,
+        "bits": 4,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 4.5,
+        "hit_step": null,
+        "final_acc": 0.982421875,
+        "final_mse": 0.033279672265052795
+      },
+      {
+        "activation": "int4",
+        "seed": 3,
+        "bits": 4,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 4.5,
+        "hit_step": null,
+        "final_acc": 0.9765625,
+        "final_mse": 0.04364781826734543
+      },
+      {
+        "activation": "int4",
+        "seed": 4,
+        "bits": 4,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 4.5,
+        "hit_step": null,
+        "final_acc": 0.9736328125,
+        "final_mse": 0.050612010061740875
+      }
+    ]
+  },
+  {
+    "activation": "int3",
+    "effective_bits_per_element": 3.5,
+    "median_hit_step": 999999,
+    "mean_final_acc": 0.9759765625,
+    "mean_final_mse": 0.045578939467668535,
+    "trials": [
+      {
+        "activation": "int3",
+        "seed": 0,
+        "bits": 3,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 3.5,
+        "hit_step": null,
+        "final_acc": 0.966796875,
+        "final_mse": 0.06266433000564575
+      },
+      {
+        "activation": "int3",
+        "seed": 1,
+        "bits": 3,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 3.5,
+        "hit_step": null,
+        "final_acc": 0.98046875,
+        "final_mse": 0.03704054653644562
+      },
+      {
+        "activation": "int3",
+        "seed": 2,
+        "bits": 3,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 3.5,
+        "hit_step": null,
+        "final_acc": 0.9775390625,
+        "final_mse": 0.04210757464170456
+      },
+      {
+        "activation": "int3",
+        "seed": 3,
+        "bits": 3,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 3.5,
+        "hit_step": null,
+        "final_acc": 0.9775390625,
+        "final_mse": 0.04283200576901436
+      },
+      {
+        "activation": "int3",
+        "seed": 4,
+        "bits": 3,
+        "effective_activation_bits_per_element_with_fp16_token_scale": 3.5,
+        "hit_step": null,
+        "final_acc": 0.9775390625,
+        "final_mse": 0.04325024038553238
+      }
+    ]
+  }
+]

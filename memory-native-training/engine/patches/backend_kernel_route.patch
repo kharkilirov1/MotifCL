@@ -1,0 +1,12 @@
+diff --git a/src/runtime/backend.cpp b/src/runtime/backend.cpp
+index 3163386..8086a69 100644
+--- a/src/runtime/backend.cpp
++++ b/src/runtime/backend.cpp
+@@ -153,6 +153,7 @@ KernelCache::KernelCache(OpenCLContext& ctx, std::string kernel_dir, Profiler* p
+     : ctx_(&ctx), profiler_(profiler), kernel_dir_(std::move(kernel_dir)) {}
+ 
+ std::string KernelCache::source_file_for_kernel(const std::string& kernel_name) const {
++    if (contains(kernel_name, "counter")) return "compact_counter.cl";
+     if (contains(kernel_name, "f16")) return "fp16.cl";
+     if (contains(kernel_name, "matmul")) return "matmul.cl";
+     if (contains(kernel_name, "quantize") || contains(kernel_name, "dequantize")) return "quant.cl";
