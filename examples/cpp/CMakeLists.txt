@@ -18,6 +18,7 @@ set(MOTIFCL_EXAMPLES
     17_fog_v3_ghost_room_test
     18_fog_v3_fairy_tale_logic
     19_fog_v3_advanced_logic_suite
+    20_fog_v3_ultimate_benchmark
 )
 
 foreach(example ${MOTIFCL_EXAMPLES})
