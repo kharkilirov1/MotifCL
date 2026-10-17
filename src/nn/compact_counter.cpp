@@ -164,6 +164,39 @@ void CounterStateLinear::apply_update_backward(const Tensor& grad_out, const Ten
     Tensor scale_new = Tensor::empty(*backend_, {out_}, DType::F32);
     Tensor denom = Tensor::empty(*backend_, {out_}, DType::F32);
     if (backend_->is_vulkan()) {
+        // Tiled fast path: one register-blocked tn GEMM forms grad_w into a single
+        // reusable scratch buffer and reduces the two row statistics, then one
+        // bandwidth-only pass per row folds them, commits v/scale, and ticks the
+        // packed state. This replaces the old double-recompute of grad_w (two
+        // scalar kernels whose strided grad_out reads dominated the update) and
+        // removes the separate row-scale copy dispatch.
+        //
+        // The grad_w scratch is TRANSIENT and reused by every layer: the layer's
+        // persistent cost stays packed 6-bit state + O(out) scale/v. Very large
+        // layers keep the strictly allocation-free recompute path below so a
+        // dense gradient never inflates the model footprint.
+        constexpr std::int64_t kGradWScratchLimitBytes = 32LL * 1024 * 1024;
+        const std::int64_t grad_w_bytes = static_cast<std::int64_t>(out_) * in_ * (std::int64_t)sizeof(float);
+        if (grad_w_bytes <= kGradWScratchLimitBytes && in_ % 4 == 0) {
+            Tensor grad_w;
+            {
+                // The counter update is a state side effect: nothing here may be
+                // recorded on the autograd tape (the caller already holds a
+                // NoGradGuard for the fused path; keep it explicit for direct
+                // calls from tests and tooling).
+                autograd::NoGradGuard guard;
+                grad_w = matmul_transpose_a(grad_out, x);  // [out, in] = grad_out^T * x
+            }
+            auto& rt = backend_->vulkan_runtime();
+            const auto apply_run = run_vulkan_compact_counter_update_apply(
+                rt, state.storage().vulkan_buffer, scale.storage().vulkan_buffer,
+                v.storage().vulkan_buffer, grad_w.storage().vulkan_buffer,
+                static_cast<std::size_t>(in_), static_cast<std::size_t>(out_),
+                static_cast<std::size_t>(C_), lr_, lr_scale_, rms_beta_, rms_eps_, seed);
+            MCL_CHECK(apply_run.success,
+                      std::string("vulkan compact-counter tiled update failed: ") + apply_run.error);
+            return;
+        }
         const auto run = run_vulkan_compact_counter_apply_update_fused(
             backend_->vulkan_runtime(),
             state.storage().vulkan_buffer,

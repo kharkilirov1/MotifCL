@@ -1,0 +1,165 @@
+// Memory-native counter update: fold the row statistics, commit the row-RMS and
+// scale state, and run the finite-state stochastic-rounding tick.
+//
+// One wave64 workgroup per output row. grad_w comes from the tiled transposed
+// GEMM that runs immediately before this dispatch (grad_w = grad_out^T * x into
+// a reusable scratch buffer), so this pass is bandwidth-only: one row of grad_w,
+// one row of packed state, and O(1) row statistics.
+//
+// This replaces the old two-kernel update, which recomputed the whole grad_w
+// GEMM a second time with a scalar one-row-per-workgroup kernel whose strided
+// grad_out reads dominated the update (~50% of a training step's GPU time on the
+// RX 580). The arithmetic order is preserved exactly: each lane accumulates the
+// same groups in the same order and the row reduction is a subgroupAdd over one
+// wave, so the resulting state bytes match the previous fused kernel bit for bit
+// whenever grad_w matches, and the separate row-scale copy dispatch is folded
+// into lane 0.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer GradWBuf { float grad_w[]; };
+layout(std430, set = 0, binding = 1) buffer StateBuf { uint8_t state[]; };
+layout(std430, set = 0, binding = 2) buffer ScaleBuf { float scale[]; };
+layout(std430, set = 0, binding = 3) buffer VBuf { float v[]; };
+
+layout(push_constant) uniform Push {
+    uint in_features;
+    uint out_features;
+    uint C;
+    float lr;
+    float lr_scale;
+    float rms_beta;
+    float rms_eps;
+    uint seed;
+} p;
+
+uint cc_hash_u32(uint h) {
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+    return h;
+}
+
+float cc_uniform01(uint h) {
+    return float(cc_hash_u32(h) & 0x00ffffffu) * (1.0 / 16777216.0);
+}
+
+void cc_decode(int code, int C, out int t, out int c) {
+    const int lv = 2 * C - 1;
+    if (code < 3 * lv) {
+        const int band = code < lv ? 0 : (code < 2 * lv ? 1 : 2);
+        t = band - 1;
+        c = code - band * lv - (C - 1);
+    } else {
+        t = code / lv - 1;
+        c = code % lv - (C - 1);
+    }
+}
+
+int cc_encode(int t, int c, int C) {
+    const int lv = 2 * C - 1;
+    return (t + 1) * lv + (c + (C - 1));
+}
+
+int ternary_from_code(int code, int levels) {
+    if (code < levels) return -1;
+    if (code < 2 * levels) return 0;
+    if (code < 3 * levels) return 1;
+    return code / levels - 1;
+}
+
+void main() {
+    const int row = int(gl_WorkGroupID.x);
+    const int lid = int(gl_LocalInvocationID.x);
+    const int C = int(p.C);
+    const int in_features = int(p.in_features);
+    const int gpr = in_features / 4;
+    const int levels = 2 * C - 1;
+    const int row_base = row * in_features;
+    const int state_base = row * gpr * 3;
+
+    // Pass 1: row statistics, exactly the previous pass-1 accumulation order
+    // (per-lane groups strided by the wave width, then one subgroup reduction).
+    float g_sq = 0.0;
+    float grad_s = 0.0;
+    for (int g = lid; g < gpr; g += 64) {
+        const int base = state_base + g * 3;
+        const int b0 = int(uint(state[base]));
+        const int b1 = int(uint(state[base + 1]));
+        const int b2 = int(uint(state[base + 2]));
+        int cc[4];
+        cc[0] = b0 & 0x3F;
+        cc[1] = ((b0 >> 6) | (b1 << 2)) & 0x3F;
+        cc[2] = ((b1 >> 4) | (b2 << 4)) & 0x3F;
+        cc[3] = (b2 >> 2) & 0x3F;
+        const int col = row_base + g * 4;
+        for (int k = 0; k < 4; ++k) {
+            const float gw = grad_w[col + k];
+            g_sq += gw * gw;
+            grad_s += gw * float(ternary_from_code(cc[k], levels));
+        }
+    }
+    g_sq = subgroupAdd(g_sq);
+    grad_s = subgroupAdd(grad_s);
+
+    const float inv_in = 1.0 / float(in_features);
+    const float inv_sqrt_in = 1.0 / sqrt(float(in_features));
+    const float s_old = scale[row];
+    const float vv = p.rms_beta * v[row] + (1.0 - p.rms_beta) * (g_sq * inv_in);
+    const float dn = max(sqrt(vv), p.rms_eps);
+    const float s_new = clamp(s_old - p.lr_scale * (grad_s * inv_sqrt_in), 1e-5, 10.0);
+    const float Cf = float(C);
+
+    // Pass 2: the tick. grad_w and the packed row are tiny and now cache-hot.
+    for (int g = lid; g < gpr; g += 64) {
+        const int base = state_base + g * 3;
+        const int b0 = int(uint(state[base]));
+        const int b1 = int(uint(state[base + 1]));
+        const int b2 = int(uint(state[base + 2]));
+        int cc[4];
+        cc[0] = b0 & 0x3F;
+        cc[1] = ((b0 >> 6) | (b1 << 2)) & 0x3F;
+        cc[2] = ((b1 >> 4) | (b2 << 4)) & 0x3F;
+        cc[3] = (b2 >> 2) & 0x3F;
+        const int col = row_base + g * 4;
+        int nc[4];
+        for (int k = 0; k < 4; ++k) {
+            const int elem = col + k;
+            int t;
+            int c;
+            cc_decode(cc[k], C, t, c);
+            const float tick = -p.lr * (grad_w[elem] / dn) * (Cf / s_new);
+            const float c_reb = float(c) * (s_old / s_new);
+            const float val = c_reb + tick;
+            const float f = floor(val);
+            const float rnd = cc_uniform01(p.seed ^ cc_hash_u32(uint(elem)));
+            const float ccv = f + ((rnd < (val - f)) ? 1.0 : 0.0);
+            const float carry = trunc(ccv / Cf);
+            float rem = ccv - carry * Cf;
+            const int nt = t + int(carry);
+            const int ct = nt < -1 ? -1 : (nt > 1 ? 1 : nt);
+            if (ct != nt) {
+                rem = (ccv > 0.0 ? 1.0 : (ccv < 0.0 ? -1.0 : 0.0)) * (Cf - 1.0);
+            }
+            int ri = int(rem);
+            ri = ri < -(C - 1) ? -(C - 1) : (ri > C - 1 ? C - 1 : ri);
+            nc[k] = cc_encode(ct, ri, C);
+        }
+        state[base] = uint8_t((nc[0] & 0x3F) | ((nc[1] & 0x03) << 6));
+        state[base + 1] = uint8_t(((nc[1] >> 2) & 0x0F) | ((nc[2] & 0x0F) << 4));
+        state[base + 2] = uint8_t(((nc[2] >> 4) & 0x03) | ((nc[3] & 0x3F) << 2));
+    }
+
+    // Commit the row state after every lane has consumed s_old/v[row].
+    barrier();
+    if (lid == 0) {
+        v[row] = vv;
+        scale[row] = s_new;
+    }
+}

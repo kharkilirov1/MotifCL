@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,6 +38,29 @@ namespace {
 // Embedded SPIR-V for the cached fast-dispatch kernels (see
 // kernels/vulkan/*.comp and tools/gen_vulkan_spirv.py).
 #include "vulkan_spirv_kernels.inc"
+
+// Kernel-name lookup for the opt-in per-kernel GPU profiler
+// (MOTIFCL_VK_PROFILE=1). Every embedded module is a static array, so pointer
+// identity is a stable key for the modules the runtime is handed.
+struct SpirvNameEntry {
+    const void* spirv;
+    const char* name;
+};
+const SpirvNameEntry* spirv_name_entries(std::size_t& count) {
+    static const SpirvNameEntry kEntries[] = {
+#include "vulkan_spirv_names.inc"
+    };
+    count = sizeof(kEntries) / sizeof(kEntries[0]);
+    return kEntries;
+}
+const char* spirv_kernel_name(const void* spirv) {
+    std::size_t count = 0;
+    const SpirvNameEntry* entries = spirv_name_entries(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (entries[i].spirv == spirv) return entries[i].name;
+    }
+    return "unknown_kernel";
+}
 
 using VkFlags = std::uint32_t;
 using VkDeviceSize = std::uint64_t;
@@ -4647,6 +4672,98 @@ struct VulkanRuntime::Impl {
     bool batch_timed = false;
     double last_gpu_us = -1.0;
 
+    // --- opt-in per-kernel GPU profiler (MOTIFCL_VK_PROFILE=1) --------------
+    // One timestamp is recorded before every dispatch in a batch plus one after
+    // the last, so each dispatch's GPU time is the delta between adjacent
+    // stamps. Totals accumulate per kernel name until the caller resets them.
+    // Zero cost when disabled: no query writes, no extra pool.
+    bool profile_enabled = false;
+    VkQueryPool profile_pool = nullptr;
+    std::uint32_t profile_query_capacity = 0;
+    std::uint32_t profile_prev_queries = 0;
+    std::vector<const void*> profile_batch_kernels;
+    struct KernelProfileEntry {
+        const char* name = "";
+        std::uint64_t calls = 0;
+        double total_us = 0.0;
+    };
+    std::unordered_map<const void*, std::size_t> profile_index;
+    std::vector<KernelProfileEntry> profile_entries;
+    bool profile_batch_overflow = false;
+    // Wall time spent in vkQueueSubmit + vkWaitForFences for the last batch, and
+    // total submits, so callers can separate GPU work from submit overhead.
+    double last_submit_us = -1.0;
+    std::uint64_t submit_count = 0;
+
+    bool ensure_profile_pool(std::uint32_t capacity) {
+        if (profile_pool && profile_query_capacity >= capacity) return true;
+        if (!ready || !device || !create_query_pool || !destroy_query_pool) return false;
+        if (profile_pool && destroy_query_pool) {
+            destroy_query_pool(device, profile_pool, nullptr);
+            profile_pool = nullptr;
+        }
+        std::uint32_t wanted = profile_query_capacity ? profile_query_capacity : 2048u;
+        while (wanted < capacity) wanted *= 2u;
+        const VkQueryPoolCreateInfo query_info{
+            VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            nullptr,
+            0,
+            VK_QUERY_TYPE_TIMESTAMP,
+            wanted,
+            0,
+        };
+        if (create_query_pool(device, &query_info, nullptr, &profile_pool) != VK_SUCCESS) {
+            profile_pool = nullptr;
+            profile_query_capacity = 0;
+            return false;
+        }
+        profile_query_capacity = wanted;
+        profile_prev_queries = 0;
+        return true;
+    }
+
+    void reset_profile_totals() {
+        profile_entries.clear();
+        profile_index.clear();
+    }
+
+    void accumulate_profile(std::uint32_t dispatch_count) {
+        if (!profile_pool || dispatch_count == 0) return;
+        const std::uint32_t queries = dispatch_count + 1;
+        std::vector<std::uint64_t> stamps(queries, 0);
+        const VkResult rc = get_query_pool_results(device, profile_pool, 0, queries,
+                                                   queries * sizeof(std::uint64_t), stamps.data(),
+                                                   sizeof(std::uint64_t),
+                                                   VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        if (rc != VK_SUCCESS) return;
+        std::uint64_t mask = ~std::uint64_t{0};
+        if (timestamp_valid_bits > 0 && timestamp_valid_bits < 64) {
+            mask = (std::uint64_t{1} << timestamp_valid_bits) - 1;
+        }
+        const double ns_per_tick = caps.timestamp_period_ns;
+        if (!(ns_per_tick > 0.0)) return;
+        for (std::uint32_t i = 0; i < dispatch_count; ++i) {
+            const std::uint64_t begin = stamps[i] & mask;
+            const std::uint64_t end = stamps[i + 1] & mask;
+            const std::uint64_t delta = end >= begin ? end - begin : (mask - begin) + end + 1;
+            const void* spirv = profile_batch_kernels[i];
+            auto it = profile_index.find(spirv);
+            std::size_t slot = 0;
+            if (it == profile_index.end()) {
+                slot = profile_entries.size();
+                profile_index.emplace(spirv, slot);
+                KernelProfileEntry entry;
+                entry.name = spirv_kernel_name(spirv);
+                profile_entries.push_back(entry);
+            } else {
+                slot = it->second;
+            }
+            auto& entry = profile_entries[slot];
+            ++entry.calls;
+            entry.total_us += static_cast<double>(delta) * ns_per_tick / 1000.0;
+        }
+    }
+
     bool batch_open = false;
     std::uint32_t batch_dispatch_count = 0;
     std::string batch_error;
@@ -4671,15 +4788,25 @@ struct VulkanRuntime::Impl {
     std::map<std::pair<std::size_t, bool>, std::vector<PooledBuffer>> buffer_pool;
     std::size_t buffer_pool_bytes = 0;
     std::size_t buffer_pool_allocations = 0;
+    // Device memory owned by the runtime (in use + pooled); peak of the same.
+    std::size_t live_buffer_bytes = 0;
+    std::size_t peak_buffer_bytes = 0;
+    std::size_t total_buffer_allocations = 0;
 
-    static constexpr std::size_t kBufferPoolCapBytes = 2048u * 1024u * 1024u;
-    static constexpr std::size_t kBufferPoolMaxAllocations = 2048;
-    static constexpr std::size_t kBufferPoolMaxPerBucket = 128;
+    // Pool limits. The default cap tracks real training working sets: the MoE
+    // trainer's live peak is ~3.3 GB, so a 2 GB pool could not recycle the
+    // vocabulary-logit buffers and re-allocated them through vkAllocateMemory on
+    // every step (measured: ~1 s of CPU per step). The cap is RAM/VRAM budget,
+    // not correctness: past it buffers are destroyed and re-created as before.
+    static constexpr std::size_t kBufferPoolCapBytes = 6144u * 1024u * 1024u;
+    static constexpr std::size_t kBufferPoolMaxAllocations = 4096;
+    static constexpr std::size_t kBufferPoolMaxPerBucket = 256;
 
     void pool_release(VkBuffer buffer, VkDeviceMemory memory, std::size_t capacity, bool host_visible) {
         if (!device || !ready || capacity == 0) {
             if (buffer && destroy_buffer) destroy_buffer(device, buffer, nullptr);
             if (memory && free_memory) free_memory(device, memory, nullptr);
+            live_buffer_bytes = (capacity <= live_buffer_bytes) ? (live_buffer_bytes - capacity) : 0;
             return;
         }
         auto& bucket = buffer_pool[{capacity, host_visible}];
@@ -4688,6 +4815,7 @@ struct VulkanRuntime::Impl {
             buffer_pool_bytes + capacity > kBufferPoolCapBytes) {
             if (buffer && destroy_buffer) destroy_buffer(device, buffer, nullptr);
             if (memory && free_memory) free_memory(device, memory, nullptr);
+            live_buffer_bytes = (capacity <= live_buffer_bytes) ? (live_buffer_bytes - capacity) : 0;
             return;
         }
         bucket.push_back(PooledBuffer{buffer, memory});
@@ -4716,6 +4844,7 @@ struct VulkanRuntime::Impl {
         buffer_pool.clear();
         buffer_pool_bytes = 0;
         buffer_pool_allocations = 0;
+        live_buffer_bytes = 0;
     }
 
     // Dispatch capture state (see VulkanDispatchRecording).
@@ -4774,6 +4903,10 @@ struct VulkanRuntime::Impl {
         inflight_descriptor_sets.clear();
         if (query_pool && destroy_query_pool) destroy_query_pool(device, query_pool, nullptr);
         query_pool = nullptr;
+        if (profile_pool && destroy_query_pool) destroy_query_pool(device, profile_pool, nullptr);
+        profile_pool = nullptr;
+        profile_query_capacity = 0;
+        profile_batch_kernels.clear();
         if (fast_fence && destroy_fence) destroy_fence(device, fast_fence, nullptr);
         fast_fence = nullptr;
         if (transfer_fence && destroy_fence) destroy_fence(device, transfer_fence, nullptr);
@@ -4929,6 +5062,9 @@ struct VulkanRuntime::Impl {
             }
         }
         fast_ready = true;
+        const char* profile_env = std::getenv("MOTIFCL_VK_PROFILE");
+        profile_enabled = profile_env && *profile_env && *profile_env != '0' && caps.timestamps;
+        if (profile_enabled) ensure_profile_pool(2048u);
         return true;
     }
 
@@ -5127,6 +5263,11 @@ struct VulkanRuntime::Impl {
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &acquire, 0, nullptr, 0, nullptr);
         batch_timed = timed && query_pool != nullptr;
+        if (profile_enabled && profile_pool) {
+            cmd_reset_query_pool(fast_command_buffer, profile_pool, 0, profile_query_capacity);
+            profile_batch_kernels.clear();
+            profile_batch_overflow = false;
+        }
         if (batch_timed) {
             cmd_reset_query_pool(fast_command_buffer, query_pool, 0, 2);
             cmd_write_timestamp(fast_command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
@@ -5150,6 +5291,10 @@ struct VulkanRuntime::Impl {
         if (batch_timed) {
             cmd_write_timestamp(fast_command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
         }
+        if (profile_enabled && profile_pool && !profile_batch_kernels.empty()) {
+            cmd_write_timestamp(fast_command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, profile_pool,
+                                static_cast<std::uint32_t>(profile_batch_kernels.size()));
+        }
         if (end_command_buffer(fast_command_buffer) != VK_SUCCESS) {
             return fail_submit("vkEndCommandBuffer failed for cached dispatch");
         }
@@ -5164,11 +5309,15 @@ struct VulkanRuntime::Impl {
             0,
             nullptr,
         };
+        const auto submit_t0 = std::chrono::steady_clock::now();
         const VkResult submit_rc = queue_submit(queue, 1, &submit_info, fast_fence);
         if (submit_rc != VK_SUCCESS) {
             return fail_submit("vkQueueSubmit failed for cached dispatch (" + std::string(vk_result_str(submit_rc)) + " / " + std::to_string(submit_rc) + ")");
         }
         const VkResult wait_rc = wait_for_fences(device, 1, &fast_fence, 1, ~std::uint64_t{0});
+        last_submit_us = std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - submit_t0).count();
+        ++submit_count;
         if (wait_rc != VK_SUCCESS) {
             return fail_submit("vkWaitForFences failed for cached dispatch (" + std::string(vk_result_str(wait_rc)) + " / " + std::to_string(wait_rc) + ")");
         }
@@ -5190,6 +5339,10 @@ struct VulkanRuntime::Impl {
                 const std::uint64_t delta = end >= begin ? end - begin : (mask - begin) + end + 1;
                 last_gpu_us = static_cast<double>(delta) * caps.timestamp_period_ns / 1000.0;
             }
+        }
+        if (profile_enabled && profile_pool && !profile_batch_kernels.empty()) {
+            accumulate_profile(static_cast<std::uint32_t>(profile_batch_kernels.size()));
+            profile_batch_kernels.clear();
         }
         recycle_inflight_sets();
         result.success = true;
@@ -5266,6 +5419,16 @@ struct VulkanRuntime::Impl {
         if (push_bytes > 0) {
             cmd_push_constants(fast_command_buffer, layouts->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                push_bytes, push_data);
+        }
+        if (profile_enabled && profile_pool && !profile_batch_overflow) {
+            const auto index = static_cast<std::uint32_t>(profile_batch_kernels.size());
+            if (index + 1 < profile_query_capacity) {
+                cmd_write_timestamp(fast_command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, profile_pool, index);
+                profile_batch_kernels.push_back(spirv);
+            } else {
+                profile_batch_overflow = true;
+                profile_batch_kernels.clear();
+            }
         }
         cmd_dispatch(fast_command_buffer, group_count_x, group_count_y, group_count_z);
 
@@ -6331,6 +6494,48 @@ double VulkanRuntime::last_gpu_time_us() const {
     return impl_ ? impl_->last_gpu_us : -1.0;
 }
 
+double VulkanRuntime::last_submit_time_us() const {
+    return impl_ ? impl_->last_submit_us : -1.0;
+}
+
+std::uint64_t VulkanRuntime::submit_count() const {
+    return impl_ ? impl_->submit_count : 0;
+}
+
+std::vector<VulkanKernelProfile> VulkanRuntime::kernel_profile() const {
+    std::vector<VulkanKernelProfile> out;
+    if (!impl_) return out;
+    out.reserve(impl_->profile_entries.size());
+    for (const auto& entry : impl_->profile_entries) {
+        VulkanKernelProfile row;
+        row.name = entry.name;
+        row.calls = entry.calls;
+        row.total_us = entry.total_us;
+        out.push_back(std::move(row));
+    }
+    std::sort(out.begin(), out.end(), [](const VulkanKernelProfile& a, const VulkanKernelProfile& b) {
+        if (a.total_us != b.total_us) return a.total_us > b.total_us;
+        return a.name < b.name;
+    });
+    return out;
+}
+
+void VulkanRuntime::reset_kernel_profile() {
+    if (impl_) impl_->reset_profile_totals();
+}
+
+std::size_t VulkanRuntime::buffer_bytes_live() const {
+    return impl_ ? impl_->live_buffer_bytes : 0;
+}
+
+std::size_t VulkanRuntime::buffer_bytes_peak() const {
+    return impl_ ? impl_->peak_buffer_bytes : 0;
+}
+
+std::size_t VulkanRuntime::buffer_allocations() const {
+    return impl_ ? impl_->total_buffer_allocations : 0;
+}
+
 void VulkanRuntime::finish() const {
     if (impl_ && impl_->device && impl_->queue && impl_->queue_wait_idle) {
         impl_->queue_wait_idle(impl_->queue);
@@ -6472,6 +6677,37 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
         const char* env = std::getenv("MOTIFCL_VK_HOST_VISIBLE");
         return env && *env && *env != '0';
     }();
+    // Default: prefer device-local VRAM for tensor storage buffers (the pre-FOG
+    // order). Training activations in system RAM make every dispatch read and
+    // write over PCIe: an A/B on the RX 580 measured 2.0x on the MoE trainer and
+    // 2.8x on the dense trainer for bit-identical losses, so VRAM is the default
+    // and MOTIFCL_VK_PREFER_DEVICE_LOCAL=0 opts back into the host-visible/GTT
+    // policy. Allocation still falls back to BAR then host memory when VRAM is
+    // full, so an oversized model degrades instead of failing.
+    static const bool prefer_device_local = []() {
+        const char* env = std::getenv("MOTIFCL_VK_PREFER_DEVICE_LOCAL");
+        if (env && *env == '0') return false;
+        return true;
+    }();
+
+    // Small buffers stay host-visible by design. A transfer to or from
+    // device-local memory costs a staging submit + fence wait (~1-4 ms each on
+    // Windows/WDDM), while a 128 KiB buffer read by a kernel over PCIe costs a
+    // few microseconds. Training loops move many tiny tensors per step (loss
+    // scalar, router logits and balance gradients, per-row scales, token ids), so
+    // keeping them mappable removes dozens of fences per step. Large buffers keep
+    // the VRAM-first policy above. MOTIFCL_VK_SMALL_HOST_BYTES overrides the
+    // threshold; 0 disables the rule.
+    static const std::size_t small_host_bytes = []() {
+        const char* env = std::getenv("MOTIFCL_VK_SMALL_HOST_BYTES");
+        if (env && *env) {
+            const long long value = std::atoll(env);
+            return value > 0 ? static_cast<std::size_t>(value) : std::size_t{0};
+        }
+        return std::size_t{128} * 1024;
+    }();
+    const bool prefer_host_visible_small = !force_host_visible && small_host_bytes > 0 &&
+                                           nbytes <= small_host_bytes;
 
     // Allocations are bucketed to the next power of two and recycled through
     // the runtime buffer pool; vkAllocateMemory per Tensor temporary is far
@@ -6484,10 +6720,18 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
         VkDeviceMemory pooled_memory = nullptr;
         bool served = false;
         bool served_host_visible = false;
-        if (force_host_visible) {
+        if (force_host_visible || prefer_host_visible_small) {
             // A forced-host-visible caller must get mappable memory.
             served = impl_->pool_acquire(bucket, true, pooled_buffer, pooled_memory);
             served_host_visible = true;
+        } else if (prefer_device_local) {
+            if (impl_->pool_acquire(bucket, false, pooled_buffer, pooled_memory)) {
+                served = true;
+                served_host_visible = false;
+            } else if (impl_->pool_acquire(bucket, true, pooled_buffer, pooled_memory)) {
+                served = true;
+                served_host_visible = true;
+            }
         } else {
             // Prefer host-visible (direct memcpy, zero staging overhead), fallback to device-local staging
             if (impl_->pool_acquire(bucket, true, pooled_buffer, pooled_memory)) {
@@ -6539,9 +6783,17 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
 
     std::vector<std::uint32_t> candidate_types;
     candidate_types.reserve(4);
-    if (force_host_visible) {
+    if (force_host_visible || prefer_host_visible_small) {
         const auto t = pick_type(kMemHostVisibleBit | kMemHostCoherentBit, 0);
         if (t != 0xffffffffu) candidate_types.push_back(t);
+    } else if (prefer_device_local) {
+        // Pre-FOG order: pure device-local VRAM, uploads/downloads via staging.
+        const auto t_dev = pick_type(kMemDeviceLocalBit, kMemHostVisibleBit);
+        if (t_dev != 0xffffffffu) candidate_types.push_back(t_dev);
+        const auto t_bar = pick_type(kMemDeviceLocalBit | kMemHostVisibleBit | kMemHostCoherentBit, 0);
+        if (t_bar != 0xffffffffu && t_bar != t_dev) candidate_types.push_back(t_bar);
+        const auto t_host = pick_type(kMemHostVisibleBit | kMemHostCoherentBit, 0);
+        if (t_host != 0xffffffffu && t_host != t_dev && t_host != t_bar) candidate_types.push_back(t_host);
     } else {
         // 1. Device-local BAR (VRAM + direct host mapping)
         const auto t_bar = pick_type(kMemDeviceLocalBit | kMemHostVisibleBit | kMemHostCoherentBit, 0);
@@ -6583,7 +6835,18 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
     }
     if (!memory) {
         impl_->destroy_buffer(impl_->device, buffer, nullptr);
-        throw std::runtime_error("vkAllocateMemory failed for all compatible memory types");
+        // A bare "allocation failed" at a new model shape cannot distinguish a driver
+        // limit from genuine exhaustion, so the message carries the request and the
+        // runtime's own committed accounting.
+        std::ostringstream oss;
+        oss << "vkAllocateMemory failed for all compatible memory types"
+            << " [requested=" << (memory_requirements.size / (1024 * 1024)) << " MB"
+            << " bucket=" << (bucket / (1024 * 1024)) << " MB"
+            << " candidates=" << candidate_types.size()
+            << " live=" << (impl_->live_buffer_bytes / (1024 * 1024)) << " MB"
+            << " peak=" << (impl_->peak_buffer_bytes / (1024 * 1024)) << " MB"
+            << " allocations=" << impl_->total_buffer_allocations << "]";
+        throw std::runtime_error(oss.str());
     }
     if (impl_->bind_buffer_memory(impl_->device, buffer, memory, 0) != VK_SUCCESS) {
         impl_->free_memory(impl_->device, memory, nullptr);
@@ -6591,6 +6854,11 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
         throw std::runtime_error("vkBindBufferMemory failed");
     }
 
+    impl_->live_buffer_bytes += bucket;
+    if (impl_->live_buffer_bytes > impl_->peak_buffer_bytes) {
+        impl_->peak_buffer_bytes = impl_->live_buffer_bytes;
+    }
+    ++impl_->total_buffer_allocations;
     auto buffer_impl = std::make_shared<VulkanBuffer::Impl>(impl_, buffer, memory, nbytes, host_visible, bucket);
     VulkanBuffer out(std::move(buffer_impl));
     if (initial_data) out.upload(initial_data, nbytes);
@@ -8657,6 +8925,71 @@ VulkanOpResult run_vulkan_compact_counter_decode_weight(VulkanRuntime& runtime,
     return runtime.dispatch_cached(vkspirv::k_counter_decode_weight_f32,
                                    vkspirv::k_counter_decode_weight_f32_words, buffers, &push, sizeof(push),
                                    static_cast<std::uint32_t>((groups + 63) / 64), 1, 1);
+}
+
+VulkanOpResult run_vulkan_compact_counter_update_apply(VulkanRuntime& runtime,
+                                                       VulkanBuffer& state,
+                                                       VulkanBuffer& scale,
+                                                       VulkanBuffer& v,
+                                                       const VulkanBuffer& grad_w,
+                                                       std::size_t in_features,
+                                                       std::size_t out_features,
+                                                       std::size_t C,
+                                                       float lr,
+                                                       float lr_scale,
+                                                       float rms_beta,
+                                                       float rms_eps,
+                                                       std::uint32_t seed) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (in_features == 0 || out_features == 0) {
+        return fail("Vulkan counter update apply requires non-zero dimensions");
+    }
+    if (in_features % 4 != 0) {
+        return fail("Vulkan counter update apply requires in_features divisible by 4");
+    }
+    if (C == 0 || 3 * (2 * C - 1) > 64) {
+        return fail("Vulkan counter update apply C is out of 6-bit range");
+    }
+    if (!runtime.supports_storage_buffer_i8()) {
+        return fail("Vulkan counter update apply requires VK_KHR_8bit_storage on persistent Tensor buffers");
+    }
+    if (in_features > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        out_features > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        C > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return fail("Vulkan counter update apply dimensions exceed specialized SPIR-V limits");
+    }
+    if (out_features > std::numeric_limits<std::size_t>::max() / (in_features / 4) ||
+        out_features > std::numeric_limits<std::size_t>::max() / in_features) {
+        return fail("Vulkan counter update apply buffer size overflows size_t");
+    }
+    const std::size_t groups = out_features * (in_features / 4);
+    if (state.nbytes() < groups * 3) return fail("Vulkan counter update apply state buffer is too small");
+    if (scale.nbytes() < out_features * sizeof(float) || v.nbytes() < out_features * sizeof(float)) {
+        return fail("Vulkan counter update apply scale/v buffer is too small");
+    }
+    if (grad_w.nbytes() < out_features * in_features * sizeof(float)) {
+        return fail("Vulkan counter update apply grad_w scratch is too small");
+    }
+
+    struct Push {
+        std::uint32_t in_features;
+        std::uint32_t out_features;
+        std::uint32_t C;
+        float lr;
+        float lr_scale;
+        float rms_beta;
+        float rms_eps;
+        std::uint32_t seed;
+    } push{static_cast<std::uint32_t>(in_features), static_cast<std::uint32_t>(out_features),
+           static_cast<std::uint32_t>(C), lr, lr_scale, rms_beta, rms_eps, seed};
+    const std::vector<const VulkanBuffer*> buffers = {&grad_w, &state, &scale, &v};
+    return runtime.dispatch_cached(vkspirv::k_counter_update_apply_f32,
+                                   vkspirv::k_counter_update_apply_f32_words, buffers, &push,
+                                   sizeof(push), static_cast<std::uint32_t>(out_features), 1, 1);
 }
 
 VulkanOpResult run_vulkan_compact_counter_forward_u8(VulkanRuntime& runtime,

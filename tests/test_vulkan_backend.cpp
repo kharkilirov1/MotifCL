@@ -1139,6 +1139,40 @@ int main() {
                 }
             }
 
+            // Ops that have since gained Vulkan implementations. This block used
+            // to assert a guard for mul/silu/sum_rows too, which drifted from the
+            // runtime (all three dispatch on Vulkan now), so check forward parity
+            // instead of expecting a throw.
+            {
+                const std::vector<float> av = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+                const std::vector<float> bv = {0.5f, -1.0f, 2.0f, 0.25f, 3.0f, -0.5f};
+                auto VA2 = Tensor::from_cpu(vk_backend, {2, 3}, DType::F32, av.data());
+                auto VB2 = Tensor::from_cpu(vk_backend, {2, 3}, DType::F32, bv.data());
+
+                const auto vm = mul(VA2, VB2).to_vector<float>();
+                bool mul_ok = vm.size() == av.size();
+                for (std::size_t j = 0; j < av.size() && mul_ok; ++j) {
+                    if (std::fabs(vm[j] - av[j] * bv[j]) > 1e-6f) mul_ok = false;
+                }
+                expect(mul_ok, "Vulkan mul forward parity mismatch vs CPU reference");
+
+                const auto vs = silu(VA2).to_vector<float>();
+                bool silu_ok = vs.size() == av.size();
+                for (std::size_t j = 0; j < av.size() && silu_ok; ++j) {
+                    const float ref = av[j] / (1.0f + std::exp(-av[j]));
+                    if (std::fabs(vs[j] - ref) > 1e-6f) silu_ok = false;
+                }
+                expect(silu_ok, "Vulkan silu forward parity mismatch vs CPU reference");
+
+                const auto sr = sum_rows(VA2).to_vector<float>();
+                const float sum_ref[3] = {1.0f + 4.0f, 2.0f + 5.0f, 3.0f + 6.0f};
+                bool sum_ok = sr.size() == 3;
+                for (std::size_t j = 0; j < 3 && sum_ok; ++j) {
+                    if (std::fabs(sr[j] - sum_ref[j]) > 1e-5f) sum_ok = false;
+                }
+                expect(sum_ok, "Vulkan sum_rows forward parity mismatch vs CPU reference");
+            }
+
             // Guard enforcement: ops that are still OpenCL-only must fail loudly
             // (MCL_CHECK) on a Vulkan backend rather than crashing on a null
             // OpenCL context. Catch the assertion and confirm the message.
@@ -1159,16 +1193,13 @@ int main() {
                 auto VX = Tensor::from_cpu(vk_backend, {2, 3}, DType::F32, std::vector<float>{1, 2, 3, 4, 5, 6}.data());
                 auto VB = Tensor::from_cpu(vk_backend, {3}, DType::F32, std::vector<float>{0.1f, 0.2f, 0.3f}.data());
                 auto VY = Tensor::from_cpu(vk_backend, {2, 3}, DType::F32, std::vector<float>{1, 2, 3, 4, 5, 6}.data());
-                expect_vulkan_guard("mul (binary)", [&] { mul(VX, VY); });
                 expect_vulkan_guard("div (binary)", [&] { div(VX, VY); });
                 expect_vulkan_guard("mul_rows", [&] { mul_rows(VX, VB); });
                 expect_vulkan_guard("add_bias_gelu_rows", [&] { add_bias_gelu_rows(VX, VB); });
-                expect_vulkan_guard("sum_rows", [&] { sum_rows(VX); });
                 expect_vulkan_guard("scale_inplace", [&] {
                     Tensor t = VX;
                     scale_inplace(t, 0.5f);
                 });
-                expect_vulkan_guard("silu", [&] { silu(VX); });
                 expect_vulkan_guard("relu", [&] { relu(VX); });
                 expect_vulkan_guard("exp", [&] { exp(VX); });
                 expect_vulkan_guard("dropout(p>0)", [&] { dropout(VX, 0.5f, true); });

@@ -172,10 +172,12 @@ Recompute через attention корректен; forward не хранит а�
 | Counter-слой + autograd-узел | `include/motifcl/nn/compact_counter.hpp`, `src/nn/compact_counter.cpp` |
 | Kernel-route (counter → compact_counter.cl) | `src/runtime/backend.cpp` |
 | Counter-регрессия (teacher-recovery) | `tests/test_counter_state.cpp` |
+| Tiled-обновление counter на Vulkan (grad_w одним tn-GEMM + fused row-stats/scale/tick) | `kernels/vulkan/counter_update_apply_f32.comp`, `src/runtime/vulkan_backend.cpp`, `src/nn/compact_counter.cpp` |
 | Reversible Module + autograd-узел (Vulkan-native) | `include/motifcl/nn/reversible.hpp`, `src/nn/reversible.cpp`, `tests/test_vulkan_reversible.cpp`, `tests/test_vulkan_memory_native.cpp` |
 | Reversible-регрессия (на attention, OpenCL legacy) | `tests/test_reversible_attn.cpp` |
 | f16 matmul autograd (`F16MatMulBackward`, f32-точный backward + cast) | `src/ops/matmul.cpp`, `tests/test_f16_matmul_autograd.cpp` |
 | Дизайн / точки врезки | `docs/COUNTER_STATE_NATIVE_DESIGN.md` |
+| Perf-запись по скорости обучения (Vulkan, RX 580) | `reports/vulkan-training-perf-2026-10-17.md` |
 
 Reversible теперь упакован как `nn::ReversibleBlock` Module (`include/motifcl/nn/reversible.hpp`,
 `src/nn/reversible.cpp`) и работает на Vulkan-тензорах без OpenCL. Coupling API:
@@ -222,7 +224,21 @@ OpenCL-free memory-native end-to-end witness (counter+reversible вместе):
 | Память обучения (веса+оптимизатор) | **0.75 байт/вес** packed → ~16× меньше FP32+Adam |
 | Измерено на реальной модели | 11.8× (d=128) … 13.6× (d=256) |
 | Скорость (2048×2048, fwd+bwd) | **0.97× dense** (быстрее) |
-| История оптимизации | 3× → 1.44× (parallel) → 1.07× (packed) → 0.97× (decode-кэш + work-group row_stats) |
+| Время fused-обновления, Vulkan/RX 580 (2026-10-17) | **0.30 мс** на слой (было 2.9 мс): grad_w один tiled tn-GEMM + fused row-stats/scale/tick |
+| Скорость обучения MoE 15M на RX 580 (B8×T256) | **4787–5396 tok/s** (было 635 tok/s в прежней конфигурации по умолчанию и 2018 tok/s с включённым device-local); см. `reports/vulkan-training-perf-2026-10-17.md` |
+| История оптимизации | 3× → 1.44× (parallel) → 1.07× (packed) → 0.97× (decode-кэш + work-group row_stats) → **9.7× на update-ядрах** (tiled grad_w + fused tick, 2026-10-17) |
+
+Новый tiled-path: `grad_w = grad_outᵀ·x` формируется один раз register-blocked
+tn-GEMM'ом (`mm_f32_tn`) в переиспользуемый временный скрэтч, затем один wave64
+workgroup на строку складывает row-статистики, коммитит `v`/`scale` и выполняет
+stochastic-rounding tick (`counter_update_apply_f32.comp`). Порядок арифметики
+сохранён (последовательное накопление по k, тот же порядок групп + `subgroupAdd`),
+поэтому state/scale/v бит-в-бит совпадают с прежним fused-путём
+(`tests/test_vulkan_counter_fused`), а witness сходимости воспроизводится точно
+(`tests/test_vulkan_memory_native`: 7.60164 → 0.0642764). Персистентная память слоя
+не изменилась (packed state + O(out) scale/v); слои, где плотный градиент превысил бы
+32 МиБ, остаются на строго без-аллокационном recompute-пути.
+
 
 ### 5.4 Reversible — активации
 

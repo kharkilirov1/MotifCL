@@ -79,6 +79,10 @@ int main() {
     try {
         Backend backend = Backend::create_vulkan();
         auto& runtime = backend.vulkan_runtime();
+        // Opt-in per-submission GPU timing (VK timestamp queries): separates GPU
+        // execution time from CPU recording/dispatch overhead in the step log.
+        const bool gpu_timing = env_int("GPU_TIMING", 0) != 0;
+        runtime.set_gpu_timing_enabled(gpu_timing);
 
         const std::string data_dir = env_str("DATA_DIR", "");
         const std::string out_dir = env_str("OUT_DIR", "");
@@ -97,13 +101,18 @@ int main() {
         const float min_lr_frac = env_float("MIN_LR_FRAC", 0.1f);
         const int eval_every = env_int("EVAL_EVERY", 500);
         const int eval_records = env_int("EVAL_RECORDS", 96);
+        const std::int64_t eval_batch =
+            (std::int64_t)env_int("EVAL_BATCH", (int)std::min<std::int64_t>(32, B));
         const int ckpt_every = env_int("CKPT_EVERY", 1000);
         const int log_every = env_int("LOG_EVERY", 20);
         const unsigned base_seed = (unsigned)env_int("SEED", 1337);
         const bool resume = env_int("RESUME", 1) != 0;
         const bool tie_head = env_int("TIE_HEAD", 0) != 0;
 
-        const std::int64_t dim = 288, hidden = 768, vocab = 32000;
+        // HIDDEN lets this runner act as an equal-active-width control for the MoE
+        // runner (dense SwiGLU of the same width as the MoE's active expert path).
+        const std::int64_t dim = 288, vocab = 32000;
+        const std::int64_t hidden = env_int("HIDDEN", 768);
         const int n_head = 6, n_kv_head = 6, n_layers = 6, C = 11;
         const std::int64_t N = B * T;
         const float eps = 1e-5f;
@@ -325,7 +334,9 @@ int main() {
 
         auto eval_val = [&]() {
             set_counter_training(false);
-            const std::int64_t eb = 32;
+            // Eval must not be heavier than training (see train_moe15m.cpp): a 32-record
+            // eval batch allocates 4x the vocabulary-logit buffers of a B8 step.
+            const std::int64_t eb = std::max<std::int64_t>(1, eval_batch);
             const int chunks = std::max(1, eval_records / (int)eb);
             double acc = 0.0;
             for (int c = 0; c < chunks; ++c) {
@@ -377,11 +388,16 @@ int main() {
                 adam_update_fast(*p.t, *p.t->grad(), p.m, p.v, lr_f, 0.9f, 0.95f, 1e-8f,
                                  step + 1, p.weight_decay);
             }
+            double gpu_step_ms = -1.0;
             {
                 auto submit = runtime.batch_end();
                 if (!submit.success) { std::cerr << "batch submit failed: " << submit.error << "\n"; return 1; }
+                if (gpu_timing) gpu_step_ms = runtime.last_gpu_time_us() * 1e-3;
             }
+            const auto t_sync0 = std::chrono::steady_clock::now();
             const float lv = loss.item();
+            const double sync_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t_sync0).count();
             if (!std::isfinite(lv)) { std::cerr << "non-finite loss at step " << step << "\n"; return 1; }
             loss_ema = loss_ema < 0 ? lv : 0.99 * loss_ema + 0.01 * lv;
 
@@ -392,14 +408,40 @@ int main() {
                 const double ms = win_ms / win_n;
                 const double tok_s = (double)N * 1000.0 / ms;
                 const double eta_h = (double)(steps_total - step - 1) * ms / 3.6e6;
-                std::printf("step %d loss %.4f ema %.4f lr %.5f  %.0f tok/s  eta %.1f h\n",
-                            step + 1, lv, loss_ema, lr_c, tok_s, eta_h);
+                std::printf("step %d loss %.4f ema %.4f lr %.5f  %.0f tok/s  eta %.1f h  devmem %.0f/%.0f MB\n",
+                            step + 1, lv, loss_ema, lr_c, tok_s, eta_h,
+                            (double)runtime.buffer_bytes_live() / 1048576.0,
+                            (double)runtime.buffer_bytes_peak() / 1048576.0);
+                if (gpu_timing) {
+                    std::printf("  ms gpu %.2f sync %.2f", gpu_step_ms, sync_ms);
+                }
+                {
+                    const char* prof = std::getenv("MOTIFCL_VK_PROFILE");
+                    if (prof && *prof && *prof != '0') {
+                        const auto rows = runtime.kernel_profile();
+                        double total = 0.0;
+                        for (const auto& r : rows) total += r.total_us;
+                        std::printf("\n  --- kernel GPU profile (window, %zu kernels, %.2f ms) ---",
+                                    rows.size(), total * 1e-3);
+                        std::size_t shown = 0;
+                        for (const auto& r : rows) {
+                            if (shown++ >= 20) break;
+                            std::printf("\n  %-40s calls %6llu  total %8.2f ms  avg %7.3f ms  %5.1f%%",
+                                        r.name.c_str(), (unsigned long long)r.calls, r.total_us * 1e-3,
+                                        r.calls ? (r.total_us / (double)r.calls) * 1e-3 : 0.0,
+                                        total > 0.0 ? 100.0 * r.total_us / total : 0.0);
+                        }
+                        std::printf("\n  submit wall (last) %.2f ms  submits %llu", runtime.last_submit_time_us() * 1e-3,
+                                    (unsigned long long)runtime.submit_count());
+                        runtime.reset_kernel_profile();
+                    }
+                }
                 std::fflush(stdout);
                 win_ms = 0.0; win_n = 0;
             }
             if ((step + 1) % eval_every == 0) {
                 const float vl = eval_val();
-                std::printf("step %d VAL loss %.4f\n", step + 1, vl);
+                std::printf("step %d VAL loss %.4f  ppl %.3f\n", step + 1, vl, std::exp((double)vl));
                 std::fflush(stdout);
             }
             if ((step + 1) % ckpt_every == 0 || step + 1 == steps_total) {
@@ -409,7 +451,7 @@ int main() {
             }
         }
         const float vl = eval_val();
-        std::printf("FINAL VAL loss %.4f\n", vl);
+        std::printf("FINAL VAL loss %.4f  ppl %.3f\n", vl, std::exp((double)vl));
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "train failed: " << e.what() << "\n";

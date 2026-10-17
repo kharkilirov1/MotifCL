@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Vulkan training throughput (RX 580, measured 8.3x on the memory-native MoE trainer)
+
+- Device-local VRAM is now the default storage-buffer placement for the Vulkan
+  runtime (was opt-in via `MOTIFCL_VK_PREFER_DEVICE_LOCAL=1`); allocation falls
+  back to BAR then host memory when VRAM is full, and
+  `MOTIFCL_VK_PREFER_DEVICE_LOCAL=0` restores the previous host-visible/GTT
+  policy. Measured 2.2x on the MoE trainer with bit-identical losses.
+- Buffers up to 128 KiB are allocated host-visible by default
+  (`MOTIFCL_VK_SMALL_HOST_BYTES` overrides, `0` disables) so per-step scalar,
+  router-logit and balance-gradient transfers are memcpy instead of a staging
+  submit+fence. Measured: balance phase 40-160 ms -> 8.5-13.8 ms per step.
+- Raised the Vulkan buffer-pool budget from 2 GiB / 2048 allocations to
+  6 GiB / 4096 / 256 per bucket. The old cap was below the trainer's ~3.4 GiB
+  working set, so the 262 MB vocabulary-logit buffers were re-allocated through
+  `vkAllocateMemory` every step (measured CPU recording phase 960 ms -> 50 ms).
+- New `kernels/vulkan/counter_update_apply_f32.comp`: one wave64 workgroup per
+  output row folds the counter row statistics, commits `v`/`scale`, and runs the
+  finite-state stochastic-rounding tick, with `grad_w = grad_out^T * x` formed
+  once by the tiled transposed GEMM into a reusable transient scratch. Replaces
+  two scalar update kernels that recomputed that GEMM with strided reads, and
+  drops the separate row-scale copy dispatch: 2.9 ms -> 0.30 ms per counter layer
+  (49% of a training step's GPU time). Layers whose dense gradient would exceed
+  32 MiB keep the allocation-free recompute path.
+- Added an opt-in per-kernel GPU profiler (`MOTIFCL_VK_PROFILE=1`,
+  `VulkanRuntime::kernel_profile()`), submit/fence wall-time accounting
+  (`last_submit_time_us`, `submit_count`), a generated kernel-name table
+  (`src/runtime/vulkan_spirv_names.inc`, `tools/gen_vulkan_spirv_names.py`), and
+  per-phase step instrumentation in the trainers (`GPU_TIMING=1`).
+- `tools/gen_vulkan_spirv.py` now writes the generated SPIR-V header as UTF-8.
+- Evidence: `reports/vulkan-training-perf-2026-10-17.md`. MoE (7x192 + shared
+  192, B8xT256) 635 tok/s -> 4787-5396 tok/s; dense control (hidden 768) 8800
+  tok/s. Full CTest 50/50.
+
 - Added `ModernModelSpec` / `LayerSpec` graph extraction, long-context runtime
   metadata plus paged KV/DeltaNet state-cache containers, Gemma4 dense text-core parsing with per-layer local/global
   attention windows, Qwen3.5 DeltaNet/Gated-Attention/MoE and Mixtral MoE graph

@@ -83,6 +83,15 @@ struct VulkanOpResult {
     std::string error;
 };
 
+// One kernel's accumulated GPU time in the opt-in per-kernel profiler
+// (MOTIFCL_VK_PROFILE=1). Times come from VK timestamp queries recorded either
+// side of every dispatch inside a batch, so they are GPU execution deltas.
+struct VulkanKernelProfile {
+    std::string name;
+    std::uint64_t calls = 0;
+    double total_us = 0.0;
+};
+
 class VulkanBuffer {
 public:
     VulkanBuffer();
@@ -183,6 +192,25 @@ public:
     void set_gpu_timing_enabled(bool enabled);
     // Microseconds; negative when no timed submission is available.
     double last_gpu_time_us() const;
+    // Wall time spent in vkQueueSubmit + vkWaitForFences for the last cached-path
+    // submission (microseconds, negative when none yet), and the submit count.
+    // Together with last_gpu_time_us this separates GPU work from submit/fence
+    // latency, which is a first-class cost on the Windows WDDM path.
+    double last_submit_time_us() const;
+    std::uint64_t submit_count() const;
+
+    // Opt-in per-kernel GPU profiler (enable with MOTIFCL_VK_PROFILE=1).
+    // Returns accumulated GPU time per embedded kernel, sorted by total time.
+    std::vector<VulkanKernelProfile> kernel_profile() const;
+    void reset_kernel_profile();
+
+    // Device-allocation accounting for tensor storage buffers: bytes currently
+    // owned by the runtime (in use plus pooled) and the peak of that value.
+    // Independent of whether buffers were placed in device-local or host-visible
+    // memory, so it is the comparable memory number across both policies.
+    std::size_t buffer_bytes_live() const;
+    std::size_t buffer_bytes_peak() const;
+    std::size_t buffer_allocations() const;
 
     // Wait for all queued Vulkan GPU commands to finish execution.
     void finish() const;
@@ -749,6 +777,24 @@ VulkanOpResult run_vulkan_compact_counter_apply_update_fused(VulkanRuntime& runt
                                                              float rms_beta,
                                                              float rms_eps,
                                                              std::uint32_t seed);
+// Memory-native counter update: fold the row statistics of a tiled grad_w
+// (grad_w = grad_out^T * x in a reusable scratch buffer), commit the row-RMS and
+// scale state, and run the finite-state stochastic-rounding tick. One wave64
+// workgroup per output row; this pass is bandwidth-only, so the old path's second
+// grad_w recompute and its separate row-scale copy are gone.
+VulkanOpResult run_vulkan_compact_counter_update_apply(VulkanRuntime& runtime,
+                                                       VulkanBuffer& state,
+                                                       VulkanBuffer& scale,
+                                                       VulkanBuffer& v,
+                                                       const VulkanBuffer& grad_w,
+                                                       std::size_t in_features,
+                                                       std::size_t out_features,
+                                                       std::size_t C,
+                                                       float lr,
+                                                       float lr_scale,
+                                                       float rms_beta,
+                                                       float rms_eps,
+                                                       std::uint32_t seed);
 VulkanOpResult run_vulkan_compact_counter_backward_input_u8(VulkanRuntime& runtime,
                                                             const VulkanBuffer& state,
                                                             const VulkanBuffer& scale,

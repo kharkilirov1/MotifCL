@@ -169,3 +169,46 @@ Latest local results on Ellesmere/RX 580:
 | 256,512,256 | tile16 ~0.094 ms / ~715 GFLOP/s | ~0.73 ms / ~92 GFLOP/s |
 
 Conclusion for this card/driver: the old naive OpenCL FP16 matmul was slower than F32. A `half4`/`float4` vectorized path now exists for `K % 4 == 0`; rerun this benchmark before promoting FP16 as a default fast path. Mixed-precision optimizer infrastructure now exists, but full mixed-precision training still requires FP16 forward/backward coverage for the whole model graph.
+
+## Vulkan FP32 training fast path (memory-native trainers, RX 580)
+
+The native Vulkan path that runs the counter-synapse (`CounterStateLinear`) and MoE
+trainers has its own measured record:
+`reports/vulkan-training-perf-2026-10-17.md`. Summary of what is now default:
+
+| lever | measured effect (MoE, B8xT256, RX 580) |
+| --- | --- |
+| device-local VRAM storage buffers (default; `MOTIFCL_VK_PREFER_DEVICE_LOCAL=0` restores host-visible) | 2.2x |
+| buffer pool budget 6 GiB / 4096 allocs (was 2 GiB / 2048, below the 3.4 GiB working set) | CPU recording 960 ms -> 50 ms per step |
+| tiled grad_w + fused row-stat/scale/tick counter update (`counter_update_apply_f32.comp`) | 2.9 ms -> 0.30 ms per counter layer; 49% of step GPU time |
+| host-visible buffers <= 128 KiB (`MOTIFCL_VK_SMALL_HOST_BYTES`) | balance phase 40-160 ms -> 8.5-13.8 ms per step |
+
+Result: `mm-moe15m` (dim 288, 6 layers, 7x192 expert + 192 shared, B8xT256) went from
+635 tok/s at the previous default configuration to 4787-5396 tok/s, and the dense
+control (hidden 768, same batch/sequence) runs at 8800 tok/s. Correctness gates:
+`ctest --test-dir build/release` 50/50, and the counter update keeps an exact
+state/scale/v witness (`test_vulkan_counter_fused`) plus the recorded convergence
+witness (`test_vulkan_memory_native`, loss 7.60164 -> 0.0642764).
+
+Instrumentation (all opt-in):
+
+```powershell
+# per-step GPU vs CPU split + phase timings
+$env:GPU_TIMING="1"; build\release\tools\motifcl_train_moe15m.exe
+
+# per-kernel GPU time (VK timestamps around every dispatch in the submission)
+$env:MOTIFCL_VK_PROFILE="1"; build\release\tools\motifcl_train_moe15m.exe
+```
+
+`VulkanRuntime` reports `last_gpu_time_us()`, `last_submit_time_us()`,
+`submit_count()` and `kernel_profile()`; kernel names come from the generated
+`src/runtime/vulkan_spirv_names.inc` (regenerate with
+`python tools/gen_vulkan_spirv_names.py` after `tools/gen_vulkan_spirv.py`).
+
+Device facts behind these choices, read from the AMDVLK ICD on this host: wave64 only,
+32 KiB LDS per workgroup, `timestampPeriod = 40`, no FP16 shader arithmetic
+(`shaderFloat16 = false`), no `float atomicAdd`, 2 GiB max single allocation, and only
+256 MiB of device-local memory host-visible (no resizable BAR). Design new kernels for
+32 KiB LDS tiles, fp32 math with fp16/int8 storage only, non-atomic reductions, and
+allocations that stay under 2 GiB each.
+

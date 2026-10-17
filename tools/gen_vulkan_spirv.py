@@ -103,7 +103,7 @@ def main():
         print(f"  {name}: {len(words)} words")
     lines.append("} // namespace vkspirv")
     lines.append("")
-    with open(OUTPUT, "w", newline="\n") as handle:
+    with open(OUTPUT, "w", newline="\n", encoding="utf-8") as handle:
         handle.write("\n".join(lines))
     print(f"wrote {os.path.relpath(OUTPUT, ROOT)} ({len(sources)} kernels)")
 
