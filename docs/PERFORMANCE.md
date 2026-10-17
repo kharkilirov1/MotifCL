@@ -71,7 +71,7 @@ The current fast path is still FP32/eager, but avoids several prototype bottlene
 - RMSNorm weight-gradient uses a cached per-row inverse-RMS path instead of recomputing row RMS once per output column;
 - transposed F32 matmul backward paths use register-blocked kernels for `A^T @ B` and `A @ B^T`.
 - unscaled Q4_0 matmul selects an integer dot4-unrolled register-blocked kernel when `K % 4 == 0`;
-- scalar losses reduce partial buffers on GPU with separate `partial_count` and denominator arguments, avoiding the old MSE partial-read overrun when `numel != partial_chunks`.
+- scalar losses reduce partial buffers on GPU with separate `partial_count` and denominator arguments, avoiding the old MSE partial-read overrun when  umel != partial_chunks`.
 
 Knobs:
 
@@ -183,13 +183,10 @@ trainers has its own measured record:
 | tiled grad_w + fused row-stat/scale/tick counter update (`counter_update_apply_f32.comp`) | 2.9 ms -> 0.30 ms per counter layer; 49% of step GPU time |
 | host-visible buffers <= 128 KiB (`MOTIFCL_VK_SMALL_HOST_BYTES`) | balance phase 40-160 ms -> 8.5-13.8 ms per step |
 | double-buffered `vec4` GEMM kernels (`mm_f32_db_body.glsl` + `mm_f32_db32/db64.comp`) | LM-head GEMM 18% -> **62.4%** of FP32 peak; head block 99 -> 37 ms/step |
-| double-buffered counter decode+GEMM (`counter_gemm_db.comp`) | counter projections 77 -> 62 ms/step |
+| double-buffered counter decode+GEMM (`counter_gemm_db.comp`) | counter projections 77 -> 55 ms/step |
+| tiled causal GQA attention kernels (`gqa_*_causal4/tile`) | attention 61 -> 25 ms/step |
 
-Result: `mn-moe15m` (dim 288, 6 layers, 7x192 expert + 192 shared, B8xT256) went from
-635 tok/s at the previous default configuration to **~7000 tok/s** (289 ms/step;
-120-step steady state of the first pass was 5666-5701, the kernel pass added the
-double-buffered GEMMs), and the dense control (hidden 768, same batch/sequence) runs at
-**9542 tok/s**. Correctness gates: `ctest --test-dir build/release` 51/51,
+Result: `mn-moe15m` (dim 288, 6 layers, 7x192 expert + 192 shared, B8xT256) went from 635 tok/s at the previous default configuration to **8500 tok/s** (239 ms/step; the pass history is 5666-5701 -> ~7000 -> 8500 tok/s), and the dense control (hidden 768, same batch/sequence) runs at **12380 tok/s**. Correctness gates: `ctest --test-dir build/release` 51/51,
 `test_vulkan_gemm_parity` covers all GEMM layouts against a host reference, and the
 counter update keeps an exact state/scale/v witness (`test_vulkan_counter_fused`) plus
 the recorded convergence witness (`test_vulkan_memory_native`, loss 7.60164 ->

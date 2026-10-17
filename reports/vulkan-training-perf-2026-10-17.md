@@ -310,3 +310,64 @@ partial tiles, partial K tiles and the odd-dimension scalar fallback.
   descriptors at offset 0, so one segmented dispatch cannot index per-expert
   weights: it needs either a shared expert-state buffer or descriptor-offset
   support first. That is a refactor, not a kernel tweak.
+
+## Challenge round 2: tiled attention and counter decode (2026-10-18)
+
+Third pass, same device/harness. Two of the five remaining items landed; the
+other three are measured and characterised below rather than guessed at.
+
+### Item 1: GQA attention, 61 -> 25 ms/step
+
+The general attention kernels run one 64-lane workgroup per (batch, head, query
+row), so the whole K/V history is streamed again for every query row (~600 MB of
+redundant traffic per layer, 3% of FP32 peak). Three specializations now cover
+the trainer's shape (causal, no mask, query_offset 0, sliding_window 0,
+key == query length <= 256, head_dim == v_head_dim <= 64); the general kernels
+stay as the fallback and every attention parity test still passes.
+
+| kernel | before | after | |
+|---|---:|---:|---|
+| `gqa_fwd_general_f32_subgroup` -> `gqa_fwd_causal4_f32` | 2.99 ms | 1.15 ms | 4 query rows/workgroup, one K load per key for four dots, vec4 subgroup max/sum, V reused across rows |
+| `gqa_bwd_probs_f32_subgroup` -> `gqa_bwd_probs_causal4_f32` | 5.42 ms | 1.94 ms | same row tiling; dp formed once per key for four rows; dQ reuses K across rows |
+| `gqa_bwd_dkv_f32` -> `gqa_bwd_dkv_causal_tile_f32` | 1.72 ms | 1.02 ms | one 64-key tile/workgroup, one lane per key (coalesced ds/p, broadcast q/dout), constant-indexed vec4 accumulators to avoid spills |
+| **attention block per step** | **61 ms** | **25 ms** | |
+
+### Item 3: packed-state decode, 62 -> 55 ms/step
+
+The counter projections decode the 6-bit state inside the GEMM. Each ternary
+code went through a branch chain (`ternary_from_code`) per weight; a 64-entry
+ternary table built once per workgroup in shared memory replaces it. Measured
+0.257 -> 0.228 ms per projection (-11%), 62 -> 55 ms per step. The remaining
+decode cost is dominated by the scattered one-byte packed-state reads (a 32 B
+sector per 1-3 useful bytes); staging each out row's 12 contiguous bytes
+cooperatively into LDS is the next step there.
+
+### Items 2, 4, 5: measured, not yet taken
+
+* **Counter grad_w (29 ms/step, 30% peak)** is bandwidth-bound: the output tile
+  count is small (108 workgroups) while K = 2048, so both operands are re-read
+  `n/32` and `m/32` times (56 MB per layer at ~230 GB/s). Fixing it needs a
+  rectangular 64x32 tile specialization to cut the traffic ~25% or a k-split
+  with a reduction pass; both are measured-plan items, not kernel tweaks.
+* **Elementwise/CE block (~20 ms/step)**: the residual `add_f32` is already
+  bandwidth-bound (96 calls, 0.04 ms each at ~76-100 GB/s), so vectorization
+  alone buys little; the win is fusion (add+rmsnorm, SwiGLU epilogue in the
+  counter GEMM, chunked vocabulary CE), which needs new fused kernels.
+* **CPU recording is 48-54 ms/step (20%)**, now split by the new instrumentation
+  into **forward 18.4 ms / backward 31.5 ms** plus balance 8 ms and optimizer
+  6 ms. The measured Vulkan fast-path dispatch is ~15 us, so ~700 dispatches are
+  only ~11 ms of that: the bulk is autograd/Tensor CPU work (node graph, grad
+  accumulation, per-op allocations). Attacking it means either fusing ops (fewer
+  nodes) or a Tensor/node freelist plus a leaner tape walk.
+
+### Round result
+
+| arm | ms/step | tok/s |
+|---|---:|---:|
+| first pass (2026-10-17) | 357-365 | 5666-5701 |
+| GEMM/kernel pass | 289 | ~7000 |
+| **this pass** | **239** | **8500** |
+| dense control (hidden 768) | 233 -> **165** | 9542 -> **12380** |
+
+GPU fwd+bwd 222 -> 175 ms. Full CTest 51/51 with the counter exactness witness
+and the recorded convergence witness intact (7.60164 -> 0.0642764).

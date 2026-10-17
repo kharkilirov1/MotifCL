@@ -45,6 +45,9 @@ layout(push_constant) uniform Push {
 
 shared vec4 As[2][KT][NQ];
 shared vec4 Ws[2][KT][NQ];
+// 64-entry ternary lookup: the packed 6-bit code maps to -1/0/+1 through a
+// table built once per workgroup instead of a branch chain per decoded weight.
+shared int tlut[64];
 
 int levels_of(uint C) {
     return int(2u * C - 1u);
@@ -111,10 +114,10 @@ void load_b(uint lid, uint n0, uint kt, uint K, out vec4 r0, out vec4 r1) {
                 const int b1 = int(uint(state[base + 1u]));
                 const int b2 = int(uint(state[base + 2u]));
                 const float s = scale[gc];
-                w.x = s * float(ternary_from_code(b0 & 0x3F, levels));
-                w.y = s * float(ternary_from_code(((b0 >> 6) | (b1 << 2)) & 0x3F, levels));
-                w.z = s * float(ternary_from_code(((b1 >> 4) | (b2 << 4)) & 0x3F, levels));
-                w.w = s * float(ternary_from_code((b2 >> 2) & 0x3F, levels));
+                w.x = s * float(tlut[b0 & 0x3F]);
+                w.y = s * float(tlut[((b0 >> 6) | (b1 << 2)) & 0x3F]);
+                w.z = s * float(tlut[((b1 >> 4) | (b2 << 4)) & 0x3F]);
+                w.w = s * float(tlut[(b2 >> 2) & 0x3F]);
             }
         } else {
             // idx -> (out row kr within the tile, group of four in_features cg)
@@ -128,10 +131,10 @@ void load_b(uint lid, uint n0, uint kt, uint K, out vec4 r0, out vec4 r1) {
                 const int b1 = int(uint(state[base + 1u]));
                 const int b2 = int(uint(state[base + 2u]));
                 const float s = scale[gk];
-                w.x = s * float(ternary_from_code(b0 & 0x3F, levels));
-                w.y = s * float(ternary_from_code(((b0 >> 6) | (b1 << 2)) & 0x3F, levels));
-                w.z = s * float(ternary_from_code(((b1 >> 4) | (b2 << 4)) & 0x3F, levels));
-                w.w = s * float(ternary_from_code((b2 >> 2) & 0x3F, levels));
+                w.x = s * float(tlut[b0 & 0x3F]);
+                w.y = s * float(tlut[((b0 >> 6) | (b1 << 2)) & 0x3F]);
+                w.z = s * float(tlut[((b1 >> 4) | (b2 << 4)) & 0x3F]);
+                w.w = s * float(tlut[(b2 >> 2) & 0x3F]);
             }
         }
         if (i == 0) r0 = w; else r1 = w;
@@ -172,6 +175,9 @@ void main() {
     const uint K = (p.mode == 0u) ? p.in_features : p.out_features;
     const uint N = (p.mode == 0u) ? p.out_features : p.in_features;
     const uint ktiles = (K + uint(KT) - 1u) / uint(KT);
+
+        if (lid < 64u) tlut[lid] = ternary_from_code(int(lid), levels_of(p.C));
+    barrier();
 
     vec4 ra0 = vec4(0.0);
     vec4 ra1 = vec4(0.0);

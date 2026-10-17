@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Tiled causal attention + counter decode LUT (3rd pass)
+
+- New tiled causal GQA attention fast path (causal, no mask, query_offset 0,
+  sliding_window 0, key == query length <= 256, head_dim == v_head_dim <= 64;
+  the general kernels remain the fallback):
+  `gqa_fwd_causal4_f32` keeps four query rows per workgroup so each K/V vector is
+  loaded once per four rows (2.99 -> 1.15 ms per layer),
+  `gqa_bwd_probs_causal4_f32` does the same for the recompute + ds + dQ stage
+  (5.42 -> 1.94 ms), and `gqa_bwd_dkv_causal_tile_f32` gives each workgroup a
+  64-key tile with one lane per key (1.72 -> 1.02 ms). Attention block:
+  61 -> 25 ms per training step.
+- Counter decode now uses a 64-entry ternary table built once per workgroup in
+  shared memory instead of a branch chain per decoded weight: 0.257 -> 0.228 ms
+  per counter projection, 62 -> 55 ms per step.
+- Trainers report the CPU record phase split into forward and backward
+  (`GPU_TIMING=1`), which locates the remaining host cost at 18.4 ms forward +
+  31.5 ms backward per step.
+- MoE trainer (7x192 + shared 192, B8xT256): ~7000 -> **8500 tok/s**
+  (239 ms/step, GPU fwd+bwd 175 ms); dense control (hidden 768): 9542 ->
+  **12380 tok/s**. Full CTest 51/51, counter exactness and convergence witnesses
+  intact. Evidence: `reports/vulkan-training-perf-2026-10-17.md`.
+
 ### Vulkan GEMM and counter kernels: double buffering, LDS.128 operands (2nd pass)
 
 - New double-buffered register-blocked FP32 GEMM family

@@ -560,7 +560,7 @@ int main() {
         double loss_ema = -1.0;
         struct StepPhases {
             double upload_ms = 0, record_ms = 0, submit_ms = 0, sync_ms = 0;
-            double balance_ms = 0, optim_ms = 0, total_ms = 0;
+            double balance_ms = 0, optim_ms = 0, total_ms = 0, fwd_ms = 0;
         } phases;
         auto ms_since = [](std::chrono::steady_clock::time_point a) {
             return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count();
@@ -579,7 +579,9 @@ int main() {
             const auto t_rec = std::chrono::steady_clock::now();
             if (!runtime.batch_begin()) { std::cerr << "batch_begin failed\n"; return 1; }
             auto loss = forward_loss(ids, tg, B);
+            double fwd_ms = ms_since(t_rec);
             loss.backward();
+            phases.fwd_ms = fwd_ms;
             phases.record_ms = ms_since(t_rec);
             double gpu_fb_ms = -1.0;
             {
@@ -643,9 +645,10 @@ int main() {
                             (double)runtime.buffer_bytes_peak() / 1048576.0);
                 if (gpu_timing) {
                     std::printf("  ms fwd+bwd gpu %.2f opt gpu %.2f sync %.2f", gpu_fb_ms, gpu_opt_ms, phases.sync_ms);
-                    std::printf("  phases upload %.1f record %.1f submit %.1f balance %.1f optim %.1f total %.1f",
-                                phases.upload_ms, phases.record_ms, phases.submit_ms, phases.balance_ms,
-                                phases.optim_ms, phases.total_ms);
+                    std::printf(
+                        "  phases upload %.1f fwd %.1f record %.1f submit %.1f balance %.1f optim %.1f total %.1f",
+                        phases.upload_ms, phases.fwd_ms, phases.record_ms, phases.submit_ms, phases.balance_ms,
+                        phases.optim_ms, phases.total_ms);
                 }
                 {
                     const char* prof = std::getenv("MOTIFCL_VK_PROFILE");
