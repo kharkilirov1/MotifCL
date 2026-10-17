@@ -35,13 +35,16 @@ B = 8 × T = 256 = 2048 tokens/step TinyStories. Wall time is the runner's own
 |---|---|---:|---:|
 | before (HEAD, default config) | host-visible/GTT buffers | 3 224 | 635 |
 | before (HEAD, `MOTIFCL_VK_PREFER_DEVICE_LOCAL=1`) | VRAM | 1 443 | 1 419 |
-| **after (this work, defaults)** | VRAM + pool + tiled update + small-buffer policy | **370–424** | **4 787–5 396** |
+| **after (this work, defaults)** | VRAM + pool + tiled update + small-buffer policy | **357–365** | **5 666–5 701** |
 | dense control HIDDEN=768, after | same | 233 | 8 800 |
 
-MoE steady-state windows: step 20 `4787 tok/s` (369.0 ms), step 30 `5396 tok/s` (423.9 ms),
-step 40 `5247 tok/s` (370.1 ms). vs the original default configuration that is **~8.3x**;
-vs the best configuration previously recorded in `docs/MOE_PRETRAIN_RESULTS.md`
-(2018 tok/s with `MOTIFCL_VK_PREFER_DEVICE_LOCAL=1`) it is **2.6x**.
+120-step steady-state run (defaults, `GPU_TIMING=1`), steps 30/60/90/120 all
+`5 179 / 5 701 / 5 666 / 5 678 tok/s` at 357–365 ms per step with device memory flat at
+3390/3406 MB live/peak and loss falling 6.31 → 5.65 → 4.67 → 4.56 (final val loss 4.4564,
+ppl 86.2 at 120 steps × 2048 tokens). vs the original default configuration that is
+**~8.9x**; vs the best configuration previously recorded in
+`docs/MOE_PRETRAIN_RESULTS.md` (2018 tok/s with `MOTIFCL_VK_PREFER_DEVICE_LOCAL=1`) it is
+**2.8x**.
 
 Loss trajectory is unchanged for the same budget: at the 20-step mark this run reports
 step 20 loss 6.3836 / ema 9.7998 against 6.4081 / 9.8034 for the pre-change run of the

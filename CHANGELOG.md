@@ -31,8 +31,9 @@
   (`src/runtime/vulkan_spirv_names.inc`, `tools/gen_vulkan_spirv_names.py`), and
   per-phase step instrumentation in the trainers (`GPU_TIMING=1`).
 - `tools/gen_vulkan_spirv.py` now writes the generated SPIR-V header as UTF-8.
-- Evidence: `reports/vulkan-training-perf-2026-10-17.md`. MoE (7x192 + shared
-  192, B8xT256) 635 tok/s -> 4787-5396 tok/s; dense control (hidden 768) 8800
+- Evidence: `reports/vulkan-training-perf-2026-10-17.md`. Memory-native MoE
+  (7x192 + shared 192, B8xT256) 635 tok/s -> **5666-5701 tok/s** (120-step steady
+  state, 357-365 ms/step, flat device memory); dense control (hidden 768) 8800
   tok/s. Full CTest 50/50.
 
 - Added `ModernModelSpec` / `LayerSpec` graph extraction, long-context runtime

@@ -183,9 +183,10 @@ trainers has its own measured record:
 | tiled grad_w + fused row-stat/scale/tick counter update (`counter_update_apply_f32.comp`) | 2.9 ms -> 0.30 ms per counter layer; 49% of step GPU time |
 | host-visible buffers <= 128 KiB (`MOTIFCL_VK_SMALL_HOST_BYTES`) | balance phase 40-160 ms -> 8.5-13.8 ms per step |
 
-Result: `mm-moe15m` (dim 288, 6 layers, 7x192 expert + 192 shared, B8xT256) went from
-635 tok/s at the previous default configuration to 4787-5396 tok/s, and the dense
-control (hidden 768, same batch/sequence) runs at 8800 tok/s. Correctness gates:
+Result: `mn-moe15m` (dim 288, 6 layers, 7x192 expert + 192 shared, B8xT256) went from
+635 tok/s at the previous default configuration to **5666-5701 tok/s** (120-step steady
+state at 357-365 ms/step with flat device memory), and the dense control (hidden 768,
+same batch/sequence) runs at 8800 tok/s. Correctness gates:
 `ctest --test-dir build/release` 50/50, and the counter update keeps an exact
 state/scale/v witness (`test_vulkan_counter_fused`) plus the recorded convergence
 witness (`test_vulkan_memory_native`, loss 7.60164 -> 0.0642764).

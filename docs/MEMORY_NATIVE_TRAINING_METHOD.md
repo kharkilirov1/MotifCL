@@ -225,7 +225,7 @@ OpenCL-free memory-native end-to-end witness (counter+reversible вместе):
 | Измерено на реальной модели | 11.8× (d=128) … 13.6× (d=256) |
 | Скорость (2048×2048, fwd+bwd) | **0.97× dense** (быстрее) |
 | Время fused-обновления, Vulkan/RX 580 (2026-10-17) | **0.30 мс** на слой (было 2.9 мс): grad_w один tiled tn-GEMM + fused row-stats/scale/tick |
-| Скорость обучения MoE 15M на RX 580 (B8×T256) | **4787–5396 tok/s** (было 635 tok/s в прежней конфигурации по умолчанию и 2018 tok/s с включённым device-local); см. `reports/vulkan-training-perf-2026-10-17.md` |
+| Скорость обучения MoE 15M на RX 580 (B8×T256) | **5666–5701 tok/s** в устоявшемся режиме (было 635 tok/s в прежней конфигурации по умолчанию и 2018 tok/s с включённым device-local); см. `reports/vulkan-training-perf-2026-10-17.md` |
 | История оптимизации | 3× → 1.44× (parallel) → 1.07× (packed) → 0.97× (decode-кэш + work-group row_stats) → **9.7× на update-ядрах** (tiled grad_w + fused tick, 2026-10-17) |
 
 Новый tiled-path: `grad_w = grad_outᵀ·x` формируется один раз register-blocked
