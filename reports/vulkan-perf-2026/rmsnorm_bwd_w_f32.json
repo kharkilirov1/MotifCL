@@ -1,0 +1,9 @@
+{
+  "op": "rmsnorm_bwd_w_f32",
+  "vulkan_device": "Radeon RX 580 Series",
+  "opencl_device": "",
+  "methodology": "median wall-time of 20 runs after 3 warmup; gpu_us from VK_QUERY_TYPE_TIMESTAMP; ratio = opencl_wall / vulkan_wall",
+  "rows": [
+    {"shape": "512x1024", "dtype": "f32", "median_us": 478.1, "min_us": 384, "p99_us": 728.5, "gpu_median_us": 64.48, "achieved_gbs": 8.77286, "opencl_baseline_us": "unavailable", "target_ratio": 0.4, "result": "NO_BASELINE"}
+  ]
+}

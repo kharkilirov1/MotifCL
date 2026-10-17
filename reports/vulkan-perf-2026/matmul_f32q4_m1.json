@@ -1,0 +1,10 @@
+{
+  "op": "matmul_f32q4_m1",
+  "vulkan_device": "Radeon RX 580 Series",
+  "opencl_device": "",
+  "methodology": "median wall-time of 20 runs after 3 warmup; gpu_us from VK_QUERY_TYPE_TIMESTAMP; ratio = opencl_wall / vulkan_wall",
+  "rows": [
+    {"shape": "1x1024x1024", "dtype": "f32", "median_us": 241.6, "min_us": 231.1, "p99_us": 320.9, "gpu_median_us": 97.44, "achieved_gflops": 17.3605, "opencl_baseline_us": "unavailable", "target_ratio": 0.33, "result": "NO_BASELINE"},
+    {"shape": "1x2048x2048", "dtype": "f32", "median_us": 622.3, "min_us": 575.6, "p99_us": 786.1, "gpu_median_us": 416.96, "achieved_gflops": 6.74, "opencl_baseline_us": "unavailable", "target_ratio": 0.33, "result": "NO_BASELINE"}
+  ]
+}
