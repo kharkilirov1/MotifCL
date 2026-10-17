@@ -9749,6 +9749,35 @@ VulkanOpResult run_vulkan_grouped_query_attention_general(
 
     const bool use_subgroup = runtime.caps().subgroup_arithmetic_compute && runtime.caps().subgroup_size == 64;
     if (kv_dtype == 0) {
+        // Training fast path: plain causal attention over a full self-attention
+        // window with no mask tensor. The tiled kernel keeps four query rows per
+        // workgroup so each K/V row is loaded once per four rows instead of once
+        // per row (the general kernel's bottleneck on this device). Everything
+        // the specialization does not cover falls through to the general kernel.
+        const bool causal_fast_path =
+            use_subgroup && causal != 0 && query_offset == 0 && sliding_window == 0 && mask_dtype == 0 &&
+            mask_mode == 0 && key_tokens == query_tokens && key_stride == key_tokens && key_tokens <= 256 &&
+            head_dim <= 64 && head_dim == v_head_dim && head_dim > 0 && n_kv_head > 0 &&
+            n_head % n_kv_head == 0;
+        if (causal_fast_path) {
+            struct FastPush {
+                std::uint32_t batch;
+                std::uint32_t query_tokens;
+                std::uint32_t key_tokens;
+                std::uint32_t n_head;
+                std::uint32_t n_kv_head;
+                std::uint32_t head_dim;
+                float scale;
+            } fast_push{static_cast<std::uint32_t>(batch), static_cast<std::uint32_t>(query_tokens),
+                        static_cast<std::uint32_t>(key_tokens), static_cast<std::uint32_t>(n_head),
+                        static_cast<std::uint32_t>(n_kv_head), static_cast<std::uint32_t>(head_dim), scale};
+            const std::vector<const VulkanBuffer*> fast_buffers = {&q, &k, &v, &out};
+            return runtime.dispatch_cached(vkspirv::k_gqa_fwd_causal4_f32, vkspirv::k_gqa_fwd_causal4_f32_words,
+                                           fast_buffers, &fast_push, sizeof(fast_push),
+                                           static_cast<std::uint32_t>((query_tokens + 3) / 4),
+                                           static_cast<std::uint32_t>(n_head),
+                                           static_cast<std::uint32_t>(batch));
+        }
         const struct {
             std::uint32_t batch;
             std::uint32_t query_tokens;
@@ -10045,6 +10074,43 @@ VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtim
         &q, &k, &v, &grad_out, &probs_scratch, &ds_scratch, &grad_q};
     const bool use_sg_bwd =
         runtime.caps().subgroup_arithmetic_compute && runtime.caps().subgroup_size == 64;
+    // Training fast path: plain causal self-attention over a full window with no
+    // mask tensor. The tiled stage-1 kernel keeps four query rows per workgroup
+    // and reuses every K/V element across them (the general kernel re-streams
+    // K/V per row, which dominated attention time on this device).
+    if (use_sg_bwd && causal && query_offset == 0 && key_tokens == query_tokens && key_tokens <= 256 &&
+        head_dim <= 64 && n_head % n_kv_head == 0 && batch > 0) {
+        struct FastBwdPush {
+            std::uint32_t batch;
+            std::uint32_t query_tokens;
+            std::uint32_t key_tokens;
+            std::uint32_t n_head;
+            std::uint32_t n_kv_head;
+            std::uint32_t head_dim;
+            float scale;
+        } fast_push{static_cast<std::uint32_t>(batch), static_cast<std::uint32_t>(query_tokens),
+                    static_cast<std::uint32_t>(key_tokens), static_cast<std::uint32_t>(n_head),
+                    static_cast<std::uint32_t>(n_kv_head), static_cast<std::uint32_t>(head_dim), scale};
+        auto fast_stage = runtime.dispatch_cached(
+            vkspirv::k_gqa_bwd_probs_causal4_f32, vkspirv::k_gqa_bwd_probs_causal4_f32_words, probs_buffers,
+            &fast_push, sizeof(fast_push), static_cast<std::uint32_t>((query_tokens + 3) / 4),
+            static_cast<std::uint32_t>(n_head), static_cast<std::uint32_t>(batch));
+        if (!fast_stage.success) return fast_stage;
+        // Stage 2 also takes the tiled kernel when the vector width allows it:
+        // one 64-key tile per workgroup, q/dout rows broadcast to the lanes.
+        const std::vector<const VulkanBuffer*> dkv_buffers = {&q,     &grad_out, &probs_scratch,
+                                                              &ds_scratch, &grad_k, &grad_v};
+        if (head_dim % 4 == 0) {
+            return runtime.dispatch_cached(vkspirv::k_gqa_bwd_dkv_causal_tile_f32,
+                                           vkspirv::k_gqa_bwd_dkv_causal_tile_f32_words, dkv_buffers,
+                                           &fast_push, sizeof(fast_push),
+                                           static_cast<std::uint32_t>((key_tokens + 63) / 64),
+                                           static_cast<std::uint32_t>(n_kv_head), static_cast<std::uint32_t>(batch));
+        }
+        return runtime.dispatch_cached(vkspirv::k_gqa_bwd_dkv_f32, vkspirv::k_gqa_bwd_dkv_f32_words, dkv_buffers,
+                                       &push, sizeof(push), static_cast<std::uint32_t>((key_tokens + 3) / 4),
+                                       static_cast<std::uint32_t>(n_kv_head), static_cast<std::uint32_t>(batch));
+    }
     const auto* bwd_spirv = use_sg_bwd ? vkspirv::k_gqa_bwd_probs_f32_subgroup : vkspirv::k_gqa_bwd_probs_f32;
     const auto bwd_words = use_sg_bwd ? vkspirv::k_gqa_bwd_probs_f32_subgroup_words : vkspirv::k_gqa_bwd_probs_f32_words;
     auto stage = runtime.dispatch_cached(bwd_spirv, bwd_words,

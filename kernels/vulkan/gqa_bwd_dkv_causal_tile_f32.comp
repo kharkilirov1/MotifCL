@@ -1,0 +1,86 @@
+// Tiled causal grouped-query attention backward stage 2: dK and dV.
+//
+// The general kernel runs one workgroup per four key positions and re-reads the
+// whole Q and dO history for each of them; on the memory-native trainer that is
+// ~1.3 GB of redundant traffic per step and the kernel measured 10 ms/step.
+// Here one 64-lane workgroup owns a tile of 64 key positions of one (batch,
+// kv-head): every lane owns exactly one key, so the per-row `ds`/`p` scalars are
+// read once with fully coalesced lane addressing while the `q`/`dout` rows are
+// broadcast to all lanes. Each lane keeps its head_dim-wide (<= 64) dK and dV
+// accumulators in registers as constant-indexed vec4 arrays, which avoids the
+// dynamic local-array indexing that would spill.
+//
+//   dK[key][d] = scale * sum_{h in group} sum_row ds[b][h][row][key] * q[b][row][h][d]
+//   dV[key][d] =         sum_{h in group} sum_row  p[b][h][row][key] * dout[b][row][h][d]
+//
+// Preconditions (checked by the caller): causal, no mask, query_offset == 0,
+// key_stride == key_tokens == query_tokens <= 256, head_dim == v_head_dim <= 64
+// and head_dim % 4 == 0.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { vec4 q4[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DoutBuf { vec4 dout4[]; };
+layout(std430, set = 0, binding = 2) readonly buffer PBuf { float p[]; };
+layout(std430, set = 0, binding = 3) readonly buffer DsBuf { float ds[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer DkBuf { vec4 dk4[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer DvBuf { vec4 dv4[]; };
+
+layout(push_constant) uniform Push {
+    uint batch;
+    uint query_tokens;
+    uint key_tokens;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    float scale;
+} pc;
+
+#define MAXDQ 16
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint key = gl_WorkGroupID.x * 64u + lane;
+    const uint kv_head = gl_WorkGroupID.y;
+    const uint b = gl_WorkGroupID.z;
+    const uint T = pc.query_tokens;
+    if (b >= pc.batch || kv_head >= pc.n_kv_head || key >= pc.key_tokens) return;
+
+    const uint group_size = pc.n_head / pc.n_kv_head;
+    const uint q_channels = pc.n_head * pc.head_dim;
+    const uint kv_channels = pc.n_kv_head * pc.head_dim;
+    const uint dmax = pc.head_dim / 4u;
+    const uint head0 = kv_head * group_size;
+    const uint out_base = kv_head * pc.head_dim;
+
+    // dK: sum over query heads of the group and over rows.
+    vec4 acc[MAXDQ];
+    for (int i = 0; i < MAXDQ; ++i) acc[i] = vec4(0.0);
+    for (uint gi = 0u; gi < group_size; ++gi) {
+        const uint hh = head0 + gi;
+        const uint head_base = (b * pc.n_head + hh) * T * pc.key_tokens;
+        const uint q_col = hh * pc.head_dim;
+        for (uint r = 0u; r < T; ++r) {
+            const float dsv = ds[head_base + r * pc.key_tokens + key];
+            const uint qb = ((b * T + r) * q_channels + q_col) >> 2;
+            for (int i = 0; i < MAXDQ; ++i) { if (i < int(dmax)) acc[i] += dsv * q4[qb + uint(i)]; }
+        }
+    }
+    const uint dk_base = ((b * T + key) * kv_channels + out_base) >> 2;
+    for (uint i = 0u; i < dmax; ++i) dk4[dk_base + i] = acc[i] * pc.scale;
+
+    // dV: same reduction against p and dout.
+    for (int i = 0; i < MAXDQ; ++i) acc[i] = vec4(0.0);
+    for (uint gi = 0u; gi < group_size; ++gi) {
+        const uint hh = head0 + gi;
+        const uint head_base = (b * pc.n_head + hh) * T * pc.key_tokens;
+        const uint q_col = hh * pc.head_dim;
+        for (uint r = 0u; r < T; ++r) {
+            const float pv = p[head_base + r * pc.key_tokens + key];
+            const uint db = ((b * T + r) * q_channels + q_col) >> 2;
+            for (int i = 0; i < MAXDQ; ++i) { if (i < int(dmax)) acc[i] += pv * dout4[db + uint(i)]; }
+        }
+    }
+    for (int i = 0; i < MAXDQ; ++i) { if (i < int(dmax)) dv4[dk_base + uint(i)] = acc[i]; }
+}

@@ -1,0 +1,152 @@
+// Tiled causal grouped-query attention forward for the training path.
+//
+// The general kernel runs one 64-lane workgroup per (batch, head, query row) and
+// therefore streams the whole K/V history for every single query row: on the
+// memory-native trainer that is ~600 MB of redundant K/V traffic per layer and
+// the kernel measured ~3% of the RX 580 FP32 peak. This specialization keeps
+// ROWS=4 consecutive causal query rows in one workgroup so each K/V row is
+// loaded once per four rows, with the query rows and the probability row held in
+// shared memory:
+//
+//   * pass 1 walks the key range once, loading each K vector a single time and
+//     forming four dot products (one per query row) from broadcast reads of the
+//     staged query rows;
+//   * the softmax max/sum reductions are `vec4` subgroup reductions, one
+//     component per query row, so no cross-row shared-memory shuffling is needed;
+//   * pass 2 produces the output by having one lane own one output dimension and
+//     reusing each V element across the four rows.
+//
+// Preconditions (checked by the caller, which otherwise keeps the general
+// kernel): causal, no mask tensor, query_offset == 0, sliding_window == 0,
+// key_stride == key_tokens == query_tokens <= 256, head_dim == v_head_dim <= 64.
+#version 450
+
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KBuf { float k[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VBuf { float v[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer OutBuf { float o[]; };
+
+layout(push_constant) uniform Push {
+    uint batch;
+    uint query_tokens;
+    uint key_tokens;
+    uint n_head;
+    uint n_kv_head;
+    uint head_dim;
+    float scale;
+} p;
+
+#define ROWS 4
+#define MAXK 256
+#define MAXD 64
+
+shared float qs[ROWS][MAXD];
+shared float probs[ROWS][MAXK];
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint r0 = gl_WorkGroupID.x * uint(ROWS);
+    const uint h = gl_WorkGroupID.y;
+    const uint b = gl_WorkGroupID.z;
+    const uint T = p.query_tokens;
+    if (h >= p.n_head || b >= p.batch || r0 >= T) return;
+
+    const uint group_size = p.n_head / p.n_kv_head;
+    const uint kv_head = h / group_size;
+    const uint q_channels = p.n_head * p.head_dim;
+    const uint kv_channels = p.n_kv_head * p.head_dim;
+    const float neg_inf = -3.402823466e+38;
+
+    // Stage the four query rows (broadcast reads later).
+    for (uint j = 0u; j < uint(ROWS); ++j) {
+        const uint tq = r0 + j;
+        if (tq < T) {
+            const uint qb = (b * T + tq) * q_channels + h * p.head_dim;
+            for (uint d = lane; d < p.head_dim; d += 64u) qs[j][d] = q[qb + d];
+        }
+    }
+    barrier();
+
+    // Pass 1: four scores per key, causal-masked, then a vec4 subgroup max.
+    vec4 lane_max = vec4(neg_inf);
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        vec4 s = vec4(neg_inf);
+        if (tk <= r0 + uint(ROWS - 1)) {
+            const uint kb = (b * p.key_tokens + tk) * kv_channels + kv_head * p.head_dim;
+            float d0 = 0.0;
+            float d1 = 0.0;
+            float d2 = 0.0;
+            float d3 = 0.0;
+            for (uint d = 0u; d < p.head_dim; ++d) {
+                const float kd = k[kb + d];
+                d0 += qs[0][d] * kd;
+                d1 += qs[1][d] * kd;
+                d2 += qs[2][d] * kd;
+                d3 += qs[3][d] * kd;
+            }
+            s = vec4(d0, d1, d2, d3) * p.scale;
+            if (tk > r0 + 0u) s.x = neg_inf;
+            if (tk > r0 + 1u) s.y = neg_inf;
+            if (tk > r0 + 2u) s.z = neg_inf;
+        }
+        probs[0][tk] = s.x;
+        probs[1][tk] = s.y;
+        probs[2][tk] = s.z;
+        probs[3][tk] = s.w;
+        lane_max = max(lane_max, s);
+    }
+    vec4 row_max = subgroupMax(lane_max);
+    // Rows with no visible key (partial trailing tile) must not produce
+    // -inf - -inf in the softmax.
+    if (row_max.x == neg_inf) row_max.x = 0.0;
+    if (row_max.y == neg_inf) row_max.y = 0.0;
+    if (row_max.z == neg_inf) row_max.z = 0.0;
+    if (row_max.w == neg_inf) row_max.w = 0.0;
+
+    // Pass 2: softmax numerator, then a vec4 subgroup sum.
+    vec4 lane_sum = vec4(0.0);
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        vec4 e;
+        e.x = probs[0][tk] == neg_inf ? 0.0 : exp(probs[0][tk] - row_max.x);
+        e.y = probs[1][tk] == neg_inf ? 0.0 : exp(probs[1][tk] - row_max.y);
+        e.z = probs[2][tk] == neg_inf ? 0.0 : exp(probs[2][tk] - row_max.z);
+        e.w = probs[3][tk] == neg_inf ? 0.0 : exp(probs[3][tk] - row_max.w);
+        probs[0][tk] = e.x;
+        probs[1][tk] = e.y;
+        probs[2][tk] = e.z;
+        probs[3][tk] = e.w;
+        lane_sum += e;
+    }
+    vec4 sum = subgroupAdd(lane_sum);
+    vec4 inv = vec4(sum.x > 0.0 ? 1.0 / sum.x : 0.0, sum.y > 0.0 ? 1.0 / sum.y : 0.0,
+                    sum.z > 0.0 ? 1.0 / sum.z : 0.0, sum.w > 0.0 ? 1.0 / sum.w : 0.0);
+    barrier();
+
+    // Pass 3: one lane per output dimension, reusing each V element across rows.
+    if (lane < p.head_dim) {
+        const uint d = lane;
+        const uint vb = kv_head * p.head_dim + d;
+        float a0 = 0.0;
+        float a1 = 0.0;
+        float a2 = 0.0;
+        float a3 = 0.0;
+        for (uint tk = 0u; tk < p.key_tokens; ++tk) {
+            const float vv = v[(b * p.key_tokens + tk) * kv_channels + vb];
+            a0 += probs[0][tk] * vv;
+            a1 += probs[1][tk] * vv;
+            a2 += probs[2][tk] * vv;
+            a3 += probs[3][tk] * vv;
+        }
+        const uint oc = p.n_head * p.head_dim;
+        const uint ob = h * p.head_dim + d;
+        if (r0 + 0u < T) o[(b * T + r0 + 0u) * oc + ob] = a0 * inv.x;
+        if (r0 + 1u < T) o[(b * T + r0 + 1u) * oc + ob] = a1 * inv.y;
+        if (r0 + 2u < T) o[(b * T + r0 + 2u) * oc + ob] = a2 * inv.z;
+        if (r0 + 3u < T) o[(b * T + r0 + 3u) * oc + ob] = a3 * inv.w;
+    }
+}
