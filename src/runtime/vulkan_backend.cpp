@@ -5310,7 +5310,7 @@ struct VulkanRuntime::Impl {
     }
 
     bool begin_fast_commands(bool timed) {
-        if (reset_command_pool(device, fast_command_pool, VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT) != VK_SUCCESS) {
+        if (reset_command_pool(device, fast_command_pool, 0u) != VK_SUCCESS) {
             fast_error = "vkResetCommandPool failed for cached dispatch";
             return false;
         }
@@ -5545,7 +5545,7 @@ struct VulkanRuntime::Impl {
         if (batch_dispatch_count == 0) {
             // Nothing recorded; discard the empty command buffer.
             end_command_buffer(fast_command_buffer);
-            reset_command_pool(device, fast_command_pool, VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT);
+            reset_command_pool(device, fast_command_pool, 0u);
             recycle_inflight_sets();
             result.success = true;
             return result;
