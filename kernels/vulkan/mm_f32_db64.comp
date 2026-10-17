@@ -4,7 +4,8 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
-#define TILE 64
+#define TILE_M 64
+#define TILE_N 64
 #define LANES 256
 #define LX 16
 #define LY 16

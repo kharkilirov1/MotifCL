@@ -100,11 +100,11 @@ std::size_t matmul_db_tile(std::size_t m, std::size_t k, std::size_t n) {
     // workgroups and the shape is either wide (n >= 384) or deep (k >= 1024),
     // because those are the cases where halving the operand re-reads beats the
     // lost workgroup-level parallelism. Small-square shapes (n = 288, k = 288)
-    // prefer the 32x32 tile, and the counter grad_w shapes (few output tiles,
-    // long K) stay on 32x32 as well.
+    // prefer the 32x32 tile.
     const std::size_t g64 = ((m + 63) / 64) * ((n + 63) / 64);
     const bool traffic_heavy = n >= 384 || k >= 1024;
-    return (g64 >= 96 && traffic_heavy) ? 64 : 32;
+    if (g64 >= 96 && traffic_heavy) return 64;
+    return 32;
 }
 
 VulkanOpResult dispatch_vulkan_matmul_db(VulkanRuntime& runtime,

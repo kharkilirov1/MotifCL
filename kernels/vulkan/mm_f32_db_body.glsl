@@ -34,13 +34,13 @@ layout(push_constant) uniform Push {
 } p;
 
 #define KT 16
-#define TQ (TILE / 4)
-#define LQ (TILE / 4)
-#define AQ (TILE * KT / 4 / LANES)
-#define BQ (KT * TILE / 4 / LANES)
+#define MQ (TILE_M / 4)
+#define NQ (TILE_N / 4)
+#define AQ (TILE_M * KT / 4 / LANES)
+#define BQ (KT * TILE_N / 4 / LANES)
 
-shared vec4 As[2][KT][LQ];
-shared vec4 Bs[2][KT][LQ];
+shared vec4 As[2][KT][MQ];
+shared vec4 Bs[2][KT][NQ];
 
 // ---- tile staging ---------------------------------------------------------
 
@@ -61,8 +61,8 @@ void load_a(uint lid, uint m0, uint kt, out vec4 r0, out vec4 r1) {
         // A[k][m]: one vec4 covers four consecutive m of a single k row.
         for (int i = 0; i < AQ; ++i) {
             const uint idx = lid + uint(i) * LANES;
-            const uint kk = idx / TQ;
-            const uint mq = idx - kk * TQ;
+            const uint kk = idx / MQ;
+            const uint mq = idx - kk * MQ;
             const uint gm = m0 + mq * 4u;
             const uint gk = kt + kk;
             vec4 v = vec4(0.0);
@@ -77,8 +77,8 @@ void load_b(uint lid, uint n0, uint kt, out vec4 r0, out vec4 r1) {
         // B[k][n]: one vec4 covers four consecutive n of a single k row.
         for (int i = 0; i < BQ; ++i) {
             const uint idx = lid + uint(i) * LANES;
-            const uint kk = idx / TQ;
-            const uint nq = idx - kk * TQ;
+            const uint kk = idx / NQ;
+            const uint nq = idx - kk * NQ;
             const uint gn = n0 + nq * 4u;
             const uint gk = kt + kk;
             vec4 v = vec4(0.0);
@@ -118,8 +118,8 @@ void store_a(int buf, uint lid, vec4 r0, vec4 r1) {
         for (int i = 0; i < AQ; ++i) {
             const vec4 v = (i == 0) ? r0 : r1;
             const uint idx = lid + uint(i) * LANES;
-            const uint kk = idx / TQ;
-            const uint mq = idx - kk * TQ;
+            const uint kk = idx / MQ;
+            const uint mq = idx - kk * MQ;
             As[buf][kk][mq] = v;
         }
     }
@@ -130,8 +130,8 @@ void store_b(int buf, uint lid, vec4 r0, vec4 r1) {
         for (int i = 0; i < BQ; ++i) {
             const vec4 v = (i == 0) ? r0 : r1;
             const uint idx = lid + uint(i) * LANES;
-            const uint kk = idx / TQ;
-            const uint nq = idx - kk * TQ;
+            const uint kk = idx / NQ;
+            const uint nq = idx - kk * NQ;
             Bs[buf][kk][nq] = v;
         }
     } else {
@@ -156,8 +156,8 @@ void main() {
     const uint lid = uint(gl_LocalInvocationID.y) * uint(LX) + uint(gl_LocalInvocationID.x);
     const uint lrow = uint(gl_LocalInvocationID.y);
     const uint lcol = uint(gl_LocalInvocationID.x);
-    const uint m0 = uint(gl_WorkGroupID.y) * uint(TILE);
-    const uint n0 = uint(gl_WorkGroupID.x) * uint(TILE);
+    const uint m0 = uint(gl_WorkGroupID.y) * uint(TILE_M);
+    const uint n0 = uint(gl_WorkGroupID.x) * uint(TILE_N);
     const uint ktiles = (p.K + uint(KT) - 1u) / uint(KT);
 
     vec4 ra0 = vec4(0.0);

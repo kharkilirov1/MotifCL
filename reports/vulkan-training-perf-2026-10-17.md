@@ -371,3 +371,36 @@ cooperatively into LDS is the next step there.
 
 GPU fwd+bwd 222 -> 175 ms. Full CTest 51/51 with the counter exactness witness
 and the recorded convergence witness intact (7.60164 -> 0.0642764).
+
+## Challenge round 3: rectangular grad_w tile — measured and rejected (2026-10-18)
+
+Item 2 of the remaining list was the counter grad_w GEMM (29 ms/step, ~30% of
+peak, ~230 GB/s of the 256 GB/s theoretical bandwidth). The analysis said the
+kernel is bandwidth-bound because the output has only ~108 32x32 tiles while
+K = 2048, so both operands are re-read n/32 and m/32 times (56 MB per layer).
+A rectangular 64x32 tile specialization (128 threads / two waves) was built by
+generalizing the double-buffered body to TILE_M x TILE_N; it halves the A-side
+re-read stream at the same resident wave count (54 workgroups x 2 waves).
+
+Measured result: **it is slower**, and the variant was removed again.
+
+| shape | 32x32 | 64x64 | 64x32 |
+|---|---:|---:|---:|
+| expert_gradw 384x2048x288 | **0.246 ms (29.9%)** | 0.302 ms (24.3%) | 0.360 ms (20.4%) |
+| attn_gradw 288x2048x288 | **0.268 ms (20.6%)** | 0.301 ms (18.3%) | 0.246 ms (22.4%) |
+
+Explanation: the traffic model was right (25% less operand traffic) but the
+two-wave workgroup pays for it at every shared-memory barrier, and the extra LDS
+(12 KiB) drops residency from four to two workgroups per CU; the net effect is
+negative for the deeper shape and neutral for the shallower one. Breaking grad_w
+out of the bandwidth ceiling needs a real k-split with a separate reduction pass
+(the runtime binds descriptors at offset 0, so the current kernels cannot be
+pointed at a k-chunk of a buffer), which is a larger change than a tile variant.
+
+Status of the remaining items: item 4 (elementwise/CE fusion) needs genuinely
+fused kernels (SwiGLU in the counter GEMM epilogue, add+rmsnorm, chunked
+vocabulary CE) rather than vectorization, because the measured kernels are
+already at 76-180 GB/s of the ~256 GB/s band; item 5 (CPU autograd) is now
+localized to 18.4 ms forward + 31.5 ms backward per step of taper/Tensor CPU work
+(~700 dispatches at ~15 us are only ~11 ms of it), so it needs a Tensor/node
+freelist or op fusion instead of command-buffer tricks.
