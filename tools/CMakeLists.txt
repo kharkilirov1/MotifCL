@@ -6,6 +6,7 @@ set(MOTIFCL_TOOLS
     generate_transformer
     warm_decode_bench
     train_ternary15m
+    train_moe15m
 )
 
 foreach(tool ${MOTIFCL_TOOLS})

@@ -19,6 +19,9 @@ set(MOTIFCL_EXAMPLES
     18_fog_v3_fairy_tale_logic
     19_fog_v3_advanced_logic_suite
     20_fog_v3_ultimate_benchmark
+    21_fog_v3_nl_recon
+    22_fog_v3_nl_binder_train
+    23_fog_v3_nl_e2e
 )
 
 foreach(example ${MOTIFCL_EXAMPLES})

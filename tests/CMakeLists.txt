@@ -45,6 +45,9 @@ set(MOTIFCL_TESTS
     test_vulkan_memory_native
     test_matmul_transpose_b_autograd
     test_fog_ops
+    test_moe7_reference
+    test_moe7_balance
+    test_counter_memory_vulkan
 )
 
 # MinGW test executables need the toolchain runtime DLLs (libstdc++-6.dll,
