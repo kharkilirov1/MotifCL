@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Vulkan GEMM and counter kernels: double buffering, LDS.128 operands (2nd pass)
+
+- New double-buffered register-blocked FP32 GEMM family
+  (`kernels/vulkan/mm_f32_db_body.glsl` with `mm_f32_db32.comp` and
+  `mm_f32_db64.comp`): the next K tile is loaded into registers before the
+  current one is consumed, and A/B are read as `vec4` (`LDS.128`) instead of
+  eight scalar shared-memory operands per k step. One body covers A*B, A*B^T and
+  A^T*B. Measured on the training shapes: LM-head forward 25.3% -> **62.4%** of
+  the RX 580 FP32 peak (24.2 ms -> 9.8 ms), head dA 15.2% -> 41.8%, head dB
+  25.9% -> 57.9%, expert/attention projections 22% -> 47-57%. The kernels are
+  the default for shapes with all dimensions divisible by four; the previous
+  scalar/register-blocked kernels stay as the fallback.
+  `MOTIFCL_VK_MATMUL_VARIANT=base|rb4|db` and `MOTIFCL_VK_MATMUL_DB_TILE=32|64`
+  force a variant for A/B runs.
+- New `kernels/vulkan/counter_gemm_db.comp`: double-buffered fused 6-bit counter
+  decode + GEMM for both counter training projections (forward and
+  backward-input, one mode flag). Decode of the next tile overlaps the current
+  tile's FMA loop. Counter projections: ~24% -> ~30% of peak, 77 -> 62 ms per
+  training step.
+- New `benchmarks/bench_vulkan_gemm_shapes`: measures the exact trainer GEMM
+  shapes with VK timestamp queries and reports TFLOP/s against the Polaris FP32
+  peak. New `tests/test_vulkan_gemm_parity`: CPU-reference parity for all three
+  layouts across 13 shapes (tile multiples, partial tiles, partial K tiles, odd
+  dimensions taking the scalar fallback).
+- MoE trainer (7x192 + shared 192, B8xT256): 5666-5701 -> **~7000 tok/s**
+  (289 ms/step, GPU 294 -> 222 ms); dense control (hidden 768): 8800 -> 9542
+  tok/s. Full CTest 51/51, counter exactness and convergence witnesses intact.
+  Evidence: `reports/vulkan-training-perf-2026-10-17.md`.
+
 ### Vulkan training throughput (RX 580, measured 8.3x on the memory-native MoE trainer)
 
 - Device-local VRAM is now the default storage-buffer placement for the Vulkan

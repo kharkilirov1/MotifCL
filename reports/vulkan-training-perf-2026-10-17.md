@@ -201,3 +201,112 @@ Regenerate shaders and the profiler name table after editing `kernels/vulkan/*.c
 python tools/gen_vulkan_spirv.py        # needs glslc (MOTIFCL_GLSLC or Android NDK)
 python tools/gen_vulkan_spirv_names.py
 ```
+
+## Challenge pass: double-buffered GEMM kernels (2026-10-18)
+
+Second optimization pass, same device and harness. The first pass removed the
+structural waste; this pass attacks the kernels themselves and the measured
+absolute utilization.
+
+### Where the time was (per MoE step, GPU, after the first pass)
+
+| block | ms/step | achieved | % of RX 580 FP32 peak |
+|---|---:|---:|---:|
+| baseline (first pass) | 291-294 | 0.93 TFLOP/s | 15% |
+| LM-head GEMMs (nn/nt/tn) | 99 | 1.14 TFLOP/s | 18% |
+| counter projections (fwd+bwd) | 77 | ~1.5 TFLOP/s | 24% |
+| counter grad_w GEMM | 30 | 1.2 TFLOP/s | 20% |
+| GQA attention (fwd + 2 bwd) | 68 | 0.18 TFLOP/s | 3% |
+
+### What changed
+
+1. **Double-buffered register-blocked GEMM** (`kernels/vulkan/mm_f32_db_body.glsl`
+   plus the 32x32/64-thread `mm_f32_db32.comp` and 64x64/256-thread
+   `mm_f32_db64.comp` specializations). One body covers all three operand
+   layouts (A*B, A*B^T, A^T*B). Two changes mattered:
+   * the K loop walks 16-deep tiles through a two-buffer LDS ring and loads the
+     next tile into registers **before** consuming the current one, so global
+     latency and decode arithmetic overlap the FMA loop instead of stalling the
+     workgroup at each barrier;
+   * A and B are viewed as `vec4` arrays and read with `LDS.128`, so each k step
+     is two vector LDS reads for sixteen FMA (the old kernels issued eight scalar
+     reads for the same sixteen FMA and were LDS-issue bound).
+   Tile selection is measured, not guessed: 64x64 when there are at least ~96
+   output tiles *and* the shape is wide (n >= 384) or deep (k >= 1024), else
+   32x32 (`MOTIFCL_VK_MATMUL_DB_TILE` / `MOTIFCL_VK_MATMUL_VARIANT` override for
+   A/B runs).
+2. **Double-buffered counter decode + GEMM** (`kernels/vulkan/counter_gemm_db.comp`).
+   One kernel serves both training projections (forward `y = x*W` and
+   backward-input `grad_x = grad_out*W^T`) with a mode flag; the packed 6-bit
+   state is decoded into registers for the next K tile while the current tile is
+   being multiplied. This replaces the two scalar-operand kernels that measured
+   ~24% of peak.
+3. **Tooling**: `benchmarks/bench_vulkan_gemm_shapes` measures the exact training
+   shapes (nn/nt/tn) with GPU timestamps and reports TFLOP/s against the 6.17
+   TFLOPS FP32 peak, and `tests/test_vulkan_gemm_parity` checks all three layouts
+   against a host reference (the pre-existing Vulkan matmul parity smoke needs
+   OpenCL tensors and skips on this box).
+
+### Kernel-level result (bench_vulkan_gemm_shapes, RX 580)
+
+| shape | op | before | after | % peak after |
+|---|---|---:|---:|---:|
+| 2048x288x32000 (LM head fwd) | nn | 24.17 ms / 25.3% | **9.81 ms** | **62.4%** |
+| 2048x32000x288 (LM head dA) | nt | 40.28 ms / 15.2% | **14.6 ms** | **41.8%** |
+| 288x2048x32000 (LM head dB) | tn | 23.59 ms / 25.9% | **10.6 ms** | **57.9%** |
+| 2048x288x384 (expert up) | nn | 0.331 ms / 22.2% | **0.144 ms** | **51.2%** |
+| 2048x192x288 (expert down) | nn | 0.168 ms / 21.8% | **0.078 ms** | **47.2%** |
+| 2048x288x288 (attn qkv) | nn | 0.249 ms / 22.1% | **0.111 ms** | **49.8%** |
+| 2048x288x768 (dense up) | nn | 0.652 ms / 22.5% | **0.260 ms** | **56.5%** |
+| 384x2048x288 (counter grad_w) | tn | 0.370 ms / 19.9% | **0.246 ms** | 29.9% |
+
+Everything but the counter grad_w shape is now in the 42-62% band; the head
+projection (34% of the modelled step FLOPs when counting fwd+bwd) sits at 62.4%.
+
+### Step-level result
+
+| arm | ms/step | tok/s |
+|---|---:|---:|
+| first pass (end of 2026-10-17 work) | 357-365 | 5666-5701 |
+| **this pass** | **289** | **~7000** (measured 6969 at step 30; 30-step steady state) |
+| GPU fwd+bwd | 294 -> **222** | |
+| LM-head GEMM block | 99 -> **37** | |
+| counter projections | 77 -> **62** | |
+| counter grad_w | 30 -> **29** | |
+| GQA attention | 68 -> **61** | |
+| dense control (hidden 768) | 233 -> **215** | 8800 -> **9542** |
+
+Correctness: full CTest **51/51**; `test_vulkan_counter_fused` still demands and
+gets an exact state/scale/v match, `test_vulkan_memory_native` still reproduces
+the recorded convergence witness (7.60164 -> 0.0642764), and the new
+`test_vulkan_gemm_parity` covers all 13 shape/layout combinations including
+partial tiles, partial K tiles and the odd-dimension scalar fallback.
+
+### Remaining headroom (measured, not estimated)
+
+* **GQA attention is now the worst block**: 61 ms/step at ~3% of peak. The
+  kernels run one 64-lane workgroup per (batch, head, query row) and therefore
+  re-read the whole K/V history for every query row (per layer ~600 MB of
+  redundant K/V traffic). The fix is tiling several query rows per workgroup with
+  K/V tiles resident in LDS (the same structure that produced the GEMM win);
+  expected 61 -> ~20 ms.
+* **Counter grad_w (29 ms/step, 30% peak)** is bandwidth-bound because the output
+  tile count is small (108 workgroups) while K = 2048: it re-reads both operands
+  `n/32` and `m/32` times. A 64x32 output tile keeps the same wave count while
+  cutting operand traffic ~25%; a larger redesign would need k-splitting.
+* **Counter decode (62 ms/step)** still reads packed state bytes with scattered
+  1-byte loads (32 B sector per 1-3 useful bytes). Staging each out row's 12
+  contiguous state bytes cooperatively into LDS before decode should recover
+  another 10-15 ms.
+* **CE backward (5.0 ms) and the elementwise/norm block (~20 ms)** are un-fused;
+  folding SwiGLU and residual-add epilogues into the neighbouring GEMMs and
+  chunking the vocabulary CE would remove most of that plus ~200 dispatches.
+* **CPU recording is 48-51 ms/step** (~17%) with ~700 dispatches; the measured
+  Vulkan fast-path dispatch is ~15 us, so most of that is autograd/Tensor CPU
+  work rather than command recording. Needs a CPU-side scope profile before
+  more kernel work.
+* **Sparse MoE backward** would remove ~35-40 ms of discarded expert work, but
+  today each expert owns separate state/scale buffers and the runtime binds
+  descriptors at offset 0, so one segmented dispatch cannot index per-expert
+  weights: it needs either a shared expert-state buffer or descriptor-offset
+  support first. That is a refactor, not a kernel tweak.

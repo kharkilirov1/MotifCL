@@ -1,0 +1,14 @@
+// Double-buffered 32x32 FP32 GEMM (64 threads / one wave64, 4x4 per lane).
+// Keeps enough workgroups for the small counter GEMMs while still feeding the
+// FMA pipes with LDS.128 operands. See mm_f32_db_body.glsl for the design.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#define TILE 32
+#define LANES 64
+#define LX 8
+#define LY 8
+
+layout(local_size_x = LX, local_size_y = LY) in;
+
+#include "mm_f32_db_body.glsl"

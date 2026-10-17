@@ -1,0 +1,14 @@
+// Double-buffered 64x64 FP32 GEMM (256 threads / four waves, 4x4 per lane).
+// Best for the wide training projections (LM head, expert up/down) where the
+// larger tile amortizes staging and keeps eight waves resident per CU.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#define TILE 64
+#define LANES 256
+#define LX 16
+#define LY 16
+
+layout(local_size_x = LX, local_size_y = LY) in;
+
+#include "mm_f32_db_body.glsl"

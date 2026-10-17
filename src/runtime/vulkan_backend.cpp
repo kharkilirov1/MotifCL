@@ -62,6 +62,80 @@ const char* spirv_kernel_name(const void* spirv) {
     return "unknown_kernel";
 }
 
+// Tuning override for the F32 matmul kernel family. The default (auto) keeps the
+// startup-probe decision plus the size heuristics; MOTIFCL_VK_MATMUL_VARIANT lets
+// benchmarks and A/B runs force one variant without rebuilding. Read per call so
+// a single benchmark process can compare variants back to back.
+enum class MatmulVariant { Auto, Base, Rb4, DoubleBuffered };
+MatmulVariant matmul_variant_override() {
+    const char* env = std::getenv("MOTIFCL_VK_MATMUL_VARIANT");
+    if (!env || !*env) return MatmulVariant::Auto;
+    if (std::strcmp(env, "base") == 0) return MatmulVariant::Base;
+    if (std::strcmp(env, "rb4") == 0) return MatmulVariant::Rb4;
+    if (std::strcmp(env, "db") == 0) return MatmulVariant::DoubleBuffered;
+    return MatmulVariant::Auto;
+}
+
+// Double-buffered GEMM eligibility: the vec4 views used by the tiled body need
+// every leading dimension to be a multiple of four, and the tile has to be
+// covered by at least one whole wave.
+bool matmul_db_eligible(std::size_t m, std::size_t k, std::size_t n) {
+    return m >= 32 && n >= 32 && k >= 16 && (m % 4 == 0) && (k % 4 == 0) && (n % 4 == 0) &&
+           m <= std::numeric_limits<std::uint32_t>::max() && k <= std::numeric_limits<std::uint32_t>::max() &&
+           n <= std::numeric_limits<std::uint32_t>::max();
+}
+
+// Tile choice for the double-buffered body: the 64x64 tile needs enough
+// workgroups to fill the 36 CUs (four waves each), otherwise the 32x32 tile
+// wins because it keeps three to five times more workgroups in flight.
+std::size_t matmul_db_tile(std::size_t m, std::size_t k, std::size_t n) {
+    // Explicit override for A/B tuning: MOTIFCL_VK_MATMUL_DB_TILE=32|64.
+    const char* forced = std::getenv("MOTIFCL_VK_MATMUL_DB_TILE");
+    if (forced && *forced) {
+        const long long value = std::atoll(forced);
+        if (value == 32) return 32;
+        if (value == 64) return 64;
+    }
+    // Measured on RX 580: the 64x64 tile wins whenever there are at least ~96
+    // workgroups and the shape is either wide (n >= 384) or deep (k >= 1024),
+    // because those are the cases where halving the operand re-reads beats the
+    // lost workgroup-level parallelism. Small-square shapes (n = 288, k = 288)
+    // prefer the 32x32 tile, and the counter grad_w shapes (few output tiles,
+    // long K) stay on 32x32 as well.
+    const std::size_t g64 = ((m + 63) / 64) * ((n + 63) / 64);
+    const bool traffic_heavy = n >= 384 || k >= 1024;
+    return (g64 >= 96 && traffic_heavy) ? 64 : 32;
+}
+
+VulkanOpResult dispatch_vulkan_matmul_db(VulkanRuntime& runtime,
+                                        const VulkanBuffer& a,
+                                        const VulkanBuffer& b,
+                                        VulkanBuffer& c,
+                                        std::size_t m,
+                                        std::size_t k,
+                                        std::size_t n,
+                                        std::uint32_t a_layout,
+                                        std::uint32_t b_layout) {
+    struct Push {
+        std::uint32_t M;
+        std::uint32_t K;
+        std::uint32_t N;
+        std::uint32_t a_layout;
+        std::uint32_t b_layout;
+    } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n), a_layout,
+           b_layout};
+    const std::vector<const VulkanBuffer*> buffers = {&a, &b, &c};
+    const std::size_t tile = matmul_db_tile(m, k, n);
+    const std::uint32_t gx = static_cast<std::uint32_t>((n + tile - 1) / tile);
+    const std::uint32_t gy = static_cast<std::uint32_t>((m + tile - 1) / tile);
+    if (tile == 64) {
+        return runtime.dispatch_cached(vkspirv::k_mm_f32_db64, vkspirv::k_mm_f32_db64_words, buffers, &push,
+                                       sizeof(push), gx, gy, 1);
+    }
+    return runtime.dispatch_cached(vkspirv::k_mm_f32_db32, vkspirv::k_mm_f32_db32_words, buffers, &push,
+                                   sizeof(push), gx, gy, 1);
+}
+
 using VkFlags = std::uint32_t;
 using VkDeviceSize = std::uint64_t;
 using VkBool32 = std::uint32_t;
@@ -7337,10 +7411,18 @@ VulkanOpResult run_vulkan_f32_matmul(VulkanRuntime& runtime,
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
     // The square 256x256 startup probe captures the Polaris small-matrix
-    // crossover, but very wide training projections amortize rb4's register
-    // footprint and benefit from its 4x4 output reuse.
+    // The double-buffered tiled kernels are the default: measured 62% of the
+    // RX 580 FP32 peak on the LM-head projection versus 25% for the previous
+    // kernel, and they win on every training shape. The scalar/register-blocked
+    // kernels remain for shapes the vec4 body cannot take (dimensions not
+    // divisible by four, or tiles smaller than one wave).
+    const MatmulVariant variant = matmul_variant_override();
+    if (variant != MatmulVariant::Base && variant != MatmulVariant::Rb4 && matmul_db_eligible(m, k, n)) {
+        return dispatch_vulkan_matmul_db(runtime, a, b, c, m, k, n, 0u, 0u);
+    }
     const bool use_rb4 =
-        runtime.caps().prefer_rb4_matmul || (n >= 4096 && m >= 32);
+        variant == MatmulVariant::Rb4 ||
+        (variant == MatmulVariant::Auto && (runtime.caps().prefer_rb4_matmul || (n >= 4096 && m >= 32)));
     if (use_rb4) {
         // Register-block 32x32 tile, 8x8 lanes (one wave64), 16 outputs/lane.
         const std::uint32_t groups_x = static_cast<std::uint32_t>((n + 31) / 32);
@@ -7391,7 +7473,12 @@ VulkanOpResult run_vulkan_f32_matmul_transpose_b(VulkanRuntime& runtime,
         std::uint32_t k;
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
-    if (runtime.caps().prefer_rb4_matmul || (k >= 4096 && m >= 32)) {
+    const MatmulVariant nt_variant = matmul_variant_override();
+    if (nt_variant != MatmulVariant::Base && nt_variant != MatmulVariant::Rb4 && matmul_db_eligible(m, k, n)) {
+        return dispatch_vulkan_matmul_db(runtime, a, b, c, m, k, n, 0u, 1u);
+    }
+    if (nt_variant == MatmulVariant::Rb4 ||
+        (nt_variant == MatmulVariant::Auto && (runtime.caps().prefer_rb4_matmul || (k >= 4096 && m >= 32)))) {
         return runtime.dispatch_cached(vkspirv::k_mm_f32_nt_rb4, vkspirv::k_mm_f32_nt_rb4_words, buffers, &push,
                                        sizeof(push), static_cast<std::uint32_t>((n + 31) / 32),
                                        static_cast<std::uint32_t>((m + 31) / 32), 1);
@@ -7428,7 +7515,12 @@ VulkanOpResult run_vulkan_f32_matmul_transpose_a(VulkanRuntime& runtime,
         std::uint32_t n;
     } push{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(n)};
     const std::vector<const VulkanBuffer*> buffers = {&a, &b, &c};
-    if (runtime.caps().prefer_rb4_matmul || (n >= 4096 && k >= 32)) {
+    const MatmulVariant tn_variant = matmul_variant_override();
+    if (tn_variant != MatmulVariant::Base && tn_variant != MatmulVariant::Rb4 && matmul_db_eligible(m, k, n)) {
+        return dispatch_vulkan_matmul_db(runtime, a, b, c, m, k, n, 1u, 0u);
+    }
+    if (tn_variant == MatmulVariant::Rb4 ||
+        (tn_variant == MatmulVariant::Auto && (runtime.caps().prefer_rb4_matmul || (n >= 4096 && k >= 32)))) {
         return runtime.dispatch_cached(vkspirv::k_mm_f32_tn_rb4, vkspirv::k_mm_f32_tn_rb4_words, buffers, &push,
                                        sizeof(push), static_cast<std::uint32_t>((n + 31) / 32),
                                        static_cast<std::uint32_t>((m + 31) / 32), 1);
@@ -9042,6 +9134,25 @@ VulkanOpResult run_vulkan_compact_counter_forward_u8(VulkanRuntime& runtime,
         return fail("Vulkan compact-counter forward activation buffer is too small");
     }
 
+    // Double-buffered fused decode + GEMM (see counter_gemm_db.comp). The wrapper
+    // already requires in_features % 4 == 0, so the vec4 activation view and the
+    // packed-group alignment are guaranteed; the older kernel stays as the
+    // fallback for anything that ever relaxes that contract.
+    if (in_features % 4 == 0) {
+        const struct {
+            std::uint32_t C;
+            std::uint32_t in_features;
+            std::uint32_t out_features;
+            std::uint32_t batch;
+            std::uint32_t mode;
+        } db_push{static_cast<std::uint32_t>(C), static_cast<std::uint32_t>(in_features),
+                  static_cast<std::uint32_t>(out_features), static_cast<std::uint32_t>(batch), 0u};
+        const std::vector<const VulkanBuffer*> db_buffers = {&x, &state, &scale, &out};
+        return runtime.dispatch_cached(vkspirv::k_counter_gemm_db, vkspirv::k_counter_gemm_db_words, db_buffers,
+                                       &db_push, sizeof(db_push),
+                                       static_cast<std::uint32_t>((out_features + 31) / 32),
+                                       static_cast<std::uint32_t>((batch + 31) / 32), 1);
+    }
     const struct {
         std::uint32_t C;
         std::uint32_t in_features;
@@ -9116,6 +9227,29 @@ VulkanOpResult run_vulkan_compact_counter_backward_input_u8(VulkanRuntime& runti
         return fail("Vulkan compact-counter grad_x buffer is too small");
     }
 
+    // Double-buffered fused decode + GEMM (see counter_gemm_db.comp). The
+    // contraction dimension here is out_features (grad_out's columns), so that
+    // is what has to be a multiple of four for the vec4 activation view; odd
+    // out_features keeps the older scalar kernel.
+    if (out_features % 4 == 0) {
+        const struct {
+            std::uint32_t C;
+            std::uint32_t in_features;
+            std::uint32_t out_features;
+            std::uint32_t batch;
+            std::uint32_t mode;
+        } db_push{static_cast<std::uint32_t>(C), static_cast<std::uint32_t>(in_features),
+                  static_cast<std::uint32_t>(out_features), static_cast<std::uint32_t>(batch), 1u};
+        const std::vector<const VulkanBuffer*> db_buffers = {&grad_out, &state, &scale, &grad_x};
+        const auto db_run = runtime.dispatch_cached(
+            vkspirv::k_counter_gemm_db, vkspirv::k_counter_gemm_db_words, db_buffers, &db_push,
+            sizeof(db_push), static_cast<std::uint32_t>((in_features + 31) / 32),
+            static_cast<std::uint32_t>((batch + 31) / 32), 1);
+        result.success = db_run.success;
+        result.device_name = db_run.device_name;
+        result.error = db_run.error;
+        return result;
+    }
     const struct {
         std::int32_t C;
         std::int32_t in_features;

@@ -182,14 +182,18 @@ trainers has its own measured record:
 | buffer pool budget 6 GiB / 4096 allocs (was 2 GiB / 2048, below the 3.4 GiB working set) | CPU recording 960 ms -> 50 ms per step |
 | tiled grad_w + fused row-stat/scale/tick counter update (`counter_update_apply_f32.comp`) | 2.9 ms -> 0.30 ms per counter layer; 49% of step GPU time |
 | host-visible buffers <= 128 KiB (`MOTIFCL_VK_SMALL_HOST_BYTES`) | balance phase 40-160 ms -> 8.5-13.8 ms per step |
+| double-buffered `vec4` GEMM kernels (`mm_f32_db_body.glsl` + `mm_f32_db32/db64.comp`) | LM-head GEMM 18% -> **62.4%** of FP32 peak; head block 99 -> 37 ms/step |
+| double-buffered counter decode+GEMM (`counter_gemm_db.comp`) | counter projections 77 -> 62 ms/step |
 
 Result: `mn-moe15m` (dim 288, 6 layers, 7x192 expert + 192 shared, B8xT256) went from
-635 tok/s at the previous default configuration to **5666-5701 tok/s** (120-step steady
-state at 357-365 ms/step with flat device memory), and the dense control (hidden 768,
-same batch/sequence) runs at 8800 tok/s. Correctness gates:
-`ctest --test-dir build/release` 50/50, and the counter update keeps an exact
-state/scale/v witness (`test_vulkan_counter_fused`) plus the recorded convergence
-witness (`test_vulkan_memory_native`, loss 7.60164 -> 0.0642764).
+635 tok/s at the previous default configuration to **~7000 tok/s** (289 ms/step;
+120-step steady state of the first pass was 5666-5701, the kernel pass added the
+double-buffered GEMMs), and the dense control (hidden 768, same batch/sequence) runs at
+**9542 tok/s**. Correctness gates: `ctest --test-dir build/release` 51/51,
+`test_vulkan_gemm_parity` covers all GEMM layouts against a host reference, and the
+counter update keeps an exact state/scale/v witness (`test_vulkan_counter_fused`) plus
+the recorded convergence witness (`test_vulkan_memory_native`, loss 7.60164 ->
+0.0642764).
 
 Instrumentation (all opt-in):
 
