@@ -532,3 +532,111 @@ MOTIFCL_VK_OP_PROFILE=1 STEPS=4 ./motifcl_train_moe15m.exe
 MOTIFCL_VK_TRACE_IMMEDIATE=1 STEPS=1 ./motifcl_train_moe15m.exe
 ./test_vulkan_moe7_zero_grad.exe
 ```
+
+# Phase E — Why the sparse forward cannot train, and what can
+
+Phase D §D.6 identified `counter_gemm_db` as 29.6% of a training step and
+pointed at the dense expert path as the next target. Scoping that work turned
+up a hard constraint that changes what Phase E can be, so it is recorded here
+before any code is written.
+
+## E.1 The blocker: the router gradient needs the losing experts' values
+
+`route_logits_grad_host` (`src/ops/fog.cpp`) defines the router gradient:
+
+```
+gp[k]  = <grad_out_row, candidate_k_row>          # scalar per row, per expert
+mean   = sum_k p_k * gp[k]                        # p = softmax(logits)
+dl[k]  = p_k * (gp[k] - mean)
+```
+
+`dl[k]` depends on `gp[k]` for **all seven** k. The losing candidates are
+therefore required *numerically* — not for their own gradient (which is zero)
+but because they enter the soft mixture that produces the router's gradient.
+A sparse forward computes each expert only on the rows it won, so six of the
+seven `candidate_k[r]` values would never exist for a given row and `dl` could
+not be formed.
+
+This is not an implementation gap to be closed later. It is a property of the
+straight-through seven-way softmax the model is defined with, and changing it
+(the obvious alternative — a one-hot router gradient — is the standard
+"Switch-lite" relaxation) would change training semantics, which the mission
+forbids. **The sparse forward of Phase C is therefore correct and useful for
+inference only; it can never be the training path.**
+
+## E.2 What remains: the sparse backward is exact
+
+The backward is a different matter, because there the zeros are real:
+
+| quantity | dense | sparse (routed rows only) | exact? |
+|---|---|---|---|
+| `grad_w` | sum over all rows of `x[r] ⊗ dc[r]` | sum over routed rows only | **yes** — the omitted rows have `dc[r] = 0`, so they contribute exactly 0 to the sum |
+| `grad_x` | `dc @ W` for all rows | `dc_routed @ W`, scattered back | **yes** — the omitted rows' `grad_x` is 0 and is scattered as 0 |
+| SwiGLU backward | all rows | routed rows | **yes**, same argument |
+| counter state `v` | `v ← beta*v + (1-beta)*ss` | same, with `ss` summed over routed rows | **yes, if and only if** the normalisation keeps dividing by the *original* row count |
+
+The last row is the only place a sparse backward can silently change training.
+The existing zero-gradient test already pins half of it down: a losing expert's
+dense backward provably reduces to `v ← beta*v` (that is what
+`apply_zero_grad_update` reproduces byte-exactly, §D.2), which means `ss` is
+derived from the gradient and not from the input. So zero rows contribute zero
+to `ss`, and a routed-row-only sum equals the dense sum. The gathered kernel
+must divide by the un-gathered row count, and that is the assertion the
+equivalence test has to make.
+
+## E.3 Measured ceiling for the sparse backward
+
+Per layer, `counter_gemm_db` runs 40 times: 8 expert modules × 2 matrices ×
+(forward, backward) = 32, plus 4 attention projections × (forward, backward) =
+8. A sparse backward can only touch the 14 routed-expert *backward* calls; the
+shared expert is always-on and the forward must stay dense per §E.1.
+
+At the measured 0.258 ms per call:
+
+| | calls | time |
+|---|---:|---:|
+| `counter_gemm_db` per step | 240 | 62.0 ms |
+| routed-expert backward share | 84 | 21.7 ms |
+| same work, 1/7 of the rows | 84 | ~3.1 ms |
+
+So the sparse backward is worth roughly **18.6 ms per step, about 10% of the
+178 ms of GPU time** — and it requires a new gather-gradw kernel, a scatter
+grad_x, a bounded SwiGLU backward and a row-set-aware state update, all of
+which must reproduce the dense arithmetic bit-for-bit.
+
+That is a smaller prize than the two things Phase D already found, and it is
+worth saying so plainly:
+
+| lever | measured / estimated | status |
+|---|---:|---|
+| forward/backward split + zero-grad skip | +16.7% end-to-end (measured) | done, opt-in |
+| buffer-pool retention | +3.2% end-to-end (measured) | done, default |
+| sparse backward | ~10% of step GPU (estimated) | not started |
+| host/device overlap | up to +40% (see below) | not started |
+
+## E.4 The larger lever is that host and device never overlap
+
+From §D.5: a step is 73 ms of host work **serialized with** 178 ms of GPU work,
+because `batch_begin` records the entire graph and `batch_end` submits and
+waits. The step is therefore `CPU + GPU`, not `max(CPU, GPU)`. Double-buffering
+the activations and recording step N+1 while step N executes would take the
+step from ~258 ms toward ~185 ms, i.e. **up to +40%**, for no change to any
+kernel or to the numerics.
+
+That is the real Phase E/F target, and it is an architectural change to the
+trainer and the runtime's batch ownership (two command buffers, two descriptor
+sets in flight, activations doubled — which costs VRAM the card does not have
+at 3343/3359 MB). The VRAM figure is the reason this cannot simply be switched
+on: the working set would need to double, so it requires the activation
+footprint to come down first (the 7 retained candidate tensors are the bulk of
+it — `test_counter_memory_vulkan` reports 294.8 MB per block for 56.2 MB of
+packed expert state).
+
+## E.5 Status
+
+Phase E was scoped and its blocker proven; no code was changed in this phase.
+The honest ordering of remaining work is:
+
+1. Reduce the retained-activation footprint so double buffering fits in VRAM.
+2. Overlap host recording with device execution (~+40% ceiling).
+3. Sparse backward (~10% of step GPU) — only worth its complexity after 1–2.
