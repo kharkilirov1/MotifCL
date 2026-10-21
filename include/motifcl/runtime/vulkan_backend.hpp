@@ -220,6 +220,13 @@ public:
     std::size_t buffer_bytes_live() const;
     std::size_t buffer_bytes_peak() const;
     std::size_t buffer_allocations() const;
+    // Bytes actually asked for, as opposed to bytes reserved. The pool rounds
+    // every allocation up to a power of two, so `buffer_bytes_live()` minus
+    // `buffer_bytes_requested()` is the VRAM paid for and not used. Reported
+    // alongside the live figure so a shape change can be judged by what it
+    // costs after rounding, which is what the device runs out of.
+    std::size_t buffer_bytes_requested() const;
+    std::size_t buffer_bytes_requested_peak() const;
 
     // Wait for all queued Vulkan GPU commands to finish execution.
     void finish() const;

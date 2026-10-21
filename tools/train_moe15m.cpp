@@ -707,10 +707,11 @@ int main() {
                 const double ms = win_ms / win_n;
                 const double tok_s = (double)N * 1000.0 / ms;
                 const double eta_h = (double)(steps_total - step - 1) * ms / 3.6e6;
-                std::printf("step %d loss %.4f ema %.4f lr %.5f  %.0f tok/s  eta %.1f h  devmem %.0f/%.0f MB",
+                std::printf("step %d loss %.4f ema %.4f lr %.5f  %.0f tok/s  eta %.1f h  devmem %.0f/%.0f MB used %.0f MB",
                             step + 1, lv, loss_ema, lr_c, tok_s, eta_h,
                             (double)runtime.buffer_bytes_live() / 1048576.0,
-                            (double)runtime.buffer_bytes_peak() / 1048576.0);
+                            (double)runtime.buffer_bytes_peak() / 1048576.0,
+                            (double)runtime.buffer_bytes_requested_peak() / 1048576.0);
                 if (gpu_timing) {
                     const double gpu_fb_mean = win_gpu_fb_n == win_n ? win_gpu_fb_ms / win_n : -1.0;
                     const double gpu_opt_mean = win_gpu_opt_n == win_n ? win_gpu_opt_ms / win_n : -1.0;

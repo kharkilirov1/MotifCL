@@ -1,8 +1,11 @@
-# Vulkan MoE sparse execution — Phase A audit and baseline
+# Vulkan MoE sparse execution — phases A–E
 
-Date 2026-10-21. Repo `motifcl_production`, branch `main`, base commit
-`ad6a00f38c9ec11bc635c68492e25c6828f8e1d3` (working tree dirty: 23 modified,
-24 untracked — the 2026-10-18 hardening patch, not yet committed).
+Date 2026-10-21/22. Repo `motifcl_production`, branch `perf/vulkan-moe-sparse`
+(created from `main` at `ad6a00f`), base commit
+`ad6a00f38c9ec11bc635c68492e25c6828f8e1d3` (working tree was dirty: 23 modified,
+24 untracked — the 2026-10-18 hardening patch, not yet committed; it is included
+in the phase A–D commit because the two overlap in
+`src/runtime/vulkan_backend.cpp` and the regenerated SPIR-V blob).
 
 Device: Radeon RX 580 Series (Polaris 10 / Ellesmere, `0x67df`), AMD proprietary
 driver 26.5.2, Vulkan 1.3.260, wave64, 36 CU, 8 GB GDDR5.
@@ -437,13 +440,15 @@ Host gap profile, 630 buffer allocations per step:
 | pool hits | ~0.3 µs each |
 | slow allocations | ~700 µs each, 19.5 ms total |
 
-The slow allocations are not large: the missed buckets were 256 bytes and
-64 KB. VRAM sits at 3343/3359 MB, i.e. 99.5% occupancy, so any fresh
-`vkAllocateMemory` pays driver eviction regardless of size. They were also
-*unnecessary*: the pool's per-bucket retention cap (256) was evicting the tail
-of the step's working set, so the same buffers were destroyed at the end of
-each step and re-created at the start of the next. Raising the cap to 2048
-took misses from 35 to 28 and the host gap from 52.3 ms to 46.3 ms.
+The slow allocations were not large: the missed buckets were 256 bytes and
+64 KB. The first reading of this was wrong and is corrected in §E.6 — the
+`3343/3359 MB` figure is the run's own live/peak, not device occupancy (the
+card is 8 GB, and a larger eval batch elsewhere in the trainer already reached
+6.8 GB), so there was never any eviction pressure. What the numbers did show
+correctly is that the allocations were *unnecessary*: the pool was failing to
+recycle a stable, shape-deterministic working set. Raising the per-bucket
+retention cap from 256 to 2048 took misses from 35 to 28 and the host gap from
+52.3 ms to 46.3 ms, which was a real gain but not the root cause.
 
 End-to-end effect of that one-line change, 25 steps, three runs each:
 
@@ -624,19 +629,62 @@ step from ~258 ms toward ~185 ms, i.e. **up to +40%**, for no change to any
 kernel or to the numerics.
 
 That is the real Phase E/F target, and it is an architectural change to the
-trainer and the runtime's batch ownership (two command buffers, two descriptor
-sets in flight, activations doubled — which costs VRAM the card does not have
-at 3343/3359 MB). The VRAM figure is the reason this cannot simply be switched
-on: the working set would need to double, so it requires the activation
-footprint to come down first (the 7 retained candidate tensors are the bulk of
-it — `test_counter_memory_vulkan` reports 294.8 MB per block for 56.2 MB of
-packed expert state).
+trainer and the runtime's batch ownership: two command buffers, two descriptor
+sets in flight, two fences. It does **not** require doubling the activations —
+the backward writes its own temporaries and reads the forward's outputs, and a
+single queue orders the two submissions — so the VRAM it needs is one extra
+command buffer, not a second graph. What it did need was for the pool to stop
+leaking allocations, which §E.6 fixed.
 
-## E.5 Status
+## E.6 Fixed: power-of-two allocation classes were the real cost
 
-Phase E was scoped and its blocker proven; no code was changed in this phase.
-The honest ordering of remaining work is:
+`buffer_bytes_live()` was reporting 3343 MB while the graph asked for 2195 MB,
+so 1148 MB — **34% of device memory — was rounding waste**, because every
+allocation was rounded up to the next power of two (a 2.36 MB activation took
+a 4 MB buffer; the 268 MB logits took 512 MB).
 
-1. Reduce the retained-activation footprint so double buffering fits in VRAM.
-2. Overlap host recording with device execution (~+40% ceiling).
-3. Sparse backward (~10% of step GPU) — only worth its complexity after 1–2.
+Replacing the power-of-two class with the next eighth of an octave (at most
+12.5% over the request) changed three things at once:
+
+| | power-of-two | eighth-octave |
+|---|---:|---:|
+| reserved | 3343 MB | **2360 MB** |
+| requested | 2195 MB | 2195 MB |
+| rounding waste | 1148 MB (34%) | 165 MB (7%) |
+| buffer allocations per step | 630 (602 pooled, 28 slow) | 630 (**630 pooled, 0 slow**) |
+| allocation time per step | 19.5 ms | **0.13 ms** |
+| host time outside dispatch | 46.3 ms | **14.0 ms** |
+| host: forward record | 19.3–27.7 ms | 5.0 ms |
+| step total | 251.8–268.6 ms | **200.5 ms** |
+
+End-to-end, 25 steps, three runs each:
+
+| | run 1 | run 2 | run 3 | mean |
+|---|---:|---:|---:|---:|
+| baseline (start of Phase D) | 7633 | 7640 | 7743 | 7672 tok/s |
+| pool cap fix (§D.5) | 7998 | 7921 | 7832 | 7917 tok/s |
+| size-class fix | **9341** | **9291** | **9284** | **9305 tok/s** |
+
++21.3% over the Phase D baseline and +17.5% over the pool-cap fix alone, with
+no change to any kernel, any numeric, or the dispatch count. The mechanism is
+worth stating precisely because the first explanation was wrong: the working
+set is shape-deterministic, so the pool should recycle everything. Rounding to
+powers of two inflated it enough that peak demand inside a batch exceeded what
+the pool held, so the tail was allocated fresh (and freed again) every step —
+at ~700 µs per `vkAllocateMemory`, 28 times a step. Removing the rounding made
+peak demand fit, and the misses went to zero.
+
+## E.7 Status
+
+Phase E was scoped, its blocker proven, and one bottleneck fixed; the sparse
+backward was deliberately not started. The honest ordering of remaining work
+is now:
+
+1. ~~Reduce the retained-activation footprint so double buffering fits~~ —
+   done, by fixing allocation classes rather than by touching activations
+   (§E.6): 2360 MB, 630/630 pool hits, +21.3% end-to-end.
+2. Overlap host recording with device execution (~+40% ceiling). The VRAM gate
+   is cleared and the remaining work is two command buffers, two fences and two
+   descriptor sets in flight, with the trainer submitting the forward before
+   recording the backward.
+3. Sparse backward (~10% of step GPU) — only worth its complexity after 2.

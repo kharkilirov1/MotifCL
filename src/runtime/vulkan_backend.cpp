@@ -4927,6 +4927,12 @@ struct VulkanRuntime::Impl {
     // Device memory owned by the runtime (in use + pooled); peak of the same.
     std::size_t live_buffer_bytes = 0;
     std::size_t peak_buffer_bytes = 0;
+    // Requested bytes as opposed to bucketed bytes. The pool rounds every
+    // allocation up to the next power of two, so the gap between these two
+    // numbers is VRAM the trainer is paying for and not using. On a card at
+    // 99.5% occupancy that gap decides whether anything else fits.
+    std::size_t live_requested_bytes = 0;
+    std::size_t peak_requested_bytes = 0;
     std::size_t total_buffer_allocations = 0;
 
     // Pool limits. The default cap tracks real training working sets: the MoE
@@ -4990,6 +4996,7 @@ struct VulkanRuntime::Impl {
         buffer_pool_bytes = 0;
         buffer_pool_allocations = 0;
         live_buffer_bytes = 0;
+        live_requested_bytes = 0;
     }
 
     // Dispatch capture state (see VulkanDispatchRecording).
@@ -6807,6 +6814,14 @@ std::size_t VulkanRuntime::buffer_allocations() const {
     return impl_ ? impl_->total_buffer_allocations : 0;
 }
 
+std::size_t VulkanRuntime::buffer_bytes_requested() const {
+    return impl_ ? impl_->live_requested_bytes : 0;
+}
+
+std::size_t VulkanRuntime::buffer_bytes_requested_peak() const {
+    return impl_ ? impl_->peak_requested_bytes : 0;
+}
+
 void VulkanRuntime::finish() const {
     if (impl_ && impl_->device && impl_->queue && impl_->queue_wait_idle) {
         impl_->queue_wait_idle(impl_->queue);
@@ -6836,6 +6851,8 @@ struct VulkanBuffer::Impl {
 
     ~Impl() {
         if (runtime && runtime->device) {
+            runtime->live_requested_bytes =
+                (nbytes <= runtime->live_requested_bytes) ? (runtime->live_requested_bytes - nbytes) : 0;
             if (capacity > 0) {
                 runtime->pool_release(buffer, memory, capacity, host_visible);
                 buffer = nullptr;
@@ -6993,11 +7010,26 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
     const bool prefer_host_visible_small = !force_host_visible && small_host_bytes > 0 &&
                                            nbytes <= small_host_bytes;
 
-    // Allocations are bucketed to the next power of two and recycled through
-    // the runtime buffer pool; vkAllocateMemory per Tensor temporary is far
-    // too slow for autograd churn.
-    std::size_t bucket = 256;
-    while (bucket < nbytes) bucket <<= 1;
+    // Allocations are bucketed into size classes and recycled through the
+    // runtime buffer pool; vkAllocateMemory per Tensor temporary is far too
+    // slow for autograd churn.
+    //
+    // The class is the next eighth of an octave, not the next power of two. On
+    // the MoE trainer the power-of-two scheme reserved 3343 MB while the graph
+    // only asked for 2195 MB, i.e. 1148 MB -- 34% of device memory -- was
+    // rounding waste. Halving the class step caps the waste at 12.5% of the
+    // request while keeping the class count small enough that reuse still
+    // works, which matters because the workload is shape-deterministic and the
+    // same classes recur every step.
+    const auto allocation_bucket = [](std::size_t bytes) -> std::size_t {
+        constexpr std::size_t kGranule = 256;
+        if (bytes <= 4096) return ((bytes + kGranule - 1) / kGranule) * kGranule;
+        std::size_t base = 4096;
+        while (base * 2 <= bytes) base <<= 1;  // base <= bytes < 2*base
+        const std::size_t step = base / 8;     // 8 classes per octave
+        return base + ((bytes - base + step - 1) / step) * step;
+    };
+    const std::size_t bucket = allocation_bucket(nbytes);
 
     {
         VkBuffer pooled_buffer = nullptr;
@@ -7028,6 +7060,10 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
         }
         if (served) {
             if (impl_->op_gap_enabled) ++impl_->alloc_pooled;
+            impl_->live_requested_bytes += nbytes;
+            if (impl_->live_requested_bytes > impl_->peak_requested_bytes) {
+                impl_->peak_requested_bytes = impl_->live_requested_bytes;
+            }
             auto buffer_impl = std::make_shared<VulkanBuffer::Impl>(impl_, pooled_buffer, pooled_memory, nbytes,
                                                                     served_host_visible, bucket);
             VulkanBuffer out(std::move(buffer_impl));
@@ -7148,6 +7184,10 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
         impl_->peak_buffer_bytes = impl_->live_buffer_bytes;
     }
     ++impl_->total_buffer_allocations;
+    impl_->live_requested_bytes += nbytes;
+    if (impl_->live_requested_bytes > impl_->peak_requested_bytes) {
+        impl_->peak_requested_bytes = impl_->live_requested_bytes;
+    }
     auto buffer_impl = std::make_shared<VulkanBuffer::Impl>(impl_, buffer, memory, nbytes, host_visible, bucket);
     VulkanBuffer out(std::move(buffer_impl));
     if (initial_data) out.upload(initial_data, nbytes);
