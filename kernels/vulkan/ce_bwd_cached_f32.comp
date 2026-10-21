@@ -1,0 +1,32 @@
+// Coalesced flat backward: one logits read, no row reductions or barriers.
+// The bounded grid strides over larger tensors without exceeding dispatch.x.
+#version 450
+
+layout(local_size_x = 128) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer LogitsBuf { float logits[]; };
+layout(std430, set = 0, binding = 1) readonly buffer TargetsBuf { int targets[]; };
+layout(std430, set = 0, binding = 2) readonly buffer GradOutBuf { float grad_out[]; };
+layout(std430, set = 0, binding = 3) readonly buffer StatsBuf { float row_stats[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer GradBuf { float grad_logits[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint cols;
+} p;
+
+void main() {
+    const uint count = p.rows * p.cols;
+    const uint stride = gl_NumWorkGroups.x * 128u;
+    const float scale = grad_out[0] / float(p.rows);
+    for (uint index = gl_GlobalInvocationID.x; index < count; index += stride) {
+        const uint row = index / p.cols;
+        const uint col = index - row * p.cols;
+        const float maxv = row_stats[2u * row];
+        const float inv_sum = row_stats[2u * row + 1u];
+        const float prob = exp(logits[index] - maxv) * inv_sum;
+        const float onehot = int(col) == targets[row] ? 1.0 : 0.0;
+        grad_logits[index] = scale * (prob - onehot);
+        if (count - index <= stride) break;
+    }
+}

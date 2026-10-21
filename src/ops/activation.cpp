@@ -297,8 +297,7 @@ Tensor sigmoid_backward_op(const Tensor& y, const Tensor& grad_out) {
 Tensor swiglu(const Tensor& packed) {
     MCL_CHECK(packed.dtype() == DType::F32, "swiglu supports f32 only");
     MCL_CHECK(packed.ndim() == 2 && packed.shape()[1] % 2 == 0, "swiglu expects [rows, 2*hidden]");
-    const auto selected_backend = selected_activation_backend();
-    if ((packed.backend().is_vulkan() || selected_backend.kind == MicrokernelBackendKind::Vulkan) &&
+    if ((packed.backend().is_vulkan() || selected_activation_backend().kind == MicrokernelBackendKind::Vulkan) &&
         vulkan_swiglu_supported(packed)) {
         if (packed.backend().is_vulkan()) {
             auto out = swiglu_vulkan_f32_device(packed);

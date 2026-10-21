@@ -1,0 +1,44 @@
+// GPU recorder for the aux-loss-free MoE balance-bias sign update.
+// Historical note: an earlier version indexed a push-constant float array with
+// gl_GlobalInvocationID.x, which Vulkan forbids (push-constant arrays may only be
+// accessed with dynamically uniform indices). The block now exposes load0..load6
+// as scalar members and selects the per-lane value with constant member accesses.
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) readonly buffer OldBuf { float old_bias[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer NewBuf { float new_bias[]; };
+layout(push_constant) uniform Push {
+    uint n_experts;
+    float gamma;
+    float clamp_value;
+    float target;
+    float load0;
+    float load1;
+    float load2;
+    float load3;
+    float load4;
+    float load5;
+    float load6;
+    float padding;
+} p;
+float load_of(uint id) {
+    // Constant member accesses only: the index is per-lane, so a push-constant
+    // array member would violate the dynamically-uniform indexing requirement.
+    if (id == 0u) return p.load0;
+    if (id == 1u) return p.load1;
+    if (id == 2u) return p.load2;
+    if (id == 3u) return p.load3;
+    if (id == 4u) return p.load4;
+    if (id == 5u) return p.load5;
+    return p.load6;
+}
+void main() {
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= p.n_experts) return;
+    const float old_value = old_bias[id];
+    const float delta = p.target - load_of(id);
+    const float step = (delta > 0.0f) ? 1.0f : ((delta < 0.0f) ? -1.0f : 0.0f);
+    float value = old_value + p.gamma * step;
+    value = max(-p.clamp_value, min(p.clamp_value, value));
+    new_bias[id] = value;
+}

@@ -114,8 +114,7 @@ struct RMSNormBackwardNode : autograd::Node {
 
 Tensor rmsnorm(const Tensor& x, const Tensor& weight, float eps) {
     require_rmsnorm_inputs(x, weight, "rmsnorm");
-    const auto selected_backend = selected_norm_backend();
-    if ((x.backend().is_vulkan() || selected_backend.kind == MicrokernelBackendKind::Vulkan) &&
+    if ((x.backend().is_vulkan() || selected_norm_backend().kind == MicrokernelBackendKind::Vulkan) &&
         vulkan_rmsnorm_supported(x, weight, eps)) {
         if (x.backend().is_vulkan()) {
             auto out = rmsnorm_vulkan_f32_device(x, weight, eps);

@@ -1,0 +1,38 @@
+// Count-bounded SwiGLU for the compact expert buffers.
+//
+// Same arithmetic as swiglu_f32 (gate * sigmoid(gate) * up, gate first then up
+// in the packed pair), but the live row count comes from the routing kernel's
+// per-expert counter, so a dispatch sized for `capacity` rows only touches the
+// rows this expert actually owns. Rows at or beyond the count exit before
+// reading anything.
+//
+// packed: [capacity, 2 * hidden]  ->  act: [capacity, hidden]
+
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer PackedBuf { float packed[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer ActBuf { float act[]; };
+layout(std430, set = 0, binding = 2) readonly buffer CountBuf { uint counts[]; };
+
+layout(push_constant) uniform Push {
+    uint hidden;
+    uint capacity;
+    uint expert;
+} p;
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (row >= p.capacity) return;
+    if (row >= counts[p.expert]) return;
+
+    const uint base = row * 2u * p.hidden;
+    const uint out_base = row * p.hidden;
+    for (uint c = lane; c < p.hidden; c += 64u) {
+        const float gate = packed[base + c];
+        const float up = packed[base + p.hidden + c];
+        act[out_base + c] = gate * (1.0 / (1.0 + exp(-gate))) * up;
+    }
+}

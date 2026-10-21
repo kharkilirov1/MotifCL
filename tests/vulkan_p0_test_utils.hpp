@@ -28,13 +28,23 @@ inline void require_close(const std::vector<float>& actual,
                           const std::vector<float>& expected,
                           float tolerance,
                           const std::string& label) {
+    if (!std::isfinite(tolerance) || tolerance < 0.0f) {
+        throw std::runtime_error(label + " requires a non-negative finite tolerance");
+    }
     if (actual.size() != expected.size()) {
         throw std::runtime_error(label + " size mismatch");
     }
-    float max_error = 0.0f;
+    double max_error = 0.0;
     std::size_t max_index = 0;
     for (std::size_t i = 0; i < actual.size(); ++i) {
-        const float error = std::fabs(actual[i] - expected[i]);
+        // std::max(0, NaN) and `NaN > max_error` both preserve zero. Check
+        // operands first, including non-finite values in the reference.
+        if (!std::isfinite(actual[i]) || !std::isfinite(expected[i])) {
+            throw std::runtime_error(label + " non-finite value at index " +
+                                     std::to_string(i));
+        }
+        const double error = std::fabs(static_cast<double>(actual[i]) -
+                                       static_cast<double>(expected[i]));
         if (error > max_error) {
             max_error = error;
             max_index = i;
@@ -45,6 +55,37 @@ inline void require_close(const std::vector<float>& actual,
                                  " at index " + std::to_string(max_index) +
                                  " exceeds " + std::to_string(tolerance));
     }
+}
+
+inline void verify_require_close_controls() {
+    const std::vector<float> finite{1.0f, -2.0f, 3.0f};
+    require_close(finite, finite, 0.0f, "finite comparator control");
+    auto require_rejection = [&](const std::vector<float>& actual,
+                                 const std::vector<float>& expected,
+                                 float tolerance,
+                                 const std::string& label) {
+        try {
+            require_close(actual, expected, tolerance, label);
+        } catch (const std::runtime_error&) {
+            return;
+        }
+        throw std::runtime_error("comparator accepted " + label);
+    };
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    require_rejection(std::vector<float>(finite.size(), nan), finite, 1.0f,
+                      "all-NaN output");
+    for (float bad : {nan, inf, -inf}) {
+        auto corrupted = finite;
+        corrupted[1] = bad;
+        require_rejection(corrupted, finite, 1.0f, "non-finite output");
+        require_rejection(finite, corrupted, 1.0f, "non-finite reference");
+        require_rejection(corrupted, corrupted, 1.0f, "equal non-finite operands");
+        require_rejection(finite, finite, bad, "non-finite tolerance");
+    }
+    require_rejection(finite, finite, -1.0f, "negative tolerance");
+    require_rejection({1.0f}, finite, 1.0f, "size mismatch");
+    require_rejection({1.0f, -2.0f, 4.0f}, finite, 0.5f, "finite outlier");
 }
 
 inline void fill_deterministic(std::vector<float>& values,

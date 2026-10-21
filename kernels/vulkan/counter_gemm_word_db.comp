@@ -1,0 +1,248 @@
+// Double-buffered fused decode + GEMM for the packed 6-bit counter synapse.
+//
+// One kernel covers both training-time counter projections:
+//   mode 0 (forward):        y[batch,out]      = x[batch,in]       * W[in,out]
+//   mode 1 (backward_input): grad_x[batch,in]   = grad_out[batch,out] * W[in,out]^T
+// where W[in,out] = scale[out] * ternary(state[out][in/4]) is decoded from the
+// packed counter bytes on the fly -- no dense FP32 weight tensor exists.
+//
+// Same 32x32 one-wave tile, 4x4 per lane, 16-deep K ring and 128-bit LDS operands
+// as the double-buffered FP32 GEMM (see mm_f32_db_body.glsl): the previous
+// kernels read eight scalar LDS operands per k step and re-loaded the whole
+// iteration between barriers, which measured ~20-24% of the RX 580 FP32 peak on
+// the counter projections. The next K tile is decoded and loaded into registers
+// before the current tile is consumed, so the packed-state reads, the decode
+// arithmetic and the global activation reads all overlap the FMA loop.
+//
+// The decode is issued per lane as two items of four weights each: a packed
+// 3-byte group always describes four consecutive in_features of one out row, so
+// four consecutive k rows of the shared tile (forward) or four consecutive n
+// columns (backward) are produced at a time.
+// This variant fetches each 24-bit packed group through one or two uint words
+// instead of three uint8 loads. Runtime eligibility requires BOTH in_features
+// and out_features divisible by four: total state bytes are then word-aligned,
+// and the final three-byte group starts at byte offset %4==1 (no next-word read).
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { vec4 A4[]; };
+layout(std430, set = 0, binding = 1) readonly buffer StateBuf { uint state_words[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ScaleBuf { float scale[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer CBuf { float c_out[]; };
+
+layout(push_constant) uniform Push {
+    uint C;
+    uint in_features;
+    uint out_features;
+    uint batch;
+    uint mode; // 0 = forward (n = out), 1 = backward_input (n = in)
+} p;
+
+#define RB 32
+#define KT 16
+#define LANES 64
+#define NQ (RB / 4)
+#define ITEMS (RB * KT / 4) // packed groups staged per tile = 128
+#define PER_LANE (ITEMS / LANES)
+
+shared vec4 As[2][KT][NQ];
+shared vec4 Ws[2][KT][NQ];
+// 64-entry ternary lookup: the packed 6-bit code maps to -1/0/+1 through a
+// table built once per workgroup instead of a branch chain per decoded weight.
+shared int tlut[64];
+
+int levels_of(uint C) {
+    return int(2u * C - 1u);
+}
+
+// mode 0: the decoded group is four consecutive in_features of one out row.
+int ternary_from_code(int code, int levels) {
+    if (code < levels) return -1;
+    if (code < 2 * levels) return 0;
+    if (code < 3 * levels) return 1;
+    return code / levels - 1;
+}
+
+// ---- activation staging (A) ------------------------------------------------
+// A is [batch, K] row-major, so one vec4 covers four consecutive K values of a
+// single row; the shared tile wants [k][m], hence the transposing scatter write.
+
+void load_a(uint lid, uint m0, uint kt, uint K, out vec4 r0, out vec4 r1) {
+    for (int i = 0; i < PER_LANE; ++i) {
+        const uint idx = lid + uint(i) * uint(LANES);
+        const uint r = idx >> 2;
+        const uint kq = idx & 3u;
+        const uint gm = m0 + r;
+        const uint gk = kt + kq * 4u;
+        vec4 v = vec4(0.0);
+        if (gm < p.batch && gk < K) v = A4[(gm * K + gk) >> 2];
+        if (i == 0) r0 = v; else r1 = v;
+    }
+}
+
+void store_a(int buf, uint lid, vec4 r0, vec4 r1) {
+    for (int i = 0; i < PER_LANE; ++i) {
+        const vec4 v = (i == 0) ? r0 : r1;
+        const uint idx = lid + uint(i) * uint(LANES);
+        const uint r = idx >> 2;
+        const uint kq = idx & 3u;
+        const uint q = r >> 2;
+        const uint e = r & 3u;
+        As[buf][kq * 4u + 0u][q][e] = v.x;
+        As[buf][kq * 4u + 1u][q][e] = v.y;
+        As[buf][kq * 4u + 2u][q][e] = v.z;
+        As[buf][kq * 4u + 3u][q][e] = v.w;
+    }
+}
+
+// ---- weight decode (B) -----------------------------------------------------
+// Each lane decodes PER_LANE packed groups into four weights each.
+
+uint load_packed_group(uint base) {
+    const uint shift = (base & 3u) * 8u;
+    uint packed = state_words[base >> 2] >> shift;
+    if (shift > 8u) {
+        packed |= state_words[(base >> 2) + 1u] << (32u - shift);
+    }
+    return packed;
+}
+
+void load_b(uint lid, uint n0, uint kt, uint K, out vec4 r0, out vec4 r1) {
+    const uint groups_per_row = p.in_features / 4u;
+    const int levels = levels_of(p.C);
+    for (int i = 0; i < PER_LANE; ++i) {
+        const uint idx = lid + uint(i) * uint(LANES);
+        vec4 w = vec4(0.0);
+        if (p.mode == 0u) {
+            // idx -> (out column c, group of four in_features kg)
+            const uint c = idx >> 2;
+            const uint kg = idx & 3u;
+            const uint gc = n0 + c;
+            const uint gk = kt + kg * 4u;
+            if (gc < p.out_features && gk < p.in_features) {
+                const uint base = (gc * groups_per_row + (gk >> 2)) * 3u;
+                const uint packed = load_packed_group(base);
+                const float s = scale[gc];
+                w.x = s * float(tlut[packed & 63u]);
+                w.y = s * float(tlut[(packed >> 6u) & 63u]);
+                w.z = s * float(tlut[(packed >> 12u) & 63u]);
+                w.w = s * float(tlut[(packed >> 18u) & 63u]);
+            }
+        } else {
+            // idx -> (out row kr within the tile, group of four in_features cg)
+            const uint kr = idx >> 3;
+            const uint cg = idx & 7u;
+            const uint gk = kt + kr;
+            const uint gc = n0 + cg * 4u;
+            if (gk < p.out_features && gc < p.in_features) {
+                const uint base = (gk * groups_per_row + (gc >> 2)) * 3u;
+                const uint packed = load_packed_group(base);
+                const float s = scale[gk];
+                w.x = s * float(tlut[packed & 63u]);
+                w.y = s * float(tlut[(packed >> 6u) & 63u]);
+                w.z = s * float(tlut[(packed >> 12u) & 63u]);
+                w.w = s * float(tlut[(packed >> 18u) & 63u]);
+            }
+        }
+        if (i == 0) r0 = w; else r1 = w;
+    }
+}
+
+void store_b(int buf, uint lid, vec4 r0, vec4 r1) {
+    for (int i = 0; i < PER_LANE; ++i) {
+        const vec4 w = (i == 0) ? r0 : r1;
+        const uint idx = lid + uint(i) * uint(LANES);
+        if (p.mode == 0u) {
+            // Four consecutive k rows, one out column -> transposing scatter.
+            const uint c = idx >> 2;
+            const uint kg = idx & 3u;
+            const uint q = c >> 2;
+            const uint e = c & 3u;
+            Ws[buf][kg * 4u + 0u][q][e] = w.x;
+            Ws[buf][kg * 4u + 1u][q][e] = w.y;
+            Ws[buf][kg * 4u + 2u][q][e] = w.z;
+            Ws[buf][kg * 4u + 3u][q][e] = w.w;
+        } else {
+            // Four consecutive n columns of one k row -> direct vec4 store.
+            const uint kr = idx >> 3;
+            const uint cg = idx & 7u;
+            Ws[buf][kr][cg] = w;
+        }
+    }
+}
+
+// ---- main ------------------------------------------------------------------
+
+void main() {
+    const uint lcol = uint(gl_LocalInvocationID.x);
+    const uint lrow = uint(gl_LocalInvocationID.y);
+    const uint lid = lrow * 8u + lcol;
+    const uint n0 = uint(gl_WorkGroupID.x) * uint(RB);
+    const uint m0 = uint(gl_WorkGroupID.y) * uint(RB);
+    const uint K = (p.mode == 0u) ? p.in_features : p.out_features;
+    const uint N = (p.mode == 0u) ? p.out_features : p.in_features;
+    const uint ktiles = (K + uint(KT) - 1u) / uint(KT);
+
+        if (lid < 64u) tlut[lid] = ternary_from_code(int(lid), levels_of(p.C));
+    barrier();
+
+    vec4 ra0 = vec4(0.0);
+    vec4 ra1 = vec4(0.0);
+    vec4 rb0 = vec4(0.0);
+    vec4 rb1 = vec4(0.0);
+
+    load_a(lid, m0, 0u, K, ra0, ra1);
+    load_b(lid, n0, 0u, K, rb0, rb1);
+    store_a(0, lid, ra0, ra1);
+    store_b(0, lid, rb0, rb1);
+    barrier();
+
+    vec4 acc0 = vec4(0.0);
+    vec4 acc1 = vec4(0.0);
+    vec4 acc2 = vec4(0.0);
+    vec4 acc3 = vec4(0.0);
+    uint cur = 0u;
+    for (uint t = 0u; t < ktiles; ++t) {
+        const bool has_next = (t + 1u) < ktiles;
+        if (has_next) {
+            // Decode and load the next tile while this one is still being used.
+            load_a(lid, m0, (t + 1u) * uint(KT), K, ra0, ra1);
+            load_b(lid, n0, (t + 1u) * uint(KT), K, rb0, rb1);
+        }
+        for (int kk = 0; kk < KT; ++kk) {
+            const vec4 a = As[cur][kk][lrow];
+            const vec4 b = Ws[cur][kk][lcol];
+            acc0 += a.x * b;
+            acc1 += a.y * b;
+            acc2 += a.z * b;
+            acc3 += a.w * b;
+        }
+        if (has_next) {
+            store_a(int(cur ^ 1u), lid, ra0, ra1);
+            store_b(int(cur ^ 1u), lid, rb0, rb1);
+        }
+        barrier();
+        cur ^= 1u;
+    }
+
+    // Scalar epilogue with bounds (N is not required to be a multiple of four).
+    const uint row0 = m0 + lrow * 4u;
+    const uint col0 = n0 + lcol * 4u;
+    if (row0 + 0u < p.batch && col0 + 0u < N) c_out[(row0 + 0u) * N + col0 + 0u] = acc0.x;
+    if (row0 + 0u < p.batch && col0 + 1u < N) c_out[(row0 + 0u) * N + col0 + 1u] = acc0.y;
+    if (row0 + 0u < p.batch && col0 + 2u < N) c_out[(row0 + 0u) * N + col0 + 2u] = acc0.z;
+    if (row0 + 0u < p.batch && col0 + 3u < N) c_out[(row0 + 0u) * N + col0 + 3u] = acc0.w;
+    if (row0 + 1u < p.batch && col0 + 0u < N) c_out[(row0 + 1u) * N + col0 + 0u] = acc1.x;
+    if (row0 + 1u < p.batch && col0 + 1u < N) c_out[(row0 + 1u) * N + col0 + 1u] = acc1.y;
+    if (row0 + 1u < p.batch && col0 + 2u < N) c_out[(row0 + 1u) * N + col0 + 2u] = acc1.z;
+    if (row0 + 1u < p.batch && col0 + 3u < N) c_out[(row0 + 1u) * N + col0 + 3u] = acc1.w;
+    if (row0 + 2u < p.batch && col0 + 0u < N) c_out[(row0 + 2u) * N + col0 + 0u] = acc2.x;
+    if (row0 + 2u < p.batch && col0 + 1u < N) c_out[(row0 + 2u) * N + col0 + 1u] = acc2.y;
+    if (row0 + 2u < p.batch && col0 + 2u < N) c_out[(row0 + 2u) * N + col0 + 2u] = acc2.z;
+    if (row0 + 2u < p.batch && col0 + 3u < N) c_out[(row0 + 2u) * N + col0 + 3u] = acc2.w;
+    if (row0 + 3u < p.batch && col0 + 0u < N) c_out[(row0 + 3u) * N + col0 + 0u] = acc3.x;
+    if (row0 + 3u < p.batch && col0 + 1u < N) c_out[(row0 + 3u) * N + col0 + 1u] = acc3.y;
+    if (row0 + 3u < p.batch && col0 + 2u < N) c_out[(row0 + 3u) * N + col0 + 2u] = acc3.z;
+    if (row0 + 3u < p.batch && col0 + 3u < N) c_out[(row0 + 3u) * N + col0 + 3u] = acc3.w;
+}

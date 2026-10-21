@@ -1,7 +1,12 @@
 #include <motifcl/nn/moe7.hpp>
 
+#include <motifcl/runtime/backend.hpp>
+#include <motifcl/runtime/vulkan_backend.hpp>
+
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <functional>
 
 #include <motifcl/core/error.hpp>
 #include <motifcl/ops/activation.hpp>
@@ -51,11 +56,15 @@ MoE7FFN::MoE7FFN(Backend& backend, const MoE7Config& config) : config_(config) {
         backend, config_.hidden_shared, config_.dim, config_.C, config_.counter_lr,
         0.0f, 1.0f, config_.rms_beta, config_.rms_eps, seed_for(config_.seed, index++));
     last_load_.fill(0.0f);
+
+    skip_zero_grad_experts_ = config_.skip_zero_grad_experts;
+    if (const char* env = std::getenv("MOTIFCL_MOE_SKIP_ZERO_GRAD")) {
+        skip_zero_grad_experts_ = !(env[0] == '0' && env[1] == '\0');
+    }
 }
 
 Tensor MoE7FFN::run_expert(Expert& expert, const Tensor& x) {
-    Tensor hidden = expert.up->forward(x);
-    return expert.down->forward(swiglu(hidden));
+    return expert.down->forward(expert.up->forward_swiglu(x));
 }
 
 std::vector<CounterStateLinear*> MoE7FFN::counter_layers() {
@@ -91,12 +100,35 @@ Tensor MoE7FFN::forward(const Tensor& x) {
     for (int e = 0; e < kExperts; ++e) {
         candidates[static_cast<std::size_t>(e)] = run_expert(experts_[static_cast<std::size_t>(e)], x);
     }
-    Tensor routed = fog_hard_route7(biased, candidates);
+    // The router gradient is a soft mixture over *all* seven candidate values, so
+    // every expert must still be evaluated here. What the sparse backward removes
+    // is the losers' backward graph: with a zero gradient it can only produce
+    // zeros, except for the counter state's second moment, which decays by
+    // rms_beta and is applied explicitly.
+    //
+    // Which experts lost is a device-side decision, and reading it back mid-batch
+    // is not allowed (the batch's dispatches are still queued, so a download would
+    // return stale bytes). The caller therefore has to submit the forward, call
+    // freeze_routing(), and then record the backward -- that is exactly the
+    // read-back the trainer already performs every step for load balancing.
+    std::function<bool(std::uint32_t)> on_zero_candidate;
+    if (skip_zero_grad_experts_ && shared_.up->training() && routing_frozen_) {
+        on_zero_candidate = [this](std::uint32_t expert) {
+            if (route_live_[expert]) return false;  // this expert won tokens: real gradient
+            auto& slot = experts_[expert];
+            slot.down->apply_zero_grad_update();
+            slot.up->apply_zero_grad_update();
+            return true;
+        };
+    }
+    Tensor routed = fog_hard_route7(biased, candidates, std::move(on_zero_candidate));
     Tensor shared_out = run_expert(shared_, x);
 
     last_biased_logits_ = biased;
     last_input_ = x;
     last_rows_ = x.shape()[0];
+    routing_frozen_ = false;  // this forward's routing is not known to the host yet
+    route_live_.fill(true);
     return add(routed, shared_out);
 }
 
@@ -150,7 +182,9 @@ bool MoE7FFN::read_token_counts() {
     for (int k = 0; k < kExperts; ++k) {
         last_load_[static_cast<std::size_t>(k)] =
             static_cast<float>(counts[static_cast<std::size_t>(k)]) * inv_rows;
+        route_live_[static_cast<std::size_t>(k)] = counts[static_cast<std::size_t>(k)] > 0;
     }
+    routing_frozen_ = true;
     return true;
 }
 
@@ -195,8 +229,32 @@ void MoE7FFN::inject_balance_gradient() {
     router_weight.data.backward(gW);
 }
 
+bool MoE7FFN::try_gpu_balance_bias(float gamma) {
+    if (!router_bias.valid()) return false;
+    Backend& backend = router_bias.backend();
+    // Explicit backend branch: no Vulkan, or no open batch, means the historical
+    // CPU path below. Inside an open Vulkan batch there is NO CPU fallback - a
+    // helper failure would silently reintroduce a download/upload mid-batch, so
+    // it is a hard error instead of a swallowed exception.
+    if (!backend.is_vulkan()) return false;
+    VulkanRuntime& runtime = backend.vulkan_runtime();
+    if (!runtime.batch_active()) return false;
+    Tensor updated = Tensor::empty(backend, {kExperts}, DType::F32);
+    updated.set_requires_grad(false);
+    const auto result = run_vulkan_moe_balance_bias_update(
+        runtime, router_bias.storage().vulkan_buffer, updated.storage().vulkan_buffer, last_load_, gamma,
+        config_.balance_clamp);
+    MCL_CHECK(result.success, "MoE7FFN GPU balance-bias update failed: " + result.error);
+    router_bias = std::move(updated);
+    return true;
+}
+
 void MoE7FFN::update_balance_bias(float gamma) {
     if (!(gamma > 0.0f)) return;
+    // Inside an open Vulkan batch the same sign/clamp update is recorded on the
+    // GPU (no host readback/upload). Outside a batch, or without Vulkan, the
+    // historical CPU path below is used unchanged.
+    if (try_gpu_balance_bias(gamma)) return;
     std::vector<float> host = router_bias.to_vector<float>();
     MCL_CHECK(host.size() == static_cast<std::size_t>(kExperts), "MoE7FFN router bias size mismatch");
     const float target = 1.0f / static_cast<float>(kExperts);

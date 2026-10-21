@@ -557,15 +557,31 @@ int main() {
 
         double win_ms = 0.0;
         int win_n = 0;
+        double win_gpu_fb_ms = 0.0, win_gpu_opt_ms = 0.0;
+        int win_gpu_fb_n = 0, win_gpu_opt_n = 0;
         double loss_ema = -1.0;
         struct StepPhases {
             double upload_ms = 0, record_ms = 0, submit_ms = 0, sync_ms = 0;
-            double balance_ms = 0, optim_ms = 0, total_ms = 0, fwd_ms = 0;
-        } phases;
+            double balance_ms = 0, optim_ms = 0, total_ms = 0, fwd_ms = 0, bwd_record_ms = 0;
+        } phases, win_phases;
         auto ms_since = [](std::chrono::steady_clock::time_point a) {
             return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count();
         };
-        for (int step = start_step; step < steps_total; ++step) {
+            // GPU balance-bias mode: record the per-block sign update inside the optimizer
+        // batch instead of a host readback/upload. MOTIFCL_MOE_GPU_BALANCE=0 forces the old
+        // host path; unsupported parameters explicitly select it before any batch opens.
+        // Default is the CPU path: the same-executable A/B (phase 18) measured +1.0%
+        // formal with pair effects +0.1..+2.4%, inside the A/A envelope (0.9055 formal,
+        // pairs 0.71..1.08) and with zero CPU-phase delta, so the GPU helper stays
+        // opt-in only (MOTIFCL_MOE_GPU_BALANCE=1).
+        const bool split_fwd_bwd = env_int("MOTIFCL_MOE_SPLIT_FWD_BWD", 0) != 0;
+        const bool gpu_balance_mode = env_int("MOTIFCL_MOE_GPU_BALANCE", 0) != 0 &&
+            std::isfinite(balance_gamma) && balance_gamma > 0.0f && std::isfinite(balance_clamp) &&
+            balance_clamp > 0.0f && runtime.caps().max_push_constant_bytes >= 48u;
+        std::vector<nn::MoE7FFN*> pending_balance;
+        pending_balance.reserve(blocks.size());
+    for (int step = start_step; step < steps_total; ++step) {
+            phases = StepPhases{};
             const auto t0 = std::chrono::steady_clock::now();
             const float lr_c = lr_at(step, lr_counter_peak);
             const float lr_f = lr_at(step, lr_fp_peak);
@@ -579,42 +595,77 @@ int main() {
             const auto t_rec = std::chrono::steady_clock::now();
             if (!runtime.batch_begin()) { std::cerr << "batch_begin failed\n"; return 1; }
             auto loss = forward_loss(ids, tg, B);
-            double fwd_ms = ms_since(t_rec);
-            loss.backward();
+            const double fwd_ms = ms_since(t_rec);
             phases.fwd_ms = fwd_ms;
-            phases.record_ms = ms_since(t_rec);
-            double gpu_fb_ms = -1.0;
-            {
-                const auto t_sub = std::chrono::steady_clock::now();
-                auto submit = runtime.batch_end();
-                phases.submit_ms = ms_since(t_sub);
-                if (!submit.success) { std::cerr << "batch submit failed: " << submit.error << "\n"; return 1; }
-                if (gpu_timing) gpu_fb_ms = runtime.last_gpu_time_us() * 1e-3;
-            }
-            const auto t_sync0 = std::chrono::steady_clock::now();
-            const float lv = loss.item();
-            phases.sync_ms = ms_since(t_sync0);
-            if (!std::isfinite(lv)) { std::cerr << "non-finite loss at step " << step << "\n"; return 1; }
-
-            // Load balancing: legal only now, with no command batch open.
-            const auto t_bal = std::chrono::steady_clock::now();
+            double gpu_fb_acc = 0.0;
+            bool gpu_fb_seen = false;
+            float lv = 0.0f;
+            // Load balancing read-back, plus (in split mode) freezing this step's
+            // routing for the backward. Both are only legal with no batch open.
             std::array<double, 7> load_sum{};
             int load_n = 0;
             bool load_ok = false;
-            for (auto& blk : blocks) {
-                if (!blk.moe->read_token_counts()) continue;
-                load_ok = true;
-                const auto& load = blk.moe->last_load();
-                for (std::size_t e = 0; e < load.size(); ++e) load_sum[e] += (double)load[e];
-                load_n += 1;
-                blk.moe->prepare_balance_gradient(aux_weight);
-                blk.moe->update_balance_bias(balance_gamma);
+            auto read_back = [&]() {
+                const auto t_sync0 = std::chrono::steady_clock::now();
+                lv = loss.item();
+                phases.sync_ms = ms_since(t_sync0);
+                if (!std::isfinite(lv)) { std::cerr << "non-finite loss at step " << step << "\n"; return false; }
+                pending_balance.clear();
+                const auto t_bal = std::chrono::steady_clock::now();
+                for (auto& blk : blocks) {
+                    if (!blk.moe->read_token_counts()) continue;
+                    load_ok = true;
+                    const auto& load = blk.moe->last_load();
+                    for (std::size_t e = 0; e < load.size(); ++e) load_sum[e] += (double)load[e];
+                    load_n += 1;
+                    blk.moe->prepare_balance_gradient(aux_weight);
+                    if (gpu_balance_mode) pending_balance.push_back(blk.moe.get());
+                    else blk.moe->update_balance_bias(balance_gamma);
+                }
+                phases.balance_ms = ms_since(t_bal);
+                return true;
+            };
+            auto submit_batch = [&](const char* what) {
+                const auto t_sub = std::chrono::steady_clock::now();
+                auto submit = runtime.batch_end();
+                phases.submit_ms += ms_since(t_sub);
+                if (!submit.success) { std::cerr << what << " batch submit failed: " << submit.error << "\n"; return false; }
+                if (gpu_timing) {
+                    const double us = runtime.last_gpu_time_us();
+                    if (us >= 0.0) {
+                        gpu_fb_acc += us * 1e-3;
+                        gpu_fb_seen = true;
+                    }
+                }
+                return true;
+            };
+            // Split mode: submit the forward, read the routing back, then record the
+            // backward. Only this ordering lets the backward know which experts won,
+            // which is what the zero-gradient expert skip needs. It costs a full
+            // forward-length GPU stall while the host records the backward, so it is
+            // opt-in: measured neutral with the skip on and a regression without it
+            // (see reports/vulkan-moe-sparse-2026-10-21.md, Phase D).
+            if (split_fwd_bwd) {
+                if (!submit_batch("forward")) return 1;
+                if (!read_back()) return 1;
+                const auto t_bwd = std::chrono::steady_clock::now();
+                if (!runtime.batch_begin()) { std::cerr << "batch_begin (backward) failed\n"; return 1; }
+                loss.backward();
+                if (!submit_batch("backward")) return 1;
+                phases.bwd_record_ms = ms_since(t_bwd);
+            } else {
+                loss.backward();
+                if (!submit_batch("forward+backward")) return 1;
+                if (!read_back()) return 1;
             }
-            phases.balance_ms = ms_since(t_bal);
+            phases.record_ms = ms_since(t_rec);
+            const double gpu_fb_ms = gpu_fb_seen ? gpu_fb_acc : -1.0;
 
             // Auxiliary router gradient + parameter update.
             const auto t_opt = std::chrono::steady_clock::now();
             if (!runtime.batch_begin()) { std::cerr << "batch_begin (optim) failed\n"; return 1; }
+            for (auto* moe_ptr : pending_balance) moe_ptr->update_balance_bias(balance_gamma);
+            pending_balance.clear();
             for (auto& blk : blocks) blk.moe->inject_balance_gradient();
             for (std::size_t pi = 0; pi < fp.size(); ++pi) {
                 auto& p = fp[pi];
@@ -634,6 +685,23 @@ int main() {
             const auto t1 = std::chrono::steady_clock::now();
             phases.total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             win_ms += phases.total_ms;
+            win_phases.upload_ms += phases.upload_ms;
+            win_phases.fwd_ms += phases.fwd_ms;
+            win_phases.record_ms += phases.record_ms;
+            win_phases.submit_ms += phases.submit_ms;
+            win_phases.sync_ms += phases.sync_ms;
+            win_phases.balance_ms += phases.balance_ms;
+            win_phases.optim_ms += phases.optim_ms;
+            win_phases.bwd_record_ms += phases.bwd_record_ms;
+            win_phases.total_ms += phases.total_ms;
+            if (std::isfinite(gpu_fb_ms) && gpu_fb_ms >= 0.0) {
+                win_gpu_fb_ms += gpu_fb_ms;
+                ++win_gpu_fb_n;
+            }
+            if (std::isfinite(gpu_opt_ms) && gpu_opt_ms >= 0.0) {
+                win_gpu_opt_ms += gpu_opt_ms;
+                ++win_gpu_opt_n;
+            }
             win_n += 1;
             if ((step + 1) % log_every == 0) {
                 const double ms = win_ms / win_n;
@@ -644,11 +712,17 @@ int main() {
                             (double)runtime.buffer_bytes_live() / 1048576.0,
                             (double)runtime.buffer_bytes_peak() / 1048576.0);
                 if (gpu_timing) {
-                    std::printf("  ms fwd+bwd gpu %.2f opt gpu %.2f sync %.2f", gpu_fb_ms, gpu_opt_ms, phases.sync_ms);
+                    const double gpu_fb_mean = win_gpu_fb_n == win_n ? win_gpu_fb_ms / win_n : -1.0;
+                    const double gpu_opt_mean = win_gpu_opt_n == win_n ? win_gpu_opt_ms / win_n : -1.0;
+                    std::printf("  ms fwd+bwd gpu %.2f opt gpu %.2f sync %.2f",
+                                gpu_fb_mean, gpu_opt_mean, win_phases.sync_ms / win_n);
                     std::printf(
-                        "  phases upload %.1f fwd %.1f record %.1f submit %.1f balance %.1f optim %.1f total %.1f",
-                        phases.upload_ms, phases.fwd_ms, phases.record_ms, phases.submit_ms, phases.balance_ms,
-                        phases.optim_ms, phases.total_ms);
+                        "  phases upload %.1f fwd %.1f record %.1f bwdrec %.1f submit %.1f balance %.1f optim %.1f total %.1f window %d",
+                        win_phases.upload_ms / win_n, win_phases.fwd_ms / win_n,
+                        win_phases.record_ms / win_n, win_phases.bwd_record_ms / win_n,
+                        win_phases.submit_ms / win_n,
+                        win_phases.balance_ms / win_n, win_phases.optim_ms / win_n,
+                        win_phases.total_ms / win_n, win_n);
                 }
                 {
                     const char* prof = std::getenv("MOTIFCL_VK_PROFILE");
@@ -658,9 +732,7 @@ int main() {
                         for (const auto& r : rows) total += r.total_us;
                         std::printf("\n  --- kernel GPU profile (window, %zu kernels, %.2f ms) ---",
                                     rows.size(), total * 1e-3);
-                        std::size_t shown = 0;
                         for (const auto& r : rows) {
-                            if (shown++ >= 20) break;
                             std::printf("\n  %-40s calls %6llu  total %8.2f ms  avg %7.3f ms  %5.1f%%",
                                         r.name.c_str(), (unsigned long long)r.calls, r.total_us * 1e-3,
                                         r.calls ? (r.total_us / (double)r.calls) * 1e-3 : 0.0,
@@ -695,6 +767,11 @@ int main() {
                 std::printf("\n");
                 std::fflush(stdout);
                 win_ms = 0.0;
+                win_phases = StepPhases{};
+                win_gpu_fb_ms = 0.0;
+                win_gpu_opt_ms = 0.0;
+                win_gpu_fb_n = 0;
+                win_gpu_opt_n = 0;
                 win_n = 0;
             }
             if ((step + 1) % eval_every == 0) {

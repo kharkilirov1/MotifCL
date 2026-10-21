@@ -1,0 +1,33 @@
+// Fold row-partition sums into the RMSNorm weight gradient.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer PartialBuf { float partials[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer DwBuf { float dw[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint cols;
+    uint splits;
+} p;
+
+void main() {
+    const uint col = gl_GlobalInvocationID.x;
+    if (col >= p.cols) return;
+    float a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+    uint split = 0u;
+    for (; split + 4u <= p.splits; split += 4u) {
+        const uint i0 = split * p.cols + col;
+        const uint i1 = i0 + p.cols;
+        const uint i2 = i1 + p.cols;
+        const uint i3 = i2 + p.cols;
+        a0 += partials[i0];
+        a1 += partials[i1];
+        a2 += partials[i2];
+        a3 += partials[i3];
+    }
+    float acc = (a0 + a1) + (a2 + a3);
+    for (; split < p.splits; ++split) acc += partials[split * p.cols + col];
+    dw[col] = acc;
+}

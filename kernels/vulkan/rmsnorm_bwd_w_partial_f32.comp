@@ -1,0 +1,46 @@
+// Each workgroup reduces a contiguous row partition for 64 adjacent columns.
+// partials[split * cols + col] = sum_partition dy * x * row_inv.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DyBuf { float dy[]; };
+layout(std430, set = 0, binding = 2) readonly buffer InvBuf { float row_inv[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer PartialBuf { float partials[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint cols;
+    uint splits;
+} p;
+
+void main() {
+    const uint col = gl_GlobalInvocationID.x;
+    const uint split = gl_WorkGroupID.y;
+    if (col >= p.cols || split >= p.splits) return;
+
+    // Equal to rows*split/splits without overflowing that intermediate product.
+    const uint quotient = p.rows / p.splits;
+    const uint remainder = p.rows % p.splits;
+    const uint begin = quotient * split + (remainder * split) / p.splits;
+    const uint end = quotient * (split + 1u) + (remainder * (split + 1u)) / p.splits;
+    float a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+    uint row = begin;
+    for (; end - row >= 4u; row += 4u) {
+        const uint i0 = row * p.cols + col;
+        const uint i1 = i0 + p.cols;
+        const uint i2 = i1 + p.cols;
+        const uint i3 = i2 + p.cols;
+        a0 += dy[i0] * x[i0] * row_inv[row];
+        a1 += dy[i1] * x[i1] * row_inv[row + 1u];
+        a2 += dy[i2] * x[i2] * row_inv[row + 2u];
+        a3 += dy[i3] * x[i3] * row_inv[row + 3u];
+    }
+    float acc = (a0 + a1) + (a2 + a3);
+    for (; row < end; ++row) {
+        const uint index = row * p.cols + col;
+        acc += dy[index] * x[index] * row_inv[row];
+    }
+    partials[split * p.cols + col] = acc;
+}

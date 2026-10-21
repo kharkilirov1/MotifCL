@@ -121,6 +121,7 @@ std::vector<float> route_logits_grad_host(const Tensor& logits,
 
 struct FogHardRoute7BackwardNode : autograd::Node {
     Tensor logits; std::array<Tensor,7> candidates;
+    std::function<bool(std::uint32_t)> on_zero_candidate;
     FogHardRoute7BackwardNode(Tensor l,std::array<Tensor,7> c):logits(std::move(l)),candidates(std::move(c)){}
     std::vector<Tensor> inputs() const override {
         std::vector<Tensor> in; in.reserve(8); in.push_back(logits); for(const auto& c:candidates)in.push_back(c); return in;
@@ -145,6 +146,9 @@ struct FogHardRoute7BackwardNode : autograd::Node {
         bool host_ready=false;
         for(std::uint32_t k=0;k<7;++k){
             if(!candidates[k].requires_grad())continue;
+            // Zero-gradient candidates: the caller applies the state-only side
+            // effect instead of running the expert's backward graph on zeros.
+            if(on_zero_candidate && on_zero_candidate(k))continue;
             Tensor dc;
             if(logits.backend().is_vulkan()){
                 dc=Tensor::empty(logits.backend(),candidates[k].shape(),DType::F32);
@@ -248,6 +252,11 @@ Tensor fog_block_product_backward_addressed(const Tensor& value,
 }
 
 Tensor fog_hard_route7(const Tensor& logits, const std::array<Tensor,7>& candidates) {
+    return fog_hard_route7(logits, candidates, std::function<bool(std::uint32_t)>());
+}
+
+Tensor fog_hard_route7(const Tensor& logits, const std::array<Tensor,7>& candidates,
+                       std::function<bool(std::uint32_t)> on_zero_candidate) {
     MCL_CHECK(logits.dtype()==DType::F32 && logits.ndim()==2 && logits.shape()[1]==7,
               "fog_hard_route7 logits must be [rows,7]");
     const auto rows=logits.shape()[0];
@@ -273,7 +282,12 @@ Tensor fog_hard_route7(const Tensor& logits, const std::array<Tensor,7>& candida
         out=Tensor::from_cpu(logits.backend(),{rows,d},DType::F32,y.data());
     }
     bool grad=logits.requires_grad(); for(const auto& c:candidates)grad=grad||c.requires_grad();
-    if(autograd::is_enabled()&&grad){out.set_requires_grad(true);out._set_grad_fn(std::make_shared<FogHardRoute7BackwardNode>(logits,candidates));}
+    if(autograd::is_enabled()&&grad){
+        out.set_requires_grad(true);
+        auto node=std::make_shared<FogHardRoute7BackwardNode>(logits,candidates);
+        node->on_zero_candidate=std::move(on_zero_candidate);
+        out._set_grad_fn(std::move(node));
+    }
     return out;
 }
 

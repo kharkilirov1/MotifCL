@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -84,8 +85,13 @@ struct VulkanOpResult {
 };
 
 // One kernel's accumulated GPU time in the opt-in per-kernel profiler
-// (MOTIFCL_VK_PROFILE=1). Times come from VK timestamp queries recorded either
-// side of every dispatch inside a batch, so they are GPU execution deltas.
+// (MOTIFCL_VK_PROFILE=1). Times come from a VK timestamp pair recorded either
+// side of every dispatch inside a batch (start at COMPUTE_SHADER, end at
+// ALL_COMMANDS so it waits for the dispatch to retire), so each entry is real
+// GPU execution time including that dispatch's own drain. Compare the sum of
+// all entries against last_gpu_time_us() to see what is left over: the
+// difference is time the GPU spent outside any dispatch (compute->compute
+// barriers, bind gaps).
 struct VulkanKernelProfile {
     std::string name;
     std::uint64_t calls = 0;
@@ -128,6 +134,9 @@ struct VulkanDeviceCaps {
     // reductions (5 barriers + 5 LDS round-trips per reduction -> zero).
     bool subgroup_arithmetic_compute = false;
     std::uint32_t subgroup_size = 0;
+    bool supports_wave64_arithmetic() const {
+        return subgroup_arithmetic_compute && subgroup_size == 64;
+    }
     // VK_EXT_shader_atomic_float: when true, the embedding_weight_backward
     // scatter kernel (float atomicAdd) is available. GCN4 (RX 580) reports
     // false (no hardware float atomics); newer AMD/NVIDIA/Intel GPUs report
@@ -225,6 +234,10 @@ public:
     VulkanOpResult replay(const VulkanDispatchRecording& recording);
 
     VulkanBuffer create_buffer(std::size_t nbytes, const void* initial_data = nullptr);
+
+    // Serial, command-ordered workspace. Calls with the same slot may alias;
+    // consume each result before the next use of that slot. Not tensor storage.
+    VulkanBuffer create_scratch_buffer(const std::string& slot, std::size_t nbytes);
 
     // Cached dispatch path: pipelines / layouts / descriptor sets are cached
     // for the runtime lifetime; scalar arguments travel as push constants.
@@ -622,6 +635,33 @@ VulkanOpResult run_vulkan_softmax_cross_entropy_backward(VulkanRuntime& runtime,
                                                          VulkanBuffer& grad_logits,
                                                          std::size_t rows,
                                                          std::size_t cols);
+// row_stats holds [max, inverse_sum] per row and remains live through backward.
+VulkanOpResult run_vulkan_softmax_cross_entropy_cached(VulkanRuntime& runtime,
+                                                      const VulkanBuffer& logits,
+                                                      const VulkanBuffer& targets,
+                                                      VulkanBuffer& partial,
+                                                      VulkanBuffer& row_stats,
+                                                      VulkanBuffer& out,
+                                                      std::size_t rows,
+                                                      std::size_t cols);
+VulkanOpResult run_vulkan_softmax_cross_entropy_backward_cached(VulkanRuntime& runtime,
+                                                               const VulkanBuffer& logits,
+                                                               const VulkanBuffer& targets,
+                                                               const VulkanBuffer& grad_out,
+                                                               const VulkanBuffer& row_stats,
+                                                               VulkanBuffer& grad_logits,
+                                                               std::size_t rows,
+                                                               std::size_t cols);
+VulkanOpResult run_vulkan_rmsnorm_backward_weight_split(VulkanRuntime& runtime,
+                                                        const VulkanBuffer& x,
+                                                        const VulkanBuffer& grad_out,
+                                                        VulkanBuffer& row_inv_scratch,
+                                                        VulkanBuffer& partial,
+                                                        VulkanBuffer& grad_weight,
+                                                        std::size_t rows,
+                                                        std::size_t cols,
+                                                        float eps,
+                                                        std::size_t splits);
 VulkanOpResult run_vulkan_gelu(VulkanRuntime& runtime,
                                const VulkanBuffer& x,
                                VulkanBuffer& out,
@@ -756,6 +796,18 @@ VulkanOpResult run_vulkan_compact_counter_forward_u8(VulkanRuntime& runtime,
                                                       std::size_t in_features,
                                                       std::size_t out_features,
                                                       std::size_t C);
+// Training epilogue: save [batch,out_features] for backward and emit
+// SwiGLU [batch,out_features/2] without a separate activation dispatch.
+VulkanOpResult run_vulkan_compact_counter_swiglu_u8(VulkanRuntime& runtime,
+                                                     const VulkanBuffer& x,
+                                                     const VulkanBuffer& state,
+                                                     const VulkanBuffer& scale,
+                                                     VulkanBuffer& preactivation,
+                                                     VulkanBuffer& out,
+                                                     std::size_t C,
+                                                     std::size_t in_features,
+                                                     std::size_t out_features,
+                                                     std::size_t batch);
 // Fused memory-native counter update (row stats + stochastic tick + scale
 // commit), bit-exact vs the OpenCL fused kernels for the same seed. state is
 // the packed U8/3-byte CounterStateLinear layout; scratch buffers hold
@@ -782,6 +834,13 @@ VulkanOpResult run_vulkan_compact_counter_apply_update_fused(VulkanRuntime& runt
 // scale state, and run the finite-state stochastic-rounding tick. One wave64
 // workgroup per output row; this pass is bandwidth-only, so the old path's second
 // grad_w recompute and its separate row-scale copy are gone.
+VulkanOpResult run_vulkan_moe_balance_bias_update(VulkanRuntime& runtime,
+                                            const VulkanBuffer& old_bias,
+                                            VulkanBuffer& new_bias,
+                                            const std::array<float, 7>& loads,
+                                            float gamma,
+                                            float clamp_value);
+
 VulkanOpResult run_vulkan_compact_counter_update_apply(VulkanRuntime& runtime,
                                                        VulkanBuffer& state,
                                                        VulkanBuffer& scale,
@@ -795,6 +854,10 @@ VulkanOpResult run_vulkan_compact_counter_update_apply(VulkanRuntime& runtime,
                                                        float rms_beta,
                                                        float rms_eps,
                                                        std::uint32_t seed);
+VulkanOpResult run_vulkan_compact_counter_decay_v(VulkanRuntime& runtime,
+                                                  VulkanBuffer& v,
+                                                  std::size_t out_features,
+                                                  float rms_beta);
 VulkanOpResult run_vulkan_compact_counter_backward_input_u8(VulkanRuntime& runtime,
                                                             const VulkanBuffer& state,
                                                             const VulkanBuffer& scale,
@@ -931,5 +994,52 @@ VulkanOpResult run_vulkan_rope_positions_split_half(VulkanRuntime& runtime,
                                                     std::size_t head_dim,
                                                     std::size_t rotary_dim,
                                                     float theta);
+
+// ---------------------------------------------------------------------------
+// Sparse MoE7 forward (mission Phase C).
+//
+// Computes only the expert that each token's router argmax selects, instead of
+// running all seven experts and discarding six outputs. The routing decision
+// stays on the GPU: `moe_route_top1_f32` writes per-expert token counts and
+// compact assignment lists, and every expert dispatch is bounded by its own
+// count, so no routing result is ever read back to the host.
+//
+// Semantics are the dense ones (nn::MoE7FFN): hard top-1 over seven experts,
+// router bias shifts selection only, SwiGLU gate*sigmoid(gate)*up, output of the
+// winner plus the shared expert. `shared_out` is NOT added here — the caller
+// merges it exactly as the dense path does, so the merge stays in one place.
+//
+// Scratch buffers (all device buffers owned by the caller, reused across calls):
+//   logits   [tokens, 7]     f32  biased router logits
+//   counts   [8]             u32  per-expert token counts (must be zero before
+//                                 the call: the routing kernel atomicAdds)
+//   list     [7 * tokens]    u32  compact assignment lists, capacity = tokens
+//   packed   [tokens, 2*h]   f32  expert up-projection output
+//   act      [tokens, h]     f32  expert SwiGLU activation
+//   expert_out [tokens, dim] f32  scattered winning-expert output
+// `capacity` is `tokens` by construction: every token is assigned to exactly
+// one expert, so no list can overflow and no token is dropped.
+struct VulkanMoE7SparseSpec {
+    std::size_t tokens = 0;
+    std::size_t dim = 0;
+    std::size_t hidden = 0;
+    std::size_t C = 0;
+    const VulkanBuffer* x = nullptr;
+    const VulkanBuffer* router_w = nullptr;
+    const VulkanBuffer* router_b = nullptr;
+    std::array<const VulkanBuffer*, 7> up_state{};
+    std::array<const VulkanBuffer*, 7> up_scale{};
+    std::array<const VulkanBuffer*, 7> down_state{};
+    std::array<const VulkanBuffer*, 7> down_scale{};
+    VulkanBuffer* logits = nullptr;
+    VulkanBuffer* counts = nullptr;
+    VulkanBuffer* list = nullptr;
+    VulkanBuffer* packed = nullptr;
+    VulkanBuffer* act = nullptr;
+    VulkanBuffer* expert_out = nullptr;
+};
+
+VulkanOpResult run_vulkan_moe7_sparse_forward(VulkanRuntime& runtime,
+                                              const VulkanMoE7SparseSpec& spec);
 
 } // namespace motifcl

@@ -9,6 +9,7 @@
 #include <motifcl/runtime/vulkan_backend.hpp>
 
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <vector>
 
@@ -17,6 +18,11 @@ namespace motifcl {
 namespace {
 constexpr int kChunk = 256;
 std::size_t round_up(std::size_t x, std::size_t multiple) { return ((x + multiple - 1) / multiple) * multiple; }
+
+bool vulkan_ce_cache_enabled() {
+    const char* env = std::getenv("MOTIFCL_VK_CE_CACHE");
+    return !(env && (std::string(env) == "0" || std::string(env) == "false" || std::string(env) == "FALSE"));
+}
 
 Tensor mean_reduce_gpu(const Tensor& partial, int denominator) {
     auto out = Tensor::empty(partial.backend(), {}, DType::F32);
@@ -40,11 +46,30 @@ struct MSEBackwardNode : autograd::Node {
 };
 
 struct SoftmaxCrossEntropyBackwardNode : autograd::Node {
-    Tensor logits, targets;
-    SoftmaxCrossEntropyBackwardNode(Tensor logits, Tensor targets) : logits(std::move(logits)), targets(std::move(targets)) {}
+    Tensor logits, targets, row_stats;
+    SoftmaxCrossEntropyBackwardNode(Tensor logits, Tensor targets, Tensor row_stats = {})
+        : logits(std::move(logits)), targets(std::move(targets)), row_stats(std::move(row_stats)) {}
     std::vector<Tensor> inputs() const override { return {logits}; }
     void backward(const Tensor& grad_output) override {
-        if (logits.requires_grad()) logits.backward(softmax_cross_entropy_backward_op(logits, targets, grad_output));
+        if (!logits.requires_grad()) return;
+        if (!row_stats.valid()) {
+            logits.backward(softmax_cross_entropy_backward_op(logits, targets, grad_output));
+            return;
+        }
+        MCL_CHECK(grad_output.dtype() == DType::F32 && grad_output.numel() == 1,
+                  "softmax_cross_entropy_backward grad_out must be an f32 scalar");
+        MCL_CHECK(logits.backend_ptr() == grad_output.backend_ptr(),
+                  "softmax_cross_entropy_backward requires one backend");
+        auto grad_logits = Tensor::empty(logits.backend(), logits.shape(), DType::F32);
+        const auto run = run_vulkan_softmax_cross_entropy_backward_cached(
+            logits.backend().vulkan_runtime(), logits.storage().vulkan_buffer,
+            targets.storage().vulkan_buffer, grad_output.storage().vulkan_buffer,
+            row_stats.storage().vulkan_buffer, grad_logits.storage().vulkan_buffer,
+            static_cast<std::size_t>(logits.shape()[0]), static_cast<std::size_t>(logits.shape()[1]));
+        MCL_CHECK(run.success, std::string("vulkan cached softmax_cross_entropy backward failed: ") + run.error);
+        autograd::record_op("softmax_cross_entropy_backward_cached_vulkan_f32",
+                            {logits.id(), targets.id(), grad_output.id(), row_stats.id()}, {grad_logits.id()});
+        logits.backward(grad_logits);
     }
 };
 
@@ -107,18 +132,34 @@ Tensor softmax_cross_entropy(const Tensor& logits, const Tensor& targets) {
     if (logits.backend().is_vulkan()) {
         auto partial = Tensor::empty(logits.backend(), {rows}, DType::F32);
         auto out = Tensor::empty(logits.backend(), {}, DType::F32);
-        const auto run = run_vulkan_softmax_cross_entropy(logits.backend().vulkan_runtime(),
-                                                          logits.storage().vulkan_buffer,
-                                                          targets.storage().vulkan_buffer,
-                                                          partial.storage().vulkan_buffer,
-                                                          out.storage().vulkan_buffer,
-                                                          static_cast<std::size_t>(rows),
-                                                          static_cast<std::size_t>(cols));
+        const bool needs_backward = autograd::is_enabled() && logits.requires_grad();
+        auto& runtime = logits.backend().vulkan_runtime();
+        const bool use_cache = needs_backward && vulkan_ce_cache_enabled() &&
+                               runtime.caps().max_workgroup_invocations >= 128;
+        Tensor row_stats;
+        VulkanOpResult run;
+        if (use_cache) {
+            row_stats = Tensor::empty(logits.backend(), {rows, 2}, DType::F32);
+            run = run_vulkan_softmax_cross_entropy_cached(
+                runtime, logits.storage().vulkan_buffer, targets.storage().vulkan_buffer,
+                partial.storage().vulkan_buffer, row_stats.storage().vulkan_buffer,
+                out.storage().vulkan_buffer, static_cast<std::size_t>(rows), static_cast<std::size_t>(cols));
+        } else {
+            run = run_vulkan_softmax_cross_entropy(
+                runtime, logits.storage().vulkan_buffer, targets.storage().vulkan_buffer,
+                partial.storage().vulkan_buffer, out.storage().vulkan_buffer,
+                static_cast<std::size_t>(rows), static_cast<std::size_t>(cols));
+        }
         MCL_CHECK(run.success, std::string("vulkan softmax_cross_entropy failed: ") + run.error);
-        autograd::record_op("softmax_cross_entropy_vulkan_f32", {logits.id(), targets.id()}, {out.id()});
-        if (autograd::is_enabled() && logits.requires_grad()) {
+        if (use_cache) {
+            autograd::record_op("softmax_cross_entropy_cached_vulkan_f32",
+                                {logits.id(), targets.id()}, {out.id(), row_stats.id()});
+        } else {
+            autograd::record_op("softmax_cross_entropy_vulkan_f32", {logits.id(), targets.id()}, {out.id()});
+        }
+        if (needs_backward) {
             out.set_requires_grad(true);
-            out._set_grad_fn(std::make_shared<SoftmaxCrossEntropyBackwardNode>(logits, targets));
+            out._set_grad_fn(std::make_shared<SoftmaxCrossEntropyBackwardNode>(logits, targets, std::move(row_stats)));
         }
         return out;
     }

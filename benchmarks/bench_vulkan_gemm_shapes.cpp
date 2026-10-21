@@ -70,6 +70,7 @@ int main(int argc, char** argv) {
         std::printf("SKIP bench_vulkan_gemm_shapes: %s\n", probe_vulkan_runtime().error.c_str());
         return 77;
     }
+    _putenv_s("MOTIFCL_VK_PROFILE", "1");
     const int reps = argc > 1 ? std::max(1, std::atoi(argv[1])) : 15;
     try {
         Backend backend = Backend::create_vulkan();
@@ -94,14 +95,20 @@ int main(int argc, char** argv) {
         for (const auto& shape : shapes) {
             const std::size_t a_elems = (std::string(shape.op) == "tn") ? shape.k * shape.m : shape.m * shape.k;
             const std::size_t b_elems = (std::string(shape.op) == "nn") ? shape.k * shape.n : shape.k * shape.n;
-            auto a = runtime.create_buffer(a_elems * sizeof(float));
-            auto b = runtime.create_buffer(b_elems * sizeof(float));
+
+            std::vector<float> av(a_elems), bv(b_elems);
+            for (std::size_t i = 0; i < a_elems; ++i) av[i] = -0.4f + 0.001f * static_cast<float>((i * 13u) % 977u);
+            for (std::size_t i = 0; i < b_elems; ++i) bv[i] = -0.3f + 0.001f * static_cast<float>((i * 29u) % 977u);
+            auto a = runtime.create_buffer(a_elems * sizeof(float), av.data());
+            auto b = runtime.create_buffer(b_elems * sizeof(float), bv.data());
             auto c = runtime.create_buffer(shape.m * shape.n * sizeof(float));
+
 
             if (!dispatch_shape(shape, runtime, a, b, c)) return 1;
             for (int i = 0; i < 2; ++i) {
                 if (!dispatch_shape(shape, runtime, a, b, c)) return 1;
             }
+            runtime.reset_kernel_profile();
             std::vector<double> gpu_ms;
             gpu_ms.reserve(static_cast<std::size_t>(reps));
             for (int i = 0; i < reps; ++i) {
@@ -109,12 +116,19 @@ int main(int argc, char** argv) {
                 const double us = runtime.last_gpu_time_us();
                 if (us > 0.0) gpu_ms.push_back(us / 1000.0);
             }
+            std::string dominant;
+            unsigned long long best_calls = 0;
+            for (const auto& row : runtime.kernel_profile()) {
+                if (row.calls > best_calls) { best_calls = row.calls; dominant = row.name; }
+            }
             const double ms = median(gpu_ms);
             const double gflop = 2.0 * static_cast<double>(shape.m) * static_cast<double>(shape.k) *
                                  static_cast<double>(shape.n) / 1e9;
             const double tflops = ms > 0.0 ? gflop / ms : 0.0;
             std::printf("%-28s %-5s %-6s %10.3f %10.3f %7.1f%%\n", shape.label, shape.op, variant_name(), ms,
                         tflops, 100.0 * tflops / kPolarisFp32PeakTflops);
+            std::printf("  kernel %s calls=%llu\n", dominant.c_str(), best_calls);
+            std::fflush(stdout);
         }
         return 0;
     } catch (const std::exception& e) {

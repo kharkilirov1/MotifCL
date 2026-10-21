@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <random>
 #include <string>
@@ -10,6 +11,7 @@
 #include <motifcl/autograd/graph.hpp>
 #include <motifcl/autograd/node.hpp>
 #include <motifcl/core/error.hpp>
+#include <motifcl/ops/activation.hpp>
 #include <motifcl/ops/matmul.hpp>
 #include <motifcl/runtime/backend.hpp>
 #include <motifcl/runtime/vulkan_backend.hpp>
@@ -44,9 +46,18 @@ struct CounterBackwardNode : autograd::Node {
         if (need_gx) grad_x = layer->backward_input_from_state(grad_out);
         {
             autograd::NoGradGuard guard;                      // the state update is a side effect
-            layer->apply_update_backward(grad_out, x, seed);  // fused: grad_w never materialised
+            layer->apply_update_backward(grad_out, x, seed);
         }
         if (need_gx) x.backward(grad_x);
+    }
+};
+
+struct CounterSwiGLUBackwardNode : autograd::Node {
+    Tensor packed;
+    explicit CounterSwiGLUBackwardNode(Tensor value) : packed(std::move(value)) {}
+    std::vector<Tensor> inputs() const override { return {packed}; }
+    void backward(const Tensor& grad_out) override {
+        if (packed.requires_grad()) packed.backward(swiglu_backward_op(packed, grad_out));
     }
 };
 
@@ -58,7 +69,7 @@ CounterStateLinear::CounterStateLinear(Backend& backend, int in_features, int ou
     : backend_(&backend), in_(in_features), out_(out_features), C_(C), lr_(lr),
       lr_scale_(lr_scale), rms_beta_(rms_beta), rms_eps_(rms_eps), seed_(seed) {
     MCL_CHECK(in_ > 0 && out_ > 0, "CounterStateLinear requires positive dimensions");
-    MCL_CHECK(3 * (2 * C_ - 1) <= 64, "C too large for 6-bit packed state encoding");
+    MCL_CHECK(C_ >= 1 && C_ <= 11, "C must be in [1,11] for 6-bit packed state encoding");
     MCL_CHECK(in_ % 4 == 0, "CounterStateLinear requires in_features divisible by 4 (6-bit packing)");
 
     // state is packed: 4 finite-state codes per 3 bytes, laid out [out, in/4, 3].
@@ -157,46 +168,43 @@ void CounterStateLinear::apply_update_seed(const Tensor& grad_w, std::uint32_t s
 
 void CounterStateLinear::apply_update_backward(const Tensor& grad_out, const Tensor& x,
                                                std::uint32_t seed) {
-    // Memory-native update: grad_w[o,i] = sum_r grad_out[r,o]*x[r,i] is recomputed inside the
-    // kernels; no dense [out,in] weight gradient is allocated. Only O(out) scratch (scale_new,
-    // denom) is needed -- the device peak holds no weight-sized gradient buffer.
+    MCL_CHECK(x.backend_ptr() == backend_ && grad_out.backend_ptr() == backend_,
+              "counter update requires one backend");
+    MCL_CHECK(x.dtype() == DType::F32 && grad_out.dtype() == DType::F32,
+              "counter update requires f32 activations and gradients");
+    MCL_CHECK(x.ndim() == 2 && grad_out.ndim() == 2 && x.shape()[0] > 0 &&
+              x.shape()[0] == grad_out.shape()[0] && x.shape()[1] == in_ && grad_out.shape()[1] == out_,
+              "counter update activation shape mismatch");
     const int N = x.shape()[0];
-    Tensor scale_new = Tensor::empty(*backend_, {out_}, DType::F32);
-    Tensor denom = Tensor::empty(*backend_, {out_}, DType::F32);
     if (backend_->is_vulkan()) {
-        // Tiled fast path: one register-blocked tn GEMM forms grad_w into a single
-        // reusable scratch buffer and reduces the two row statistics, then one
-        // bandwidth-only pass per row folds them, commits v/scale, and ticks the
-        // packed state. This replaces the old double-recompute of grad_w (two
-        // scalar kernels whose strided grad_out reads dominated the update) and
-        // removes the separate row-scale copy dispatch.
-        //
-        // The grad_w scratch is TRANSIENT and reused by every layer: the layer's
-        // persistent cost stays packed 6-bit state + O(out) scale/v. Very large
-        // layers keep the strictly allocation-free recompute path below so a
-        // dense gradient never inflates the model footprint.
+        MCL_CHECK(std::isfinite(lr_) && std::isfinite(lr_scale_) && std::isfinite(rms_beta_) &&
+                  rms_beta_ >= 0.0f && rms_beta_ <= 1.0f && std::isfinite(rms_eps_) && rms_eps_ >= 0.0f,
+                  "counter update requires finite lr/lr_scale, rms_beta in [0,1], and non-negative finite rms_eps");
+        // The command stream consumes grad_w before the next layer overwrites
+        // the same workspace. Persistent state remains packed; large layers use
+        // the allocation-free recompute path.
         constexpr std::int64_t kGradWScratchLimitBytes = 32LL * 1024 * 1024;
         const std::int64_t grad_w_bytes = static_cast<std::int64_t>(out_) * in_ * (std::int64_t)sizeof(float);
-        if (grad_w_bytes <= kGradWScratchLimitBytes && in_ % 4 == 0) {
-            Tensor grad_w;
-            {
-                // The counter update is a state side effect: nothing here may be
-                // recorded on the autograd tape (the caller already holds a
-                // NoGradGuard for the fused path; keep it explicit for direct
-                // calls from tests and tooling).
-                autograd::NoGradGuard guard;
-                grad_w = matmul_transpose_a(grad_out, x);  // [out, in] = grad_out^T * x
-            }
-            auto& rt = backend_->vulkan_runtime();
+        auto& rt = backend_->vulkan_runtime();
+        const char* tiled = std::getenv("MOTIFCL_VK_COUNTER_TILED");
+        if (!(tiled && *tiled == '0') && rt.caps().supports_wave64_arithmetic() &&
+            grad_w_bytes <= kGradWScratchLimitBytes && in_ % 4 == 0) {
+            auto grad_w = rt.create_scratch_buffer("counter_grad_w", static_cast<std::size_t>(grad_w_bytes));
+            const auto gemm = run_vulkan_f32_matmul_transpose_a(rt,
+                grad_out.storage().vulkan_buffer, x.storage().vulkan_buffer, grad_w,
+                static_cast<std::size_t>(out_), static_cast<std::size_t>(N), static_cast<std::size_t>(in_));
+            MCL_CHECK(gemm.success, std::string("vulkan compact-counter grad_w failed: ") + gemm.error);
             const auto apply_run = run_vulkan_compact_counter_update_apply(
                 rt, state.storage().vulkan_buffer, scale.storage().vulkan_buffer,
-                v.storage().vulkan_buffer, grad_w.storage().vulkan_buffer,
+                v.storage().vulkan_buffer, grad_w,
                 static_cast<std::size_t>(in_), static_cast<std::size_t>(out_),
                 static_cast<std::size_t>(C_), lr_, lr_scale_, rms_beta_, rms_eps_, seed);
             MCL_CHECK(apply_run.success,
                       std::string("vulkan compact-counter tiled update failed: ") + apply_run.error);
             return;
         }
+        Tensor scale_new = Tensor::empty(*backend_, {out_}, DType::F32);
+        Tensor denom = Tensor::empty(*backend_, {out_}, DType::F32);
         const auto run = run_vulkan_compact_counter_apply_update_fused(
             backend_->vulkan_runtime(),
             state.storage().vulkan_buffer,
@@ -219,6 +227,8 @@ void CounterStateLinear::apply_update_backward(const Tensor& grad_out, const Ten
         return;
     }
 
+    Tensor scale_new = Tensor::empty(*backend_, {out_}, DType::F32);
+    Tensor denom = Tensor::empty(*backend_, {out_}, DType::F32);
     // pass 1: fused row stats (one 64-wide work-group per output row)
     auto ks = backend_->kernels.get("counter_row_stats_fused_f32");
     ks.set_arg(0, state.buffer());
@@ -261,6 +271,25 @@ void CounterStateLinear::apply_update_backward(const Tensor& grad_out, const Ten
     kc.set_arg(1, scale.buffer());
     kc.set_arg(2, out_);
     kc.launch1d(static_cast<std::size_t>(out_));
+}
+
+void CounterStateLinear::apply_zero_grad_update() {
+    // Exact counterpart of apply_update_backward for grad_out == 0. In the update
+    // kernel g_sq and grad_s both vanish, so the packed state bytes and the row
+    // scale do not move and the only surviving term is v <- beta * v. Consuming
+    // nothing from the seed stream matches the dense path: the seed is drawn at
+    // forward time (CounterBackwardNode is constructed with next_seed()), not here.
+    if (!training_) return;
+    if (backend_->is_vulkan()) {
+        const auto run = run_vulkan_compact_counter_decay_v(
+            backend_->vulkan_runtime(), v.storage().vulkan_buffer,
+            static_cast<std::size_t>(out_), rms_beta_);
+        MCL_CHECK(run.success, std::string("vulkan compact-counter zero-grad update failed: ") + run.error);
+        return;
+    }
+    std::vector<float> host = v.to_vector<float>();
+    for (auto& value : host) value = rms_beta_ * value;
+    v = Tensor::from_cpu(*backend_, {out_}, DType::F32, host.data());
 }
 
 Tensor CounterStateLinear::backward_input_from_state(const Tensor& grad_out) const {
@@ -329,6 +358,38 @@ Tensor CounterStateLinear::forward(const Tensor& x) {
         y.set_requires_grad(true);              // layer must update itself even on a raw (grad-less) input
         y._set_grad_fn(std::make_shared<CounterBackwardNode>(x, this, next_seed()));
     }
+    return y;
+}
+
+Tensor CounterStateLinear::forward_swiglu(const Tensor& x) {
+    const char* fused = std::getenv("MOTIFCL_VK_COUNTER_SWIGLU");
+    if (!backend_->is_vulkan() || !autograd::is_enabled() || !training_ ||
+        !(fused && *fused == '1') || in_ % 4 != 0 || out_ % 8 != 0) {
+        return swiglu(forward(x));
+    }
+    auto& rt = backend_->vulkan_runtime();
+    if (!rt.supports_storage_buffer_i8() || rt.caps().max_workgroup_invocations < 64 ||
+        rt.caps().max_shared_memory_bytes < 8448) {
+        return swiglu(forward(x));
+    }
+    MCL_CHECK(x.backend_ptr() == backend_ && x.dtype() == DType::F32 &&
+              x.ndim() == 2 && x.shape()[0] > 0 && x.shape()[1] == in_,
+              "CounterStateLinear SwiGLU expects same-backend rank-2 f32 input");
+    Tensor packed = Tensor::empty(*backend_, {x.shape()[0], out_}, DType::F32);
+    Tensor y = Tensor::empty(*backend_, {x.shape()[0], out_ / 2}, DType::F32);
+    const auto result = run_vulkan_compact_counter_swiglu_u8(
+        rt, x.storage().vulkan_buffer, state.storage().vulkan_buffer,
+        scale.storage().vulkan_buffer, packed.storage().vulkan_buffer,
+        y.storage().vulkan_buffer, static_cast<std::size_t>(C_),
+        static_cast<std::size_t>(in_), static_cast<std::size_t>(out_),
+        static_cast<std::size_t>(x.shape()[0]));
+    MCL_CHECK(result.success, std::string("vulkan compact-counter SwiGLU failed: ") + result.error);
+    autograd::record_op("compact_counter_swiglu_vulkan_f32",
+                        {x.id(), state.id(), scale.id()}, {packed.id(), y.id()});
+    packed.set_requires_grad(true);
+    packed._set_grad_fn(std::make_shared<CounterBackwardNode>(x, this, next_seed()));
+    y.set_requires_grad(true);
+    y._set_grad_fn(std::make_shared<CounterSwiGLUBackwardNode>(packed));
     return y;
 }
 

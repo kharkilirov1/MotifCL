@@ -19,15 +19,21 @@
 #include <motifcl/motifcl.hpp>
 #include <motifcl/ops/matmul.hpp>
 
-int main() {
+#include "vulkan_p0_test_utils.hpp"
+
+int main(int argc, char** argv) {
     using namespace motifcl;
-    bool ok = true;
-    auto expect = [&](bool condition, const std::string& message) {
-        if (!condition) {
-            std::cerr << message << '\n';
-            ok = false;
-        }
-    };
+    using motifcl_vulkan_p0_test::require_close;
+    try {
+        motifcl_vulkan_p0_test::verify_require_close_controls();
+    } catch (const std::exception& e) {
+        std::cerr << "FAIL GEMM comparator controls: " << e.what() << '\n';
+        return 1;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--comparators-only") {
+        std::cout << "PASS GEMM comparator controls: finite, NaN, Inf, size, tolerance\n";
+        return 0;
+    }
 
     const auto probe = probe_vulkan_runtime();
     if (!probe.available()) {
@@ -105,40 +111,29 @@ int main() {
                 vc = matmul(va, vb);
             }
             const auto got = vc.to_vector<float>();
-            double max_abs = 0.0;
-            double max_rel = 0.0;
-            for (std::size_t i = 0; i < ref.size() && i < got.size(); ++i) {
-                const double diff = std::fabs(static_cast<double>(got[i]) - static_cast<double>(ref[i]));
-                max_abs = std::max(max_abs, diff);
-                const double scale = std::max(1e-6, std::fabs(static_cast<double>(ref[i])));
-                max_rel = std::max(max_rel, diff / scale);
-            }
-            const bool size_ok = got.size() == ref.size();
+            const std::string label = std::string("Vulkan GEMM ") + c.op + " " +
+                std::to_string(c.m) + "x" + std::to_string(c.k) + "x" +
+                std::to_string(c.n);
             // Tolerances are dominated by the reference being f64: the kernel
             // accumulates in f32, so large-K shapes need a scaled bound.
-            const double tol_abs = 1e-4 + 1e-6 * static_cast<double>(k);
-            const bool values_ok = max_abs <= tol_abs;
-            expect(size_ok, std::string("Vulkan GEMM ") + c.op + " output size mismatch for " + std::to_string(c.m) +
-                                "x" + std::to_string(c.k) + "x" + std::to_string(c.n));
-            expect(values_ok, std::string("Vulkan GEMM ") + c.op + " parity mismatch for " + std::to_string(c.m) + "x" +
-                                  std::to_string(c.k) + "x" + std::to_string(c.n) + ": max_abs=" +
-                                  std::to_string(max_abs) + " max_rel=" + std::to_string(max_rel) +
-                                  " tol=" + std::to_string(tol_abs));
-            if (size_ok && values_ok) {
-                std::printf("  %-3s %5lld x %5lld x %5lld  max_abs=%.3e\n", c.op,
-                            static_cast<long long>(c.m), static_cast<long long>(c.k),
-                            static_cast<long long>(c.n), max_abs);
+            const float tol_abs = 1e-4f + 1e-6f * static_cast<float>(k);
+            // The same comparator checked by the CPU-only negative controls
+            // validates every element before diagnostic maxima are accumulated.
+            require_close(got, ref, tol_abs, label);
+            double max_abs = 0.0;
+            for (std::size_t i = 0; i < ref.size(); ++i) {
+                const double diff = std::fabs(static_cast<double>(got[i]) - static_cast<double>(ref[i]));
+                max_abs = std::max(max_abs, diff);
             }
+            std::printf("  %-3s %5lld x %5lld x %5lld  max_abs=%.3e\n", c.op,
+                        static_cast<long long>(c.m), static_cast<long long>(c.k),
+                        static_cast<long long>(c.n), max_abs);
         }
     } catch (const std::exception& e) {
         std::cerr << "Vulkan GEMM parity threw: " << e.what() << '\n';
         return 1;
     }
 
-    if (!ok) {
-        std::cerr << "FAIL test_vulkan_gemm_parity\n";
-        return 1;
-    }
     std::printf("PASS test_vulkan_gemm_parity: nn/nt/tn layouts match a host reference\n");
     return 0;
 }

@@ -1,0 +1,172 @@
+// Fused packed counter GEMM + SwiGLU. A 32x16 hidden tile accumulates the
+// gate and up projections together, sharing the double-buffered activation.
+// The complete [batch,2*hidden] preactivation is also saved for backward.
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 4, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { vec4 A4[]; };
+layout(std430, set = 0, binding = 1) readonly buffer StateBuf { uint8_t state[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ScaleBuf { float scale[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer PreBuf { vec4 pre4[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer OutBuf { vec4 out4[]; };
+
+layout(push_constant) uniform Push {
+    uint C;
+    uint in_features;
+    uint out_features;
+    uint batch;
+} p;
+
+#define MR 32
+#define NR 16
+#define KT 16
+#define LANES 64
+#define MQ (MR / 4)
+#define NQ (NR / 4)
+#define A_PER_LANE (MR * KT / 4 / LANES)
+
+shared vec4 As[2][KT][MQ];
+shared vec4 Wg[2][KT][NQ];
+shared vec4 Wu[2][KT][NQ];
+shared int tlut[64];
+
+int ternary_from_code(int code, int levels) {
+    if (code < levels) return -1;
+    if (code < 2 * levels) return 0;
+    if (code < 3 * levels) return 1;
+    return code / levels - 1;
+}
+
+void load_a(uint lid, uint m0, uint kt, out vec4 r0, out vec4 r1) {
+    for (int i = 0; i < A_PER_LANE; ++i) {
+        const uint idx = lid + uint(i) * uint(LANES);
+        const uint row = m0 + (idx >> 2);
+        const uint gk = kt + (idx & 3u) * 4u;
+        vec4 value = vec4(0.0);
+        if (row < p.batch && gk < p.in_features) {
+            value = A4[(row * p.in_features + gk) >> 2];
+        }
+        if (i == 0) r0 = value; else r1 = value;
+    }
+}
+
+void store_a(int buf, uint lid, vec4 r0, vec4 r1) {
+    for (int i = 0; i < A_PER_LANE; ++i) {
+        const vec4 value = i == 0 ? r0 : r1;
+        const uint idx = lid + uint(i) * uint(LANES);
+        const uint row = idx >> 2;
+        const uint kq = idx & 3u;
+        const uint q = row >> 2;
+        const uint e = row & 3u;
+        As[buf][kq * 4u + 0u][q][e] = value.x;
+        As[buf][kq * 4u + 1u][q][e] = value.y;
+        As[buf][kq * 4u + 2u][q][e] = value.z;
+        As[buf][kq * 4u + 3u][q][e] = value.w;
+    }
+}
+
+vec4 decode_group(uint row, uint gk) {
+    const uint base = (row * (p.in_features / 4u) + (gk >> 2)) * 3u;
+    const int b0 = int(uint(state[base]));
+    const int b1 = int(uint(state[base + 1u]));
+    const int b2 = int(uint(state[base + 2u]));
+    const float s = scale[row];
+    return vec4(
+        s * float(tlut[b0 & 0x3F]),
+        s * float(tlut[((b0 >> 6) | (b1 << 2)) & 0x3F]),
+        s * float(tlut[((b1 >> 4) | (b2 << 4)) & 0x3F]),
+        s * float(tlut[(b2 >> 2) & 0x3F]));
+}
+
+void load_weights(uint lid, uint n0, uint kt, out vec4 gate, out vec4 up) {
+    const uint hidden = p.out_features / 2u;
+    const uint column = n0 + (lid >> 2);
+    const uint gk = kt + (lid & 3u) * 4u;
+    gate = vec4(0.0);
+    up = vec4(0.0);
+    if (column < hidden && gk < p.in_features) {
+        gate = decode_group(column, gk);
+        up = decode_group(column + hidden, gk);
+    }
+}
+
+void store_weights(int buf, uint lid, vec4 gate, vec4 up) {
+    const uint column = lid >> 2;
+    const uint kg = lid & 3u;
+    const uint q = column >> 2;
+    const uint e = column & 3u;
+    Wg[buf][kg * 4u + 0u][q][e] = gate.x;
+    Wg[buf][kg * 4u + 1u][q][e] = gate.y;
+    Wg[buf][kg * 4u + 2u][q][e] = gate.z;
+    Wg[buf][kg * 4u + 3u][q][e] = gate.w;
+    Wu[buf][kg * 4u + 0u][q][e] = up.x;
+    Wu[buf][kg * 4u + 1u][q][e] = up.y;
+    Wu[buf][kg * 4u + 2u][q][e] = up.z;
+    Wu[buf][kg * 4u + 3u][q][e] = up.w;
+}
+
+void emit(uint row, uint column, vec4 gate, vec4 up) {
+    const uint hidden = p.out_features / 2u;
+    if (row >= p.batch || column >= hidden) return;
+    // hidden % 4 == 0, so every valid column starts a complete vec4.
+    pre4[(row * p.out_features + column) >> 2] = gate;
+    pre4[(row * p.out_features + hidden + column) >> 2] = up;
+    const vec4 sigmoid = vec4(1.0) / (vec4(1.0) + exp(-gate));
+    out4[(row * hidden + column) >> 2] = gate * sigmoid * up;
+}
+
+void main() {
+    const uint lcol = gl_LocalInvocationID.x;
+    const uint lrow = gl_LocalInvocationID.y;
+    const uint lid = lrow * 4u + lcol;
+    const uint n0 = gl_WorkGroupID.x * uint(NR);
+    const uint m0 = gl_WorkGroupID.y * uint(MR);
+    const uint ktiles = (p.in_features + uint(KT) - 1u) / uint(KT);
+
+    tlut[lid] = ternary_from_code(int(lid), int(2u * p.C - 1u));
+    barrier();
+
+    vec4 ra0 = vec4(0.0), ra1 = vec4(0.0);
+    vec4 rg = vec4(0.0), ru = vec4(0.0);
+    load_a(lid, m0, 0u, ra0, ra1);
+    load_weights(lid, n0, 0u, rg, ru);
+    store_a(0, lid, ra0, ra1);
+    store_weights(0, lid, rg, ru);
+    barrier();
+
+    vec4 ag0 = vec4(0.0), ag1 = vec4(0.0);
+    vec4 au0 = vec4(0.0), au1 = vec4(0.0);
+    uint cur = 0u;
+    for (uint tile = 0u; tile < ktiles; ++tile) {
+        const bool has_next = tile + 1u < ktiles;
+        if (has_next) {
+            const uint kt = (tile + 1u) * uint(KT);
+            load_a(lid, m0, kt, ra0, ra1);
+            load_weights(lid, n0, kt, rg, ru);
+        }
+        for (int kk = 0; kk < KT; ++kk) {
+            const vec4 a = As[cur][kk][lrow >> 1];
+            const float a0 = (lrow & 1u) == 0u ? a.x : a.z;
+            const float a1 = (lrow & 1u) == 0u ? a.y : a.w;
+            const vec4 gate = Wg[cur][kk][lcol];
+            const vec4 up = Wu[cur][kk][lcol];
+            ag0 += a0 * gate;
+            ag1 += a1 * gate;
+            au0 += a0 * up;
+            au1 += a1 * up;
+        }
+        if (has_next) {
+            store_a(int(cur ^ 1u), lid, ra0, ra1);
+            store_weights(int(cur ^ 1u), lid, rg, ru);
+        }
+        barrier();
+        cur ^= 1u;
+    }
+
+    const uint row0 = m0 + lrow * 2u;
+    const uint col0 = n0 + lcol * 4u;
+    emit(row0 + 0u, col0, ag0, au0);
+    emit(row0 + 1u, col0, ag1, au1);
+}

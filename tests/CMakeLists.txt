@@ -49,6 +49,12 @@ set(MOTIFCL_TESTS
     test_moe7_balance
     test_counter_memory_vulkan
     test_vulkan_gemm_parity
+    test_vulkan_gqa_causal8_fwd
+    test_vulkan_counter_memory_batch
+    test_vulkan_cpu_hotpath
+    test_vulkan_moe_sparse
+    test_vulkan_moe_sparse_path
+    test_vulkan_moe7_zero_grad
 )
 
 # MinGW test executables need the toolchain runtime DLLs (libstdc++-6.dll,
@@ -87,10 +93,36 @@ if(TARGET motifcl)
 endif()
 
 if(TARGET motifcl_vulkan_runtime)
+    foreach(test_name test_vulkan_counter_validation test_vulkan_ce_cached test_vulkan_rmsnorm_split test_vulkan_counter_swiglu test_vulkan_moe_balance_update)
+        add_executable(${test_name} ${test_name}.cpp)
+        target_link_libraries(${test_name} PRIVATE motifcl_vulkan_runtime)
+        motifcl_apply_compiler_options(${test_name})
+        motifcl_register_test(${test_name})
+    endforeach()
     add_executable(test_vulkan_runtime_standalone test_vulkan_runtime_standalone.cpp)
     target_link_libraries(test_vulkan_runtime_standalone PRIVATE motifcl_vulkan_runtime)
     motifcl_apply_compiler_options(test_vulkan_runtime_standalone)
     motifcl_register_test(test_vulkan_runtime_standalone)
+    add_executable(test_vulkan_moe_balance_tensor test_vulkan_moe_balance_tensor.cpp)
+    target_link_libraries(test_vulkan_moe_balance_tensor PRIVATE motifcl)
+    motifcl_apply_compiler_options(test_vulkan_moe_balance_tensor)
+    motifcl_register_test(test_vulkan_moe_balance_tensor)
+    add_executable(bench_vulkan_training_hotpaths bench_vulkan_training_hotpaths.cpp)
+    target_link_libraries(bench_vulkan_training_hotpaths PRIVATE motifcl_vulkan_runtime)
+    motifcl_apply_compiler_options(bench_vulkan_training_hotpaths)
+endif()
+
+if(TARGET motifcl)
+    add_executable(test_vulkan_ce_autograd test_vulkan_ce_cached.cpp)
+    target_compile_definitions(test_vulkan_ce_autograd PRIVATE MOTIFCL_CE_AUTOGRAD_TEST=1)
+    target_link_libraries(test_vulkan_ce_autograd PRIVATE motifcl)
+    motifcl_apply_compiler_options(test_vulkan_ce_autograd)
+    motifcl_register_test(test_vulkan_ce_autograd)
+    add_executable(test_vulkan_counter_swiglu_autograd test_vulkan_counter_swiglu.cpp)
+    target_compile_definitions(test_vulkan_counter_swiglu_autograd PRIVATE MOTIFCL_COUNTER_SWIGLU_AUTOGRAD_TEST=1)
+    target_link_libraries(test_vulkan_counter_swiglu_autograd PRIVATE motifcl)
+    motifcl_apply_compiler_options(test_vulkan_counter_swiglu_autograd)
+    motifcl_register_test(test_vulkan_counter_swiglu_autograd)
 endif()
 
 # Throughput bench (not a ctest): stories15M-shaped counter train step.

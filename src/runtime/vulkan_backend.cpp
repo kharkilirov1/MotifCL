@@ -260,6 +260,7 @@ constexpr VkPipelineStageFlags VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT = 0x00000001u;
 constexpr VkPipelineStageFlags VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT = 0x00000800u;
 constexpr VkPipelineStageFlags VK_PIPELINE_STAGE_TRANSFER_BIT = 0x00001000u;
 constexpr VkPipelineStageFlags VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT = 0x00002000u;
+constexpr VkPipelineStageFlags VK_PIPELINE_STAGE_ALL_COMMANDS_BIT = 0x00010000u;
 
 constexpr VkFlags VK_ACCESS_SHADER_READ_BIT = 0x00000020u;
 constexpr VkFlags VK_ACCESS_SHADER_WRITE_BIT = 0x00000040u;
@@ -4747,9 +4748,17 @@ struct VulkanRuntime::Impl {
     double last_gpu_us = -1.0;
 
     // --- opt-in per-kernel GPU profiler (MOTIFCL_VK_PROFILE=1) --------------
-    // One timestamp is recorded before every dispatch in a batch plus one after
-    // the last, so each dispatch's GPU time is the delta between adjacent
-    // stamps. Totals accumulate per kernel name until the caller resets them.
+    // Two timestamps are recorded per dispatch: one immediately before it at
+    // COMPUTE_SHADER (cheap, no pipeline drain) and one immediately after it at
+    // ALL_COMMANDS, which by definition cannot be written until the dispatch and
+    // every write it issued have completed. The per-dispatch time is therefore
+    // end-start, and it *includes* the dispatch's own drain, which is what a
+    // caller wants to attribute. An earlier version used one stamp before each
+    // dispatch, which measures issue-to-issue: the drain of the previous kernel
+    // lands in the following gap, no kernel owns it, and the per-kernel totals
+    // come out several times too small (measured 226 us attributed against
+    // 1036 us wall on the sparse prefill case).
+    // Totals accumulate per kernel name until the caller resets them.
     // Zero cost when disabled: no query writes, no extra pool.
     bool profile_enabled = false;
     VkQueryPool profile_pool = nullptr;
@@ -4764,6 +4773,47 @@ struct VulkanRuntime::Impl {
     std::unordered_map<const void*, std::size_t> profile_index;
     std::vector<KernelProfileEntry> profile_entries;
     bool profile_batch_overflow = false;
+    // End stamp of the previous dispatch is written lazily, after the consumer
+    // barrier of the next dispatch: the barrier is what forces the previous
+    // dispatch's writes (and therefore its drain) to complete, so stamping after
+    // it is the only placement that measures execution rather than issue. The
+    // cost of that barrier is attributed to the dispatch that caused it.
+    std::uint32_t profile_pending_end = 0;
+    bool profile_pending_end_valid = false;
+    // Per-stage CPU cost of recording a dispatch (MOTIFCL_VK_RECORD_PROFILE=1).
+    // Recording dominates the wall clock on this runtime, so it is measured
+    // separately from GPU execution instead of being lumped into "record".
+    struct RecordProfile {
+        double pipeline = 0.0;
+        double descriptor_alloc = 0.0;
+        double descriptor_update = 0.0;
+        double commands = 0.0;
+        std::uint64_t dispatches = 0;
+    } record_profile_us;
+    bool record_profile_enabled = false;
+    bool trace_immediate = false;
+    // MOTIFCL_VK_OP_PROFILE=1: host time spent OUTSIDE fast_dispatch, attributed
+    // to the dispatch it follows. The record profiler already shows that Vulkan
+    // command recording is ~3 us/dispatch, so any remaining CPU cost per step
+    // lives in the op/Tensor layer above it; this separates the two.
+    struct OpGapEntry {
+        double gap_us = 0.0;
+        std::uint64_t gaps = 0;
+    };
+    std::unordered_map<std::string, OpGapEntry> op_gap;
+    std::chrono::steady_clock::time_point op_last_exit{};
+    std::string op_last_name;
+    bool op_gap_pending = false;
+    bool op_gap_enabled = false;
+    std::uint64_t op_gap_count = 0;
+    // Allocation accounting (printed with the op-gap report). A pooled hit is a
+    // map lookup; a slow allocation is vkCreateBuffer + vkAllocateMemory, which
+    // is the only per-op cost big enough to explain tens of milliseconds.
+    std::uint64_t alloc_calls = 0;
+    std::uint64_t alloc_pooled = 0;
+    std::uint64_t alloc_slow = 0;
+    double alloc_us = 0.0;
+    std::vector<std::pair<std::size_t, bool>> alloc_missed;
     // Wall time spent in vkQueueSubmit + vkWaitForFences for the last batch, and
     // total submits, so callers can separate GPU work from submit overhead.
     double last_submit_us = -1.0;
@@ -4803,7 +4853,7 @@ struct VulkanRuntime::Impl {
 
     void accumulate_profile(std::uint32_t dispatch_count) {
         if (!profile_pool || dispatch_count == 0) return;
-        const std::uint32_t queries = dispatch_count + 1;
+        const std::uint32_t queries = 2u * dispatch_count;
         std::vector<std::uint64_t> stamps(queries, 0);
         const VkResult rc = get_query_pool_results(device, profile_pool, 0, queries,
                                                    queries * sizeof(std::uint64_t), stamps.data(),
@@ -4817,8 +4867,8 @@ struct VulkanRuntime::Impl {
         const double ns_per_tick = caps.timestamp_period_ns;
         if (!(ns_per_tick > 0.0)) return;
         for (std::uint32_t i = 0; i < dispatch_count; ++i) {
-            const std::uint64_t begin = stamps[i] & mask;
-            const std::uint64_t end = stamps[i + 1] & mask;
+            const std::uint64_t begin = stamps[2u * i] & mask;
+            const std::uint64_t end = stamps[2u * i + 1u] & mask;
             const std::uint64_t delta = end >= begin ? end - begin : (mask - begin) + end + 1;
             const void* spirv = profile_batch_kernels[i];
             auto it = profile_index.find(spirv);
@@ -4838,6 +4888,17 @@ struct VulkanRuntime::Impl {
         }
     }
 
+    // Emits the pending end stamp of the previous dispatch. Every caller places
+    // it after a compute->compute barrier, which is the only point where the
+    // dispatch's writes are guaranteed complete, so the stamp measures the
+    // dispatch's real execution instead of its launch.
+    void flush_profile_end() {
+        if (!profile_pending_end_valid) return;
+        cmd_write_timestamp(fast_command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, profile_pool,
+                            profile_pending_end);
+        profile_pending_end_valid = false;
+    }
+
     bool batch_open = false;
     std::uint32_t batch_dispatch_count = 0;
     std::string batch_error;
@@ -4847,6 +4908,7 @@ struct VulkanRuntime::Impl {
     // batch_end, and destroying their VkBuffer mid-recording would leave the
     // command buffer referencing freed memory.
     std::vector<std::shared_ptr<VulkanBuffer::Impl>> batch_keepalive;
+    std::unordered_map<std::string, std::weak_ptr<VulkanBuffer::Impl>> scratch_buffers;
 
     bool fast_ready = false;
     std::string fast_error;
@@ -4874,7 +4936,16 @@ struct VulkanRuntime::Impl {
     // not correctness: past it buffers are destroyed and re-created as before.
     static constexpr std::size_t kBufferPoolCapBytes = 6144u * 1024u * 1024u;
     static constexpr std::size_t kBufferPoolMaxAllocations = 4096;
-    static constexpr std::size_t kBufferPoolMaxPerBucket = 256;
+        // Per-bucket retention. The old value (256) evicted the tail of the MoE
+    // step's working set -- the step needs ~630 concurrent allocations and many
+    // of them land in the same power-of-two bucket -- so those buffers were
+    // destroyed at the end of every step and re-allocated at the start of the
+    // next one. On this card that is expensive out of proportion to the size:
+    // VRAM sits at 99.5% occupancy, so each fresh vkAllocateMemory pays for
+    // driver eviction (~700 us measured, regardless of a 256-byte or 64 KB
+    // request). Raising the cap took the trainer from 35 to 28 pool misses per
+    // step and cut 6 ms of host time. The byte cap still bounds total retention.
+    static constexpr std::size_t kBufferPoolMaxPerBucket = 2048;
 
     void pool_release(VkBuffer buffer, VkDeviceMemory memory, std::size_t capacity, bool host_visible) {
         if (!device || !ready || capacity == 0) {
@@ -5138,7 +5209,17 @@ struct VulkanRuntime::Impl {
         fast_ready = true;
         const char* profile_env = std::getenv("MOTIFCL_VK_PROFILE");
         profile_enabled = profile_env && *profile_env && *profile_env != '0' && caps.timestamps;
-        if (profile_enabled) ensure_profile_pool(2048u);
+        if (profile_enabled) ensure_profile_pool(8192u);  // 2 queries per dispatch
+        const char* record_env = std::getenv("MOTIFCL_VK_RECORD_PROFILE");
+        record_profile_enabled = record_env && *record_env && *record_env != '0';
+        // MOTIFCL_VK_TRACE_IMMEDIATE=1 names every dispatch that had to be
+        // submitted on its own (no open batch), i.e. every dispatch that pays a
+        // full submit + fence wait. Used to find the ops that escape the
+        // trainer's batch_begin/batch_end window.
+        const char* trace_env = std::getenv("MOTIFCL_VK_TRACE_IMMEDIATE");
+        trace_immediate = trace_env && *trace_env && *trace_env != '0';
+        const char* gap_env = std::getenv("MOTIFCL_VK_OP_PROFILE");
+        op_gap_enabled = gap_env && *gap_env && *gap_env != '0';
         return true;
     }
 
@@ -5341,6 +5422,7 @@ struct VulkanRuntime::Impl {
             cmd_reset_query_pool(fast_command_buffer, profile_pool, 0, profile_query_capacity);
             profile_batch_kernels.clear();
             profile_batch_overflow = false;
+            profile_pending_end_valid = false;
         }
         if (batch_timed) {
             cmd_reset_query_pool(fast_command_buffer, query_pool, 0, 2);
@@ -5362,13 +5444,24 @@ struct VulkanRuntime::Impl {
             result.success = false;
             return result;
         };
+        if (profile_pending_end_valid) {
+            // Last dispatch of the submission: drain it with an explicit
+            // compute->compute barrier so its end stamp is real.
+            const VkMemoryBarrier drain{
+                VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                nullptr,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            };
+            cmd_pipeline_barrier(fast_command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &drain, 0, nullptr, 0, nullptr);
+            flush_profile_end();
+        }
         if (batch_timed) {
             cmd_write_timestamp(fast_command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
         }
-        if (profile_enabled && profile_pool && !profile_batch_kernels.empty()) {
-            cmd_write_timestamp(fast_command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, profile_pool,
-                                static_cast<std::uint32_t>(profile_batch_kernels.size()));
-        }
+        // The profiler no longer needs a trailing stamp: every dispatch already
+        // ends with its own stamp after a drain barrier (see flush_profile_end).
         if (end_command_buffer(fast_command_buffer) != VK_SUCCESS) {
             return fail_submit("vkEndCommandBuffer failed for cached dispatch");
         }
@@ -5418,6 +5511,52 @@ struct VulkanRuntime::Impl {
             accumulate_profile(static_cast<std::uint32_t>(profile_batch_kernels.size()));
             profile_batch_kernels.clear();
         }
+        if (record_profile_enabled && record_profile_us.dispatches > 0) {
+            const double n = static_cast<double>(record_profile_us.dispatches);
+            const double total = record_profile_us.pipeline + record_profile_us.descriptor_alloc +
+                                 record_profile_us.descriptor_update + record_profile_us.commands;
+            std::fprintf(stderr,
+                         "[record] %llu dispatches  total %.2f ms  per-dispatch %.1f us"
+                         "  (pipeline %.1f, desc_alloc %.1f, desc_update %.1f, commands %.1f us)\n",
+                         static_cast<unsigned long long>(record_profile_us.dispatches), total * 1e-3, total / n,
+                         record_profile_us.pipeline / n, record_profile_us.descriptor_alloc / n,
+                         record_profile_us.descriptor_update / n, record_profile_us.commands / n);
+            record_profile_us = RecordProfile{};
+        }
+        // Only batches large enough to be a real graph pass are interesting; the
+        // validation pass submits one dispatch at a time and would drown the report.
+        if (op_gap_enabled && op_gap_count >= 32 && !op_gap.empty()) {
+            std::vector<std::pair<std::string, OpGapEntry>> rows(op_gap.begin(), op_gap.end());
+            std::sort(rows.begin(), rows.end(),
+                      [](const std::pair<std::string, OpGapEntry>& l, const std::pair<std::string, OpGapEntry>& r) {
+                          return l.second.gap_us > r.second.gap_us;
+                      });
+            double gap_total = 0.0;
+            for (const auto& row : rows) gap_total += row.second.gap_us;
+            std::fprintf(stderr,
+                         "[opgap] %.2f ms host time outside dispatch, %zu distinct kernels; "
+                         "buffers %llu calls (%llu pooled, %llu slow) %.2f ms\n",
+                         gap_total * 1e-3, rows.size(), static_cast<unsigned long long>(alloc_calls),
+                         static_cast<unsigned long long>(alloc_pooled), static_cast<unsigned long long>(alloc_slow),
+                         alloc_us * 1e-3);
+            for (std::size_t i = 0; i < rows.size() && i < 12; ++i) {
+                const double n = static_cast<double>(rows[i].second.gaps);
+                std::fprintf(stderr, "[opgap]   %-42s %8.2f ms  %5llu gaps  %7.1f us/gap\n",
+                             rows[i].first.c_str(), rows[i].second.gap_us * 1e-3,
+                             static_cast<unsigned long long>(rows[i].second.gaps),
+                             n > 0.0 ? rows[i].second.gap_us / n : 0.0);
+            }
+            for (const auto& miss : alloc_missed) {
+                std::fprintf(stderr, "[opgap]   slow alloc bucket %zu bytes\n", miss.first);
+            }
+            op_gap.clear();
+            op_gap_pending = false;
+        }
+        op_gap_count = 0;
+        alloc_calls = alloc_pooled = alloc_slow = 0;
+        alloc_us = 0.0;
+        alloc_missed.clear();
+        if (op_gap_enabled) op_gap.clear();
         recycle_inflight_sets();
         result.success = true;
         return result;
@@ -5435,6 +5574,14 @@ struct VulkanRuntime::Impl {
                                  std::uint32_t group_count_z) {
         VulkanOpResult result;
         result.device_name = device_name;
+        const char* gap_name = op_gap_enabled ? spirv_kernel_name(spirv) : nullptr;
+        if (op_gap_enabled && op_gap_pending) {
+            const auto gap_now = std::chrono::steady_clock::now();
+            auto& gap = op_gap[op_last_name];
+            gap.gap_us += std::chrono::duration<double, std::micro>(gap_now - op_last_exit).count();
+            ++gap.gaps;
+            ++op_gap_count;
+        }
         auto fail_dispatch = [&](const std::string& message) {
             result.error = message;
             result.success = false;
@@ -5447,13 +5594,29 @@ struct VulkanRuntime::Impl {
             return fail_dispatch("push constant payload exceeds device limit");
         }
 
+        // Optional record-cost profiler (MOTIFCL_VK_RECORD_PROFILE=1): where the
+        // per-dispatch CPU time goes. Recording, not execution, is the wall-clock
+        // bottleneck on this runtime (~70 us/dispatch measured), so the stages
+        // have to be separable before anything is "optimised".
+        const bool rec_prof = record_profile_enabled;
+        const auto rec_t0 = rec_prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        auto rec_split = [&](double& sink) {
+            if (!rec_prof) return;
+            const auto now = std::chrono::steady_clock::now();
+            sink += std::chrono::duration<double, std::micro>(now - rec_t0).count();
+        };
+        double stage_t = 0.0;
+        (void)stage_t;
+
         VkPipeline pipeline = get_pipeline(spirv, spirv_word_count, buffer_count, push_bytes);
         if (!pipeline) return fail_dispatch(fast_error);
         LayoutEntry* layouts = get_layout(buffer_count, push_bytes);
         if (!layouts) return fail_dispatch(fast_error);
+        rec_split(record_profile_us.pipeline);
         VkDescriptorSet set = acquire_descriptor_set(buffer_count, layouts->set_layout);
         if (!set) return fail_dispatch(fast_error);
         inflight_descriptor_sets.emplace_back(buffer_count, set);
+        rec_split(record_profile_us.descriptor_alloc);
 
         std::array<VkDescriptorBufferInfo, 16> buffer_infos{};
         std::array<VkWriteDescriptorSet, 16> writes{};
@@ -5473,6 +5636,7 @@ struct VulkanRuntime::Impl {
             };
         }
         update_descriptor_sets(device, buffer_count, writes.data(), 0, nullptr);
+        rec_split(record_profile_us.descriptor_update);
 
         if (!batch_open) {
             if (!begin_fast_commands(timing_enabled)) return fail_dispatch(fast_error);
@@ -5485,6 +5649,10 @@ struct VulkanRuntime::Impl {
             };
             cmd_pipeline_barrier(fast_command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+            // That barrier is the point where the previous dispatch's writes must
+            // be visible, so its end stamp goes here and not right after the
+            // dispatch (where it would measure launch, not completion).
+            flush_profile_end();
         }
 
         cmd_bind_pipeline(fast_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
@@ -5494,10 +5662,15 @@ struct VulkanRuntime::Impl {
             cmd_push_constants(fast_command_buffer, layouts->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                push_bytes, push_data);
         }
+        bool profile_slot_valid = false;
+        std::uint32_t profile_slot = 0;
         if (profile_enabled && profile_pool && !profile_batch_overflow) {
             const auto index = static_cast<std::uint32_t>(profile_batch_kernels.size());
-            if (index + 1 < profile_query_capacity) {
-                cmd_write_timestamp(fast_command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, profile_pool, index);
+            if (2u * index + 2u <= profile_query_capacity) {
+                profile_slot = index;
+                profile_slot_valid = true;
+                cmd_write_timestamp(fast_command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, profile_pool,
+                                    2u * index);
                 profile_batch_kernels.push_back(spirv);
             } else {
                 profile_batch_overflow = true;
@@ -5505,11 +5678,31 @@ struct VulkanRuntime::Impl {
             }
         }
         cmd_dispatch(fast_command_buffer, group_count_x, group_count_y, group_count_z);
+        if (rec_prof) {
+            rec_split(record_profile_us.commands);
+            ++record_profile_us.dispatches;
+        }
+        // gap_name is only resolved when the flag was already set on entry; the
+        // flag itself is established by ensure_fast_path() on the first call, so
+        // both sides must test the name, not just the flag.
+        if (op_gap_enabled && gap_name) {
+            op_last_exit = std::chrono::steady_clock::now();
+            op_last_name = gap_name;
+            op_gap_pending = true;
+        }
+        if (profile_slot_valid) {
+            profile_pending_end = 2u * profile_slot + 1u;
+            profile_pending_end_valid = true;
+        }
 
         if (batch_open) {
             ++batch_dispatch_count;
             result.success = true;
             return result;
+        }
+        if (trace_immediate) {
+            std::fprintf(stderr, "[immediate] %s  gx=%u gy=%u gz=%u buffers=%u\n", spirv_kernel_name(spirv),
+                         group_count_x, group_count_y, group_count_z, buffer_count);
         }
         return submit_fast_commands();
     }
@@ -5524,6 +5717,7 @@ struct VulkanRuntime::Impl {
         batch_open = true;
         batch_dispatch_count = 0;
         batch_error.clear();
+        if (trace_immediate) std::fprintf(stderr, "[batch] begin\n");
         return true;
     }
 
@@ -5541,6 +5735,9 @@ struct VulkanRuntime::Impl {
             result.error = batch_error;
             batch_error.clear();
             return result;
+        }
+        if (trace_immediate) {
+            std::fprintf(stderr, "[batch] end recorded=%u\n", batch_dispatch_count);
         }
         if (batch_dispatch_count == 0) {
             // Nothing recorded; discard the empty command buffer.
@@ -6739,6 +6936,19 @@ void VulkanBuffer::download(void* data, std::size_t bytes, std::size_t offset) c
 }
 
 VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initial_data) {
+    struct AllocScope {
+        VulkanRuntime::Impl* self;
+        std::chrono::steady_clock::time_point t0;
+        bool on;
+        ~AllocScope() {
+            if (!on) return;
+            self->alloc_us +=
+                std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+        }
+    };
+    const AllocScope alloc_scope{impl_.get(), std::chrono::steady_clock::now(),
+                                 impl_ && impl_->op_gap_enabled};
+    if (impl_ && impl_->op_gap_enabled) ++impl_->alloc_calls;
     if (!available()) {
         throw std::runtime_error(error().empty() ? "Vulkan runtime is not available" : error());
     }
@@ -6754,7 +6964,7 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
     // Default: prefer device-local VRAM for tensor storage buffers (the pre-FOG
     // order). Training activations in system RAM make every dispatch read and
     // write over PCIe: an A/B on the RX 580 measured 2.0x on the MoE trainer and
-    // 2.8x on the dense trainer for bit-identical losses, so VRAM is the default
+    // 2.8x on the dense trainer, so VRAM is the default
     // and MOTIFCL_VK_PREFER_DEVICE_LOCAL=0 opts back into the host-visible/GTT
     // policy. Allocation still falls back to BAR then host memory when VRAM is
     // full, so an oversized model degrades instead of failing.
@@ -6817,6 +7027,7 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
             }
         }
         if (served) {
+            if (impl_->op_gap_enabled) ++impl_->alloc_pooled;
             auto buffer_impl = std::make_shared<VulkanBuffer::Impl>(impl_, pooled_buffer, pooled_memory, nbytes,
                                                                     served_host_visible, bucket);
             VulkanBuffer out(std::move(buffer_impl));
@@ -6825,6 +7036,10 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
         }
     }
 
+    if (impl_->op_gap_enabled) {
+        ++impl_->alloc_slow;
+        if (impl_->alloc_missed.size() < 8) impl_->alloc_missed.emplace_back(bucket, prefer_device_local);
+    }
     const VkBufferCreateInfo buffer_create_info{
         VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         nullptr,
@@ -6937,6 +7152,23 @@ VulkanBuffer VulkanRuntime::create_buffer(std::size_t nbytes, const void* initia
     VulkanBuffer out(std::move(buffer_impl));
     if (initial_data) out.upload(initial_data, nbytes);
     return out;
+}
+
+VulkanBuffer VulkanRuntime::create_scratch_buffer(const std::string& slot, std::size_t nbytes) {
+    if (!available()) throw std::runtime_error("Vulkan workspace requires an available runtime");
+    if (slot.empty() || nbytes == 0) throw std::runtime_error("Vulkan workspace requires a slot and non-zero size");
+    auto& cached = impl_->scratch_buffers[slot];
+    if (auto buffer = cached.lock()) {
+        if (buffer->nbytes >= nbytes) return VulkanBuffer(std::move(buffer));
+    }
+    if (nbytes > std::numeric_limits<std::size_t>::max() / 2 + 1) {
+        throw std::runtime_error("Vulkan workspace capacity overflows size_t");
+    }
+    std::size_t capacity = 256;
+    while (capacity < nbytes) capacity <<= 1;
+    auto buffer = create_buffer(capacity);
+    cached = buffer.impl_;
+    return buffer;
 }
 
 VulkanOpResult VulkanRuntime::dispatch_cached(const std::uint32_t* spirv,
@@ -8168,7 +8400,7 @@ VulkanOpResult run_vulkan_softmax_rows(VulkanRuntime& runtime,
         std::uint32_t cols;
     } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
     const std::vector<const VulkanBuffer*> buffers = {&x, &out};
-    const bool use_sg = runtime.caps().subgroup_arithmetic_compute;
+    const bool use_sg = runtime.caps().supports_wave64_arithmetic();
     const auto* spirv = use_sg ? vkspirv::k_softmax_rows_f32_subgroup : vkspirv::k_softmax_rows_f32;
     const auto words = use_sg ? vkspirv::k_softmax_rows_f32_subgroup_words : vkspirv::k_softmax_rows_f32_words;
     return runtime.dispatch_cached(spirv, words, buffers,
@@ -8229,7 +8461,7 @@ VulkanOpResult run_vulkan_rmsnorm(VulkanRuntime& runtime,
         float eps;
     } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols), eps};
     const std::vector<const VulkanBuffer*> buffers = {&x, &weight, &out};
-    const bool use_sg = runtime.caps().subgroup_arithmetic_compute;
+    const bool use_sg = runtime.caps().supports_wave64_arithmetic();
     const auto* spirv = use_sg ? vkspirv::k_rmsnorm_f32_subgroup : vkspirv::k_rmsnorm_f32;
     const auto words = use_sg ? vkspirv::k_rmsnorm_f32_subgroup_words : vkspirv::k_rmsnorm_f32_words;
     return runtime.dispatch_cached(spirv, words, buffers, &push,
@@ -8263,7 +8495,7 @@ VulkanOpResult run_vulkan_rmsnorm_backward_x(VulkanRuntime& runtime,
         float eps;
     } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols), eps};
     const std::vector<const VulkanBuffer*> buffers = {&x, &weight, &grad_out, &grad_x};
-    const bool use_sg = runtime.caps().subgroup_arithmetic_compute;
+    const bool use_sg = runtime.caps().supports_wave64_arithmetic();
     const auto* spirv = use_sg ? vkspirv::k_rmsnorm_bwd_x_f32_subgroup : vkspirv::k_rmsnorm_bwd_x_f32;
     const auto words = use_sg ? vkspirv::k_rmsnorm_bwd_x_f32_subgroup_words : vkspirv::k_rmsnorm_bwd_x_f32_words;
     return runtime.dispatch_cached(spirv, words, buffers,
@@ -8296,6 +8528,19 @@ VulkanOpResult run_vulkan_rmsnorm_backward_weight(VulkanRuntime& runtime,
     }
     if (grad_weight.nbytes() < cols * sizeof(float)) {
         return fail("Vulkan RMSNorm weight backward output buffer is too small");
+    }
+
+    const char* split_mode = std::getenv("MOTIFCL_VK_RMS_DW_SPLIT");
+    if (split_mode && *split_mode >= '1' && *split_mode <= '9' &&
+        rows >= 256 && rows <= 65535 && cols <= 1024) {
+        auto splits = std::min<std::size_t>((rows + 31) / 32, 64);
+        if (split_mode && *split_mode) {
+            const auto requested = std::strtoul(split_mode, nullptr, 10);
+            if (requested > 1) splits = std::min<std::size_t>(requested, 64);
+        }
+        auto partial = runtime.create_scratch_buffer("rmsnorm_dw", splits * cols * sizeof(float));
+        return run_vulkan_rmsnorm_backward_weight_split(runtime, x, grad_out, row_inv_scratch,
+                                                        partial, grad_weight, rows, cols, eps, splits);
     }
 
     // Stage 1: per-row inverse RMS. Stage 2: per-column reduction over rows.
@@ -8759,6 +9004,44 @@ VulkanOpResult run_vulkan_gelu(VulkanRuntime& runtime,
                                    static_cast<std::uint32_t>((elements + 63) / 64), 1, 1);
 }
 
+VulkanOpResult run_vulkan_rmsnorm_backward_weight_split(VulkanRuntime& runtime,
+                                                        const VulkanBuffer& x,
+                                                        const VulkanBuffer& grad_out,
+                                                        VulkanBuffer& row_inv_scratch,
+                                                        VulkanBuffer& partial,
+                                                        VulkanBuffer& grad_weight,
+                                                        std::size_t rows,
+                                                        std::size_t cols,
+                                                        float eps,
+                                                        std::size_t splits) {
+    VulkanOpResult result;
+    auto fail = [&](const char* message) { result.error = message; return result; };
+    const auto limit = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (rows == 0 || cols == 0 || rows > 65535 || cols > 65535 * std::size_t{64} || rows > limit / cols) {
+        return fail("Vulkan split RMSNorm dimensions exceed shader limits");
+    }
+    if (splits == 0 || splits > 64) return fail("Vulkan split RMSNorm requires 1..64 splits");
+    if (!std::isfinite(eps) || eps < 0.0f) return fail("Vulkan split RMSNorm eps must be finite and non-negative");
+    const auto nbytes = rows * cols * sizeof(float);
+    if (x.nbytes() < nbytes || grad_out.nbytes() < nbytes || row_inv_scratch.nbytes() < rows * sizeof(float) ||
+        partial.nbytes() < splits * cols * sizeof(float) || grad_weight.nbytes() < cols * sizeof(float)) {
+        return fail("Vulkan split RMSNorm buffer is too small");
+    }
+    struct InvPush { std::uint32_t rows, cols; float eps; } inv{
+        static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols), eps};
+    auto stage = runtime.dispatch_cached(vkspirv::k_rmsnorm_row_inv_f32, vkspirv::k_rmsnorm_row_inv_f32_words,
+        {&x, &row_inv_scratch}, &inv, sizeof(inv), static_cast<std::uint32_t>(rows));
+    if (!stage.success) return stage;
+    struct Push { std::uint32_t rows, cols, splits; } push{
+        static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols), static_cast<std::uint32_t>(splits)};
+    const auto groups = static_cast<std::uint32_t>((cols + 63) / 64);
+    stage = runtime.dispatch_cached(vkspirv::k_rmsnorm_bwd_w_partial_f32, vkspirv::k_rmsnorm_bwd_w_partial_f32_words,
+        {&x, &grad_out, &row_inv_scratch, &partial}, &push, sizeof(push), groups, static_cast<std::uint32_t>(splits));
+    if (!stage.success) return stage;
+    return runtime.dispatch_cached(vkspirv::k_rmsnorm_bwd_w_reduce_f32, vkspirv::k_rmsnorm_bwd_w_reduce_f32_words,
+        {&partial, &grad_weight}, &push, sizeof(push), groups);
+}
+
 VulkanOpResult run_vulkan_softmax_cross_entropy(VulkanRuntime& runtime,
                                                 const VulkanBuffer& logits,
                                                 const VulkanBuffer& targets,
@@ -8782,7 +9065,7 @@ VulkanOpResult run_vulkan_softmax_cross_entropy(VulkanRuntime& runtime,
         std::uint32_t cols;
     } row_push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
     const std::vector<const VulkanBuffer*> row_buffers = {&logits, &targets, &partial};
-    const bool use_sg = runtime.caps().subgroup_arithmetic_compute;
+    const bool use_sg = runtime.caps().supports_wave64_arithmetic();
     const auto* row_spirv = use_sg ? vkspirv::k_ce_fwd_rows_f32_subgroup : vkspirv::k_ce_fwd_rows_f32;
     const auto row_words = use_sg ? vkspirv::k_ce_fwd_rows_f32_subgroup_words : vkspirv::k_ce_fwd_rows_f32_words;
     auto stage = runtime.dispatch_cached(row_spirv, row_words,
@@ -8795,7 +9078,7 @@ VulkanOpResult run_vulkan_softmax_cross_entropy(VulkanRuntime& runtime,
         std::uint32_t denominator;
     } mean_push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(rows)};
     const std::vector<const VulkanBuffer*> mean_buffers = {&partial, &out};
-    const bool use_sg_mean = runtime.caps().subgroup_arithmetic_compute;
+    const bool use_sg_mean = runtime.caps().supports_wave64_arithmetic();
     const auto* mean_spirv = use_sg_mean ? vkspirv::k_mean_reduce_f32_subgroup : vkspirv::k_mean_reduce_f32;
     const auto mean_words = use_sg_mean ? vkspirv::k_mean_reduce_f32_subgroup_words : vkspirv::k_mean_reduce_f32_words;
     return runtime.dispatch_cached(mean_spirv, mean_words, mean_buffers,
@@ -8832,6 +9115,65 @@ VulkanOpResult run_vulkan_softmax_cross_entropy_backward(VulkanRuntime& runtime,
                                    sizeof(push), static_cast<std::uint32_t>(rows), 1, 1);
 }
 
+VulkanOpResult run_vulkan_softmax_cross_entropy_cached(VulkanRuntime& runtime,
+                                                      const VulkanBuffer& logits,
+                                                      const VulkanBuffer& targets,
+                                                      VulkanBuffer& partial,
+                                                      VulkanBuffer& row_stats,
+                                                      VulkanBuffer& out,
+                                                      std::size_t rows,
+                                                      std::size_t cols) {
+    VulkanOpResult result;
+    auto fail = [&](const char* message) { result.error = message; return result; };
+    const auto limit = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (rows == 0 || cols == 0 || rows > 65535 || cols > limit || rows > limit / cols) {
+        return fail("Vulkan cached cross-entropy dimensions exceed shader limits");
+    }
+    if (logits.nbytes() < rows * cols * sizeof(float) || targets.nbytes() < rows * sizeof(std::int32_t) ||
+        partial.nbytes() < rows * sizeof(float) || row_stats.nbytes() < 2 * rows * sizeof(float) ||
+        out.nbytes() < sizeof(float)) return fail("Vulkan cached cross-entropy buffer is too small");
+    struct Push { std::uint32_t rows, cols; } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
+    const char* subgroup = std::getenv("MOTIFCL_VK_CE_STATS_SUBGROUP");
+    // Preserve the established backward reduction order unless explicitly opted in.
+    const bool use_sg = runtime.caps().supports_wave64_arithmetic() && subgroup && *subgroup == '1';
+    const auto* shader = use_sg ? vkspirv::k_ce_fwd_stats_f32_subgroup : vkspirv::k_ce_fwd_stats_f32;
+    const auto words = use_sg ? vkspirv::k_ce_fwd_stats_f32_subgroup_words : vkspirv::k_ce_fwd_stats_f32_words;
+    auto stage = runtime.dispatch_cached(shader, words, {&logits, &targets, &partial, &row_stats},
+                                        &push, sizeof(push), static_cast<std::uint32_t>(rows));
+    if (!stage.success) return stage;
+    struct MeanPush { std::uint32_t count, denominator; } mean{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(rows)};
+    const bool use_sg_mean = runtime.caps().supports_wave64_arithmetic();
+    return runtime.dispatch_cached(use_sg_mean ? vkspirv::k_mean_reduce_f32_subgroup : vkspirv::k_mean_reduce_f32,
+        use_sg_mean ? vkspirv::k_mean_reduce_f32_subgroup_words : vkspirv::k_mean_reduce_f32_words,
+        {&partial, &out}, &mean, sizeof(mean), 1);
+}
+
+VulkanOpResult run_vulkan_softmax_cross_entropy_backward_cached(VulkanRuntime& runtime,
+                                                               const VulkanBuffer& logits,
+                                                               const VulkanBuffer& targets,
+                                                               const VulkanBuffer& grad_out,
+                                                               const VulkanBuffer& row_stats,
+                                                               VulkanBuffer& grad_logits,
+                                                               std::size_t rows,
+                                                               std::size_t cols) {
+    VulkanOpResult result;
+    auto fail = [&](const char* message) { result.error = message; return result; };
+    const auto limit = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (rows == 0 || cols == 0 || rows > 65535 || cols > limit || rows > limit / cols) {
+        return fail("Vulkan cached cross-entropy backward dimensions exceed shader limits");
+    }
+    if (runtime.caps().max_workgroup_invocations < 128) {
+        return fail("Vulkan cached cross-entropy backward requires 128 workgroup invocations");
+    }
+    if (logits.nbytes() < rows * cols * sizeof(float) || grad_logits.nbytes() < rows * cols * sizeof(float) ||
+        targets.nbytes() < rows * sizeof(std::int32_t) || grad_out.nbytes() < sizeof(float) ||
+        row_stats.nbytes() < 2 * rows * sizeof(float)) return fail("Vulkan cached cross-entropy backward buffer is too small");
+    struct Push { std::uint32_t rows, cols; } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(cols)};
+    const auto groups = std::min<std::size_t>((rows * cols - 1) / 128 + 1, 65535);
+    return runtime.dispatch_cached(vkspirv::k_ce_bwd_cached_f32, vkspirv::k_ce_bwd_cached_f32_words,
+        {&logits, &targets, &grad_out, &row_stats, &grad_logits}, &push, sizeof(push), static_cast<std::uint32_t>(groups));
+}
+
 VulkanOpResult run_vulkan_compact_counter_apply_update_fused(VulkanRuntime& runtime,
                                                              VulkanBuffer& state,
                                                              VulkanBuffer& scale,
@@ -8857,13 +9199,19 @@ VulkanOpResult run_vulkan_compact_counter_apply_update_fused(VulkanRuntime& runt
     if (C == 0 || in_features == 0 || out_features == 0 || batch == 0) {
         return fail("Vulkan counter update requires non-zero dimensions");
     }
+    if (C > 11) return fail("Vulkan counter update C is out of 6-bit range");
     if (in_features % 4 != 0) return fail("Vulkan counter update requires in_features % 4 == 0");
+    const auto max_index = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (in_features > max_index || out_features > max_index || batch > max_index ||
+        out_features > max_index / in_features || batch > max_index / in_features || batch > max_index / out_features) {
+        return fail("Vulkan counter update dimensions exceed specialized SPIR-V limits");
+    }
     // Validate optimizer hyperparameters: NaN/Inf in lr/lr_scale/rms_beta/rms_eps
     // silently poisons the whole weight update (and a negative rms_eps would
     // bypass the max(sqrt(vv), eps) guard in row_stats). Mirror SGD/RMSNorm.
     if (!std::isfinite(lr)) return fail("Vulkan counter update requires finite lr");
     if (!std::isfinite(lr_scale)) return fail("Vulkan counter update requires finite lr_scale");
-    if (!std::isfinite(rms_beta)) return fail("Vulkan counter update requires finite rms_beta");
+    if (!std::isfinite(rms_beta) || rms_beta < 0.0f || rms_beta > 1.0f) return fail("Vulkan counter update requires rms_beta in [0,1]");
     if (!std::isfinite(rms_eps) || rms_eps < 0.0f) return fail("Vulkan counter update requires non-negative finite rms_eps");
     if (!runtime.supports_storage_buffer_i8()) {
         return fail("Vulkan counter update requires VK_KHR_8bit_storage (uniformAndStorageBuffer8BitAccess)");
@@ -9019,6 +9367,49 @@ VulkanOpResult run_vulkan_compact_counter_decode_weight(VulkanRuntime& runtime,
                                    static_cast<std::uint32_t>((groups + 63) / 64), 1, 1);
 }
 
+
+VulkanOpResult run_vulkan_moe_balance_bias_update(VulkanRuntime& runtime,
+                                                  const VulkanBuffer& old_bias,
+                                                  VulkanBuffer& new_bias,
+                                                  const std::array<float, 7>& loads,
+                                                  float gamma,
+                                                  float clamp_value) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    constexpr std::uint32_t kExperts = 7;
+    if (!runtime.available()) return fail("Vulkan balance-bias update requires an available runtime");
+    if (!runtime.batch_active()) return fail("Vulkan balance-bias update requires an open batch");
+    if (!(gamma > 0.0f) || !std::isfinite(gamma)) return fail("Vulkan balance-bias update requires gamma > 0");
+    if (!(clamp_value > 0.0f) || !std::isfinite(clamp_value)) return fail("Vulkan balance-bias update requires a positive clamp");
+    for (float load : loads) if (!std::isfinite(load)) return fail("Vulkan balance-bias update requires finite loads");
+    if (!old_bias.valid() || !new_bias.valid()) return fail("Vulkan balance-bias update requires valid buffers");
+    if (&old_bias == &new_bias) return fail("Vulkan balance-bias update requires a separate output buffer");
+    const std::size_t bytes = kExperts * sizeof(float);
+    if (old_bias.nbytes() < bytes || new_bias.nbytes() < bytes) return fail("Vulkan balance-bias buffer is too small");
+    struct Push {
+        std::uint32_t n_experts;
+        float gamma;
+        float clamp_value;
+        float target;
+        float loads[8];  // byte layout: load0..load6 then padding; GLSL side uses
+                         // scalar members there (push-constant arrays may only be
+                         // indexed by dynamically uniform values, not by lane id)
+    } push{};
+    static_assert(offsetof(Push, loads) == 16, "balance-bias push layout must match the GLSL block");
+    static_assert(sizeof(Push) == 48, "balance-bias push block must be 48 bytes");
+    push.n_experts = kExperts;
+    push.gamma = gamma;
+    push.clamp_value = clamp_value;
+    push.target = 1.0f / static_cast<float>(kExperts);
+    for (std::size_t i = 0; i < loads.size(); ++i) push.loads[i] = loads[i];
+    const std::vector<const VulkanBuffer*> buffers = {&old_bias, &new_bias};
+    return runtime.dispatch_cached(vkspirv::k_moe_balance_bias_update_f32, vkspirv::k_moe_balance_bias_update_f32_words,
+                                   buffers, &push, sizeof(push), 1, 1, 1);
+}
+
 VulkanOpResult run_vulkan_compact_counter_update_apply(VulkanRuntime& runtime,
                                                        VulkanBuffer& state,
                                                        VulkanBuffer& scale,
@@ -9043,15 +9434,21 @@ VulkanOpResult run_vulkan_compact_counter_update_apply(VulkanRuntime& runtime,
     if (in_features % 4 != 0) {
         return fail("Vulkan counter update apply requires in_features divisible by 4");
     }
-    if (C == 0 || 3 * (2 * C - 1) > 64) {
+    if (C == 0 || C > 11) {
         return fail("Vulkan counter update apply C is out of 6-bit range");
+    }
+    if (!std::isfinite(lr)) return fail("Vulkan counter update apply requires finite lr");
+    if (!std::isfinite(lr_scale)) return fail("Vulkan counter update apply requires finite lr_scale");
+    if (!std::isfinite(rms_beta) || rms_beta < 0.0f || rms_beta > 1.0f) return fail("Vulkan counter update apply requires rms_beta in [0,1]");
+    if (!std::isfinite(rms_eps) || rms_eps < 0.0f) return fail("Vulkan counter update apply requires non-negative finite rms_eps");
+    if (!runtime.caps().supports_wave64_arithmetic()) {
+        return fail("Vulkan counter update apply requires wave64 arithmetic");
     }
     if (!runtime.supports_storage_buffer_i8()) {
         return fail("Vulkan counter update apply requires VK_KHR_8bit_storage on persistent Tensor buffers");
     }
-    if (in_features > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
-        out_features > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
-        C > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    const auto max_index = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+    if (in_features > max_index || out_features > max_index || out_features > max_index / in_features) {
         return fail("Vulkan counter update apply dimensions exceed specialized SPIR-V limits");
     }
     if (out_features > std::numeric_limits<std::size_t>::max() / (in_features / 4) ||
@@ -9082,6 +9479,32 @@ VulkanOpResult run_vulkan_compact_counter_update_apply(VulkanRuntime& runtime,
     return runtime.dispatch_cached(vkspirv::k_counter_update_apply_f32,
                                    vkspirv::k_counter_update_apply_f32_words, buffers, &push,
                                    sizeof(push), static_cast<std::uint32_t>(out_features), 1, 1);
+}
+
+VulkanOpResult run_vulkan_compact_counter_decay_v(VulkanRuntime& runtime,
+                                                  VulkanBuffer& v,
+                                                  std::size_t out_features,
+                                                  float rms_beta) {
+    VulkanOpResult result;
+    result.device_name = runtime.device_name();
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (!runtime.available()) return fail("Vulkan counter decay requires an available runtime");
+    if (out_features == 0) return fail("Vulkan counter decay requires non-zero out_features");
+    if (!std::isfinite(rms_beta) || rms_beta < 0.0f || rms_beta > 1.0f) {
+        return fail("Vulkan counter decay requires rms_beta in [0,1]");
+    }
+    if (v.nbytes() < out_features * sizeof(float)) return fail("Vulkan counter decay v buffer is too small");
+    struct Push {
+        std::uint32_t rows;
+        float beta;
+    } push{static_cast<std::uint32_t>(out_features), rms_beta};
+    const std::vector<const VulkanBuffer*> buffers = {&v};
+    const auto groups = static_cast<std::uint32_t>((out_features + 255) / 256);
+    return runtime.dispatch_cached(vkspirv::k_counter_decay_v_f32, vkspirv::k_counter_decay_v_f32_words,
+                                   buffers, &push, sizeof(push), groups, 1, 1);
 }
 
 VulkanOpResult run_vulkan_compact_counter_forward_u8(VulkanRuntime& runtime,
@@ -9148,7 +9571,11 @@ VulkanOpResult run_vulkan_compact_counter_forward_u8(VulkanRuntime& runtime,
         } db_push{static_cast<std::uint32_t>(C), static_cast<std::uint32_t>(in_features),
                   static_cast<std::uint32_t>(out_features), static_cast<std::uint32_t>(batch), 0u};
         const std::vector<const VulkanBuffer*> db_buffers = {&x, &state, &scale, &out};
-        return runtime.dispatch_cached(vkspirv::k_counter_gemm_db, vkspirv::k_counter_gemm_db_words, db_buffers,
+        const char* word_mode = std::getenv("MOTIFCL_VK_COUNTER_WORD_LOAD");
+        const bool word_load = out_features % 4 == 0 && word_mode && *word_mode == '1';
+        const auto* spirv = word_load ? vkspirv::k_counter_gemm_word_db : vkspirv::k_counter_gemm_db;
+        const auto words = word_load ? vkspirv::k_counter_gemm_word_db_words : vkspirv::k_counter_gemm_db_words;
+        return runtime.dispatch_cached(spirv, words, db_buffers,
                                        &db_push, sizeof(db_push),
                                        static_cast<std::uint32_t>((out_features + 31) / 32),
                                        static_cast<std::uint32_t>((batch + 31) / 32), 1);
@@ -9165,6 +9592,69 @@ VulkanOpResult run_vulkan_compact_counter_forward_u8(VulkanRuntime& runtime,
                                    vkspirv::k_counter_forward_f32_rb4_words, buffers,
                                    &push, sizeof(push),
                                    static_cast<std::uint32_t>((out_features + 31) / 32),
+                                   static_cast<std::uint32_t>((batch + 31) / 32), 1);
+}
+
+VulkanOpResult run_vulkan_compact_counter_swiglu_u8(VulkanRuntime& runtime,
+                                                     const VulkanBuffer& x,
+                                                     const VulkanBuffer& state,
+                                                     const VulkanBuffer& scale,
+                                                     VulkanBuffer& preactivation,
+                                                     VulkanBuffer& out,
+                                                     std::size_t C,
+                                                     std::size_t in_features,
+                                                     std::size_t out_features,
+                                                     std::size_t batch) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (C < 1 || C > 11) return fail("Vulkan counter SwiGLU C is out of 6-bit range");
+    if (batch == 0 || in_features == 0 || out_features == 0 ||
+        in_features % 4 != 0 || out_features % 8 != 0) {
+        return fail("Vulkan counter SwiGLU requires non-zero dimensions, in%4=0 and out%8=0");
+    }
+    if (!runtime.supports_storage_buffer_i8() || runtime.caps().max_workgroup_invocations < 64 ||
+        runtime.caps().max_shared_memory_bytes < 8448) {
+        return fail("Vulkan counter SwiGLU requires 8-bit storage, 64 invocations and 8448 shared bytes");
+    }
+    constexpr auto kMaxIndex = std::size_t(std::numeric_limits<std::uint32_t>::max());
+    if (batch > std::size_t(65535) * 32 || out_features / 2 > std::size_t(65535) * 16 ||
+        in_features > kMaxIndex || out_features > kMaxIndex ||
+        out_features > kMaxIndex / in_features || batch > kMaxIndex / in_features ||
+        batch > kMaxIndex / out_features) {
+        return fail("Vulkan counter SwiGLU dimensions exceed shader indexing/dispatch limits");
+    }
+    const auto state_bytes = out_features * (in_features / 4) * 3;
+    const auto x_elements = batch * in_features;
+    const auto pre_elements = batch * out_features;
+    if (pre_elements > std::numeric_limits<std::size_t>::max() / sizeof(float) ||
+        x_elements > std::numeric_limits<std::size_t>::max() / sizeof(float) ||
+        out_features > std::numeric_limits<std::size_t>::max() / sizeof(float)) {
+        return fail("Vulkan counter SwiGLU buffer byte size overflows size_t");
+    }
+    if (state.nbytes() < state_bytes || scale.nbytes() < out_features * sizeof(float) ||
+        x.nbytes() < x_elements * sizeof(float) ||
+        preactivation.nbytes() < pre_elements * sizeof(float) ||
+        out.nbytes() < (pre_elements / 2) * sizeof(float)) {
+        return fail("Vulkan counter SwiGLU buffer is too small");
+    }
+    if (&preactivation == &out || &preactivation == &x || &preactivation == &state ||
+        &preactivation == &scale || &out == &x || &out == &state || &out == &scale) {
+        return fail("Vulkan counter SwiGLU outputs must not alias inputs or each other");
+    }
+    const struct {
+        std::uint32_t C;
+        std::uint32_t in_features;
+        std::uint32_t out_features;
+        std::uint32_t batch;
+    } push{static_cast<std::uint32_t>(C), static_cast<std::uint32_t>(in_features),
+           static_cast<std::uint32_t>(out_features), static_cast<std::uint32_t>(batch)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &state, &scale, &preactivation, &out};
+    return runtime.dispatch_cached(vkspirv::k_counter_swiglu_db, vkspirv::k_counter_swiglu_db_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((out_features / 2 + 15) / 16),
                                    static_cast<std::uint32_t>((batch + 31) / 32), 1);
 }
 
@@ -9241,8 +9731,12 @@ VulkanOpResult run_vulkan_compact_counter_backward_input_u8(VulkanRuntime& runti
         } db_push{static_cast<std::uint32_t>(C), static_cast<std::uint32_t>(in_features),
                   static_cast<std::uint32_t>(out_features), static_cast<std::uint32_t>(batch), 1u};
         const std::vector<const VulkanBuffer*> db_buffers = {&grad_out, &state, &scale, &grad_x};
+        const char* word_mode = std::getenv("MOTIFCL_VK_COUNTER_WORD_LOAD");
+        const bool word_load = word_mode && *word_mode == '1';
+        const auto* spirv = word_load ? vkspirv::k_counter_gemm_word_db : vkspirv::k_counter_gemm_db;
+        const auto words = word_load ? vkspirv::k_counter_gemm_word_db_words : vkspirv::k_counter_gemm_db_words;
         const auto db_run = runtime.dispatch_cached(
-            vkspirv::k_counter_gemm_db, vkspirv::k_counter_gemm_db_words, db_buffers, &db_push,
+            spirv, words, db_buffers, &db_push,
             sizeof(db_push), static_cast<std::uint32_t>((in_features + 31) / 32),
             static_cast<std::uint32_t>((batch + 31) / 32), 1);
         result.success = db_run.success;
@@ -9643,7 +10137,7 @@ VulkanOpResult run_vulkan_grouped_query_attention(VulkanRuntime& runtime,
            static_cast<std::uint32_t>(n_head),       static_cast<std::uint32_t>(n_kv_head),
            static_cast<std::uint32_t>(head_dim),     scale};
     const std::vector<const VulkanBuffer*> buffers = {&q, &k, &v, &out};
-    const bool use_sg_gqa = runtime.caps().subgroup_arithmetic_compute;
+    const bool use_sg_gqa = runtime.caps().supports_wave64_arithmetic();
     const auto* gqa_spirv = use_sg_gqa ? vkspirv::k_gqa_fwd_f32_subgroup : vkspirv::k_gqa_fwd_f32;
     const auto gqa_words = use_sg_gqa ? vkspirv::k_gqa_fwd_f32_subgroup_words : vkspirv::k_gqa_fwd_f32_words;
     return runtime.dispatch_cached(gqa_spirv, gqa_words, buffers, &push,
@@ -9772,6 +10266,14 @@ VulkanOpResult run_vulkan_grouped_query_attention_general(
                         static_cast<std::uint32_t>(key_tokens), static_cast<std::uint32_t>(n_head),
                         static_cast<std::uint32_t>(n_kv_head), static_cast<std::uint32_t>(head_dim), scale};
             const std::vector<const VulkanBuffer*> fast_buffers = {&q, &k, &v, &out};
+            const char* rows_env = std::getenv("MOTIFCL_VK_GQA_FWD_ROWS");
+            if (rows_env && std::strcmp(rows_env, "8") == 0) {
+                return runtime.dispatch_cached(vkspirv::k_gqa_fwd_causal8_f32, vkspirv::k_gqa_fwd_causal8_f32_words,
+                                               fast_buffers, &fast_push, sizeof(fast_push),
+                                               static_cast<std::uint32_t>((query_tokens + 7) / 8),
+                                               static_cast<std::uint32_t>(n_head),
+                                               static_cast<std::uint32_t>(batch));
+            }
             return runtime.dispatch_cached(vkspirv::k_gqa_fwd_causal4_f32, vkspirv::k_gqa_fwd_causal4_f32_words,
                                            fast_buffers, &fast_push, sizeof(fast_push),
                                            static_cast<std::uint32_t>((query_tokens + 3) / 4),
@@ -10376,6 +10878,157 @@ VulkanF32MatmulSmokeResult run_vulkan_f32_matmul_smoke() {
         result.success = false;
         result.error = "Vulkan f32 matmul smoke returned unexpected output";
     }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Sparse MoE7 forward: router + compact assignment lists + list-driven expert
+// GEMMs. Dispatches 1 + 7*3 = 22 kernels per call (the dense path uses 22 as
+// well: router GEMM, bias add, route, then 7*(2 counter GEMMs + SwiGLU)), but
+// the expert GEMMs only visit the rows their expert actually owns, so the FMA
+// work drops from 7x to ~1x. No routing result is read back to the host.
+VulkanOpResult run_vulkan_moe7_sparse_forward(VulkanRuntime& runtime,
+                                              const VulkanMoE7SparseSpec& spec) {
+    VulkanOpResult result;
+    result.device_name = runtime.device_name();
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+
+    if (!runtime.available()) return fail(runtime.error().empty() ? "Vulkan runtime is not available" : runtime.error());
+    if (!runtime.supports_storage_buffer_i8()) return fail("Sparse MoE7 requires 8-bit storage buffers");
+    if (spec.tokens == 0 || spec.dim == 0 || spec.hidden == 0) return fail("Sparse MoE7 requires non-zero dimensions");
+    if (spec.C < 1 || spec.C > 11) return fail("Sparse MoE7 C is out of the 6-bit range");
+    if (spec.dim % 4 != 0 || spec.hidden % 4 != 0) {
+        return fail("Sparse MoE7 requires dim % 4 == 0 and hidden % 4 == 0 (vec4 activation loads)");
+    }
+    if (!spec.x || !spec.router_w || !spec.router_b || !spec.logits || !spec.counts || !spec.list ||
+        !spec.packed || !spec.act || !spec.expert_out) {
+        return fail("Sparse MoE7 spec has a null buffer");
+    }
+    for (int e = 0; e < 7; ++e) {
+        if (!spec.up_state[e] || !spec.up_scale[e] || !spec.down_state[e] || !spec.down_scale[e]) {
+            return fail("Sparse MoE7 spec is missing an expert state/scale buffer");
+        }
+    }
+
+    const std::size_t tokens = spec.tokens;
+    const std::size_t dim = spec.dim;
+    const std::size_t hidden = spec.hidden;
+    const std::size_t capacity = tokens;  // top-1: no list can exceed the token count
+
+    // Buffer size preconditions. Each expert layer's packed state is
+    // out_features * (in_features / 4) * 3 bytes.
+    if (spec.x->nbytes() < tokens * dim * sizeof(float)) return fail("Sparse MoE7 x buffer is too small");
+    if (spec.router_w->nbytes() < dim * 7 * sizeof(float)) return fail("Sparse MoE7 router weight is too small");
+    if (spec.router_b->nbytes() < 7 * sizeof(float)) return fail("Sparse MoE7 router bias is too small");
+    if (spec.logits->nbytes() < tokens * 7 * sizeof(float)) return fail("Sparse MoE7 logits buffer is too small");
+    if (spec.counts->nbytes() < 8 * sizeof(std::uint32_t)) return fail("Sparse MoE7 counts buffer is too small");
+    if (spec.list->nbytes() < 7 * capacity * sizeof(std::uint32_t)) return fail("Sparse MoE7 list buffer is too small");
+    if (spec.packed->nbytes() < tokens * 2 * hidden * sizeof(float)) return fail("Sparse MoE7 packed buffer is too small");
+    if (spec.act->nbytes() < tokens * hidden * sizeof(float)) return fail("Sparse MoE7 activation buffer is too small");
+    if (spec.expert_out->nbytes() < tokens * dim * sizeof(float)) {
+        return fail("Sparse MoE7 expert output buffer is too small");
+    }
+    for (int e = 0; e < 7; ++e) {
+        const std::size_t up_state = (2 * hidden) * (dim / 4) * 3;
+        const std::size_t down_state = dim * (hidden / 4) * 3;
+        if (spec.up_state[e]->nbytes() < up_state) return fail("Sparse MoE7 expert up state buffer is too small");
+        if (spec.down_state[e]->nbytes() < down_state) return fail("Sparse MoE7 expert down state buffer is too small");
+        if (spec.up_scale[e]->nbytes() < 2 * hidden * sizeof(float)) {
+            return fail("Sparse MoE7 expert up scale buffer is too small");
+        }
+        if (spec.down_scale[e]->nbytes() < dim * sizeof(float)) {
+            return fail("Sparse MoE7 expert down scale buffer is too small");
+        }
+    }
+
+    // 1. Zero the per-expert counters (the router atomicAdds into them).
+    auto zeroed = run_vulkan_zero_f32(runtime, *spec.counts, 8);
+    if (!zeroed.success) return zeroed;
+
+    // 2. Router: biased logits + argmax + compact lists, one workgroup per token.
+    const struct {
+        std::uint32_t tokens;
+        std::uint32_t dim;
+        std::uint32_t capacity;
+    } route_push{static_cast<std::uint32_t>(tokens), static_cast<std::uint32_t>(dim),
+                 static_cast<std::uint32_t>(capacity)};
+    {
+        const std::vector<const VulkanBuffer*> route_buffers = {spec.x, spec.router_w, spec.router_b,
+                                                               spec.logits, spec.counts, spec.list};
+        auto routed = runtime.dispatch_cached(vkspirv::k_moe_route_top1_f32,
+                                              vkspirv::k_moe_route_top1_f32_words, route_buffers,
+                                              &route_push, sizeof(route_push),
+                                              static_cast<std::uint32_t>(tokens), 1, 1);
+        if (!routed.success) return routed;
+    }
+
+    const auto m_groups = static_cast<std::uint32_t>((capacity + 31) / 32);
+    const auto up_n_groups = static_cast<std::uint32_t>((2 * hidden + 31) / 32);
+    const auto down_n_groups = static_cast<std::uint32_t>((dim + 31) / 32);
+
+    for (int e = 0; e < 7; ++e) {
+        const auto expert = static_cast<std::uint32_t>(e);
+
+        // 3a. Up projection: gather the expert's tokens, decode the packed
+        // ternary weights, emit the compact [count, 2*hidden] pre-activation.
+        const struct {
+            std::uint32_t C;
+            std::uint32_t in_features;
+            std::uint32_t out_features;
+            std::uint32_t capacity;
+            std::uint32_t expert;
+            std::uint32_t mode;
+        } up_push{static_cast<std::uint32_t>(spec.C), static_cast<std::uint32_t>(dim),
+                  static_cast<std::uint32_t>(2 * hidden), static_cast<std::uint32_t>(capacity), expert, 0u};
+        {
+            const std::vector<const VulkanBuffer*> up_buffers = {spec.x, spec.up_state[e], spec.up_scale[e],
+                                                                 spec.packed, spec.list, spec.counts};
+            auto up = runtime.dispatch_cached(vkspirv::k_counter_gemm_gather_db,
+                                              vkspirv::k_counter_gemm_gather_db_words, up_buffers,
+                                              &up_push, sizeof(up_push), up_n_groups, m_groups, 1);
+            if (!up.success) return up;
+        }
+
+        // 3b. SwiGLU on the live rows only.
+        const struct {
+            std::uint32_t hidden;
+            std::uint32_t capacity;
+            std::uint32_t expert;
+        } act_push{static_cast<std::uint32_t>(hidden), static_cast<std::uint32_t>(capacity), expert};
+        {
+            const std::vector<const VulkanBuffer*> act_buffers = {spec.packed, spec.act, spec.counts};
+            auto act = runtime.dispatch_cached(vkspirv::k_moe_swiglu_bounded_f32,
+                                               vkspirv::k_moe_swiglu_bounded_f32_words, act_buffers,
+                                               &act_push, sizeof(act_push),
+                                               static_cast<std::uint32_t>(capacity), 1, 1);
+            if (!act.success) return act;
+        }
+
+        // 3c. Down projection: compact rows in, scattered to the token rows out.
+        const struct {
+            std::uint32_t C;
+            std::uint32_t in_features;
+            std::uint32_t out_features;
+            std::uint32_t capacity;
+            std::uint32_t expert;
+            std::uint32_t mode;
+        } down_push{static_cast<std::uint32_t>(spec.C), static_cast<std::uint32_t>(hidden),
+                    static_cast<std::uint32_t>(dim), static_cast<std::uint32_t>(capacity), expert, 2u};
+        {
+            const std::vector<const VulkanBuffer*> down_buffers = {spec.act, spec.down_state[e],
+                                                                   spec.down_scale[e], spec.expert_out,
+                                                                   spec.list, spec.counts};
+            auto down = runtime.dispatch_cached(vkspirv::k_counter_gemm_gather_db,
+                                                vkspirv::k_counter_gemm_gather_db_words, down_buffers,
+                                                &down_push, sizeof(down_push), down_n_groups, m_groups, 1);
+            if (!down.success) return down;
+        }
+    }
+
+    result.success = true;
     return result;
 }
 

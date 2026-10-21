@@ -14,6 +14,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <utility>
 
 namespace motifcl {
 
@@ -345,10 +346,11 @@ struct AddBiasGeluRowsBackward : autograd::Node {
     }
 };
 
-void attach_binary_grad(Tensor& out, const Tensor& a, const Tensor& b, std::shared_ptr<autograd::Node> node) {
+template <typename BackwardNode, typename... Args>
+void attach_binary_grad(Tensor& out, const Tensor& a, const Tensor& b, Args&&... args) {
     if (autograd::is_enabled() && (a.requires_grad() || b.requires_grad())) {
         out.set_requires_grad(true);
-        out._set_grad_fn(std::move(node));
+        out._set_grad_fn(std::make_shared<BackwardNode>(std::forward<Args>(args)...));
     }
 }
 
@@ -396,12 +398,11 @@ Tensor ones_like(const Tensor& x) { return Tensor::ones(x.backend(), x.shape(), 
 
 Tensor add(const Tensor& a, const Tensor& b) {
     if (a.shape() != b.shape()) return add_broadcast(a, b);
-    const auto selected_backend = selected_elementwise_backend();
-    if ((a.backend().is_vulkan() || selected_backend.kind == MicrokernelBackendKind::Vulkan) &&
+    if ((a.backend().is_vulkan() || selected_elementwise_backend().kind == MicrokernelBackendKind::Vulkan) &&
         vulkan_add_supported(a, b)) {
         if (a.backend().is_vulkan()) {
             auto out = add_vulkan_f32_device(a, b);
-            attach_binary_grad(out, a, b, std::make_shared<AddBackward>(a, b));
+            attach_binary_grad<AddBackward>(out, a, b, a, b);
             return out;
         }
         const auto a_host = a.to_vector<float>();
@@ -413,7 +414,7 @@ Tensor add(const Tensor& a, const Tensor& b) {
     }
     MCL_CHECK(!a.backend().is_vulkan(), "vulkan backend does not support this add shape");
     auto out = elementwise_binary(a, b, "add_f32");
-    attach_binary_grad(out, a, b, std::make_shared<AddBackward>(a, b));
+    attach_binary_grad<AddBackward>(out, a, b, a, b);
     return out;
 }
 
@@ -421,12 +422,12 @@ Tensor add_broadcast(const Tensor& a, const Tensor& b) {
     if (a.shape() == b.shape()) return add(a, b);
     if (b.valid() && b.numel() == 1 && a.valid() && a.backend_ptr() == b.backend_ptr()) {
         auto out = elementwise_device_scalar_rhs(a, b, "add_tensor_scalar_f32");
-        attach_binary_grad(out, a, b, std::make_shared<AddBroadcastBackward>(a, b));
+        attach_binary_grad<AddBroadcastBackward>(out, a, b, a, b);
         return out;
     }
     if (a.valid() && a.numel() == 1 && b.valid() && a.backend_ptr() == b.backend_ptr()) {
         auto out = elementwise_device_scalar_rhs(b, a, "add_tensor_scalar_f32");
-        attach_binary_grad(out, a, b, std::make_shared<AddBroadcastBackward>(a, b));
+        attach_binary_grad<AddBroadcastBackward>(out, a, b, a, b);
         return out;
     }
     if (can_row_broadcast_rhs(a, b)) return add_bias_rows(a, b);
@@ -445,12 +446,12 @@ Tensor add_broadcast(const Tensor& a, const Tensor& b) {
 Tensor sub(const Tensor& a, const Tensor& b) {
     if (a.shape() == b.shape() && a.backend().is_vulkan() && vulkan_sub_supported(a, b)) {
         auto out = sub_vulkan_f32_device(a, b);
-        attach_binary_grad(out, a, b, std::make_shared<SubBackward>(a, b));
+        attach_binary_grad<SubBackward>(out, a, b, a, b);
         return out;
     }
     MCL_CHECK(!a.backend().is_vulkan(), "vulkan backend does not support this sub shape");
     auto out = elementwise_binary(a, b, "sub_f32");
-    attach_binary_grad(out, a, b, std::make_shared<SubBackward>(a, b));
+    attach_binary_grad<SubBackward>(out, a, b, a, b);
     return out;
 }
 
@@ -466,11 +467,11 @@ Tensor mul(const Tensor& a, const Tensor& b) {
                                            static_cast<std::size_t>(a.numel()));
         MCL_CHECK(result.success, std::string("vulkan mul f32 failed: ") + result.error);
         autograd::record_op("mul_vulkan_f32", {a.id(), b.id()}, {out.id()});
-        attach_binary_grad(out, a, b, std::make_shared<MulBackward>(a, b));
+        attach_binary_grad<MulBackward>(out, a, b, a, b);
         return out;
     }
     auto out = elementwise_binary(a, b, "mul_f32");
-    attach_binary_grad(out, a, b, std::make_shared<MulBackward>(a, b));
+    attach_binary_grad<MulBackward>(out, a, b, a, b);
     return out;
 }
 
@@ -478,22 +479,22 @@ Tensor mul_broadcast(const Tensor& a, const Tensor& b) {
     if (a.shape() == b.shape()) return mul(a, b);
     if (b.valid() && b.numel() == 1 && a.valid() && a.backend_ptr() == b.backend_ptr()) {
         auto out = elementwise_device_scalar_rhs(a, b, "mul_tensor_scalar_f32");
-        attach_binary_grad(out, a, b, std::make_shared<MulBroadcastBackward>(a, b, a.shape()));
+        attach_binary_grad<MulBroadcastBackward>(out, a, b, a, b, a.shape());
         return out;
     }
     if (a.valid() && a.numel() == 1 && b.valid() && a.backend_ptr() == b.backend_ptr()) {
         auto out = elementwise_device_scalar_rhs(b, a, "mul_tensor_scalar_f32");
-        attach_binary_grad(out, a, b, std::make_shared<MulBroadcastBackward>(a, b, b.shape()));
+        attach_binary_grad<MulBroadcastBackward>(out, a, b, a, b, b.shape());
         return out;
     }
     if (can_row_broadcast_rhs(a, b)) {
         auto out = mul_rows(a, b);
-        attach_binary_grad(out, a, b, std::make_shared<MulBroadcastBackward>(a, b, a.shape()));
+        attach_binary_grad<MulBroadcastBackward>(out, a, b, a, b, a.shape());
         return out;
     }
     if (can_row_broadcast_rhs(b, a)) {
         auto out = mul_rows(b, a);
-        attach_binary_grad(out, a, b, std::make_shared<MulBroadcastBackward>(a, b, b.shape()));
+        attach_binary_grad<MulBroadcastBackward>(out, a, b, a, b, b.shape());
         return out;
     }
     const auto out_shape = broadcast_result_shape(a.shape(), b.shape());
@@ -509,7 +510,7 @@ Tensor mul_broadcast(const Tensor& a, const Tensor& b) {
 
 Tensor div(const Tensor& a, const Tensor& b) {
     auto out = elementwise_binary(a, b, "div_f32");
-    attach_binary_grad(out, a, b, std::make_shared<DivBackward>(a, b));
+    attach_binary_grad<DivBackward>(out, a, b, a, b);
     return out;
 }
 

@@ -29,6 +29,14 @@ struct MoE7Config {
     // scale, otherwise the bias saturates and stops adapting on long runs.
     float balance_clamp = 2.0f;
     std::uint32_t seed = 1234u;
+    // Skip the losing experts' backward graphs. A loser's gradient is identically
+    // zero, so its grad_w GEMM, its grad_x GEMM and its SwiGLU backward can only
+    // produce zeros; the one side effect that is *not* zero is the counter state's
+    // second moment, which decays (see CounterStateLinear::apply_zero_grad_update).
+    // With that term applied explicitly this is bit-identical to the dense
+    // backward, so it is on by default and only the measurement harness turns it
+    // off. Override with MOTIFCL_MOE_SKIP_ZERO_GRAD=0/1.
+    bool skip_zero_grad_experts = true;
 };
 
 // Routed FFN: seven counter-synapse experts (+ one always-on shared expert)
@@ -55,6 +63,11 @@ public:
     void set_lr(float lr);
     void set_training(bool training);
     std::vector<CounterStateLinear*> counter_layers();
+    // Runtime override of MoE7Config::skip_zero_grad_experts. The two settings are
+    // numerically identical (see tests/test_vulkan_moe7_zero_grad.cpp), so this
+    // exists to A/B them, not to change semantics.
+    void set_skip_zero_grad_experts(bool skip) { skip_zero_grad_experts_ = skip; }
+    bool skip_zero_grad_experts() const { return skip_zero_grad_experts_; }
 
     int dim() const { return config_.dim; }
     int hidden_expert() const { return config_.hidden_expert; }
@@ -65,6 +78,21 @@ public:
     // these read tensors back to the host.
     bool read_token_counts();
     void update_balance_bias(float gamma);
+    // Publishes this forward's routing decision to the backward pass so the losing
+    // experts can be skipped (they receive an identically zero gradient). Only
+    // legal between the forward and backward batches: it is what read_token_counts
+    // already computes, made explicit. Without it the backward runs the dense
+    // graph for every expert -- same numbers, more work.
+    bool freeze_routing() { return read_token_counts(); }
+    bool routing_frozen() const { return routing_frozen_; }
+    // Per-expert "this expert won at least one token in the frozen routing".
+    const std::array<bool, kExperts>& route_live() const { return route_live_; }
+
+  private:
+    // Records the same update inside an open Vulkan batch; falls back to the CPU path.
+    bool try_gpu_balance_bias(float gamma);
+
+  public:
     // Switch-style load-balancing auxiliary loss, applied as an explicit router
     // gradient: L_aux = E * sum_e f_e * P_e with f frozen at the current load and
     // P_e the mean router probability. dL_aux/dlogits is computed on the host from
@@ -92,6 +120,7 @@ private:
     };
 
     Tensor run_expert(Expert& expert, const Tensor& x);
+    bool skip_zero_grad_experts_ = true;
 
     MoE7Config config_;
     std::array<Expert, kExperts> experts_;
@@ -102,6 +131,8 @@ private:
     Tensor balance_grad_;                           // [rows, 7] dL_aux/dlogits, device
     std::array<float, kExperts> last_load_{};
     std::vector<int> last_picks_;
+    std::array<bool, kExperts> route_live_{};
+    bool routing_frozen_ = false;
     float last_logit_spread_ = 0.0f;
     float last_logit_gap_ = 0.0f;
     std::int64_t last_rows_ = 0;

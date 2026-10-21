@@ -9,7 +9,7 @@ namespace motifcl::nn {
 // Ternary finite-state "counter" linear layer trained as a per-synapse automaton.
 // Persistent per-weight state is one uint8 (45/63 reachable states); the optimizer
 // lives inside that state plus per-row scale and per-row RMS second moment. The
-// weight update is fused into backward (no full weight-gradient, no Adam moments).
+// weight update is fused into backward (no persistent weight-gradient or Adam moments).
 // Layout mirrors the validated prototype: state/grad_w are [out, in]; forward is
 // y = x @ w^T via matmul_transpose_b. Eager-training only (in-backward update is a
 // side effect; not graph-capture replayable).
@@ -21,13 +21,20 @@ public:
                        float rms_eps = 1e-3f, std::uint32_t seed = 12345u);
 
     Tensor forward(const Tensor& x) override;
+    Tensor forward_swiglu(const Tensor& x);
     std::vector<Parameter*> parameters() override { return {}; }  // self-updating
 
     Tensor decode_weight() const;                       // dense [out, in] f32
     void apply_update_seed(const Tensor& grad_w, std::uint32_t seed);  // reference path (dense grad_w)
-    // Memory-native path: grad_w is recomputed inside the kernels from (grad_out, x);
-    // no dense [out,in] weight gradient is ever allocated.
+    // Uses one reusable tiled grad_w workspace for eligible Vulkan layers;
+    // the bounded-memory fallback recomputes grad_w inside the update kernels.
     void apply_update_backward(const Tensor& grad_out, const Tensor& x, std::uint32_t seed);
+    // State-only update for an identically zero gradient (a MoE expert that lost
+    // the router's argmax). With grad_w == 0 the tick and the row scale are
+    // provably unchanged and only the row second moment survives:
+    // v <- rms_beta * v. Applying it keeps a sparse backward bit-identical to the
+    // dense one while skipping the grad_w GEMM and the per-group tick.
+    void apply_zero_grad_update();
     // Memory-native grad wrt input: grad_x decoded from packed state in-kernel,
     // without materialising a dense [out,in] weight. Returns grad_x [N,in].
     Tensor backward_input_from_state(const Tensor& grad_out) const;

@@ -1,5 +1,15 @@
 # Vulkan FP32 training throughput — RX 580, 2026-10-17
 
+> Audit correction, 2026-10-18: the numbers below are historical samples, not a
+> repeated same-window A/B study. CTest's registered-test denominator includes
+> skipped OpenCL tests; a fresh relink of the original 51 targets executed 22
+> and skipped 29. The final command-pool edit rebuilt only the trainer before
+> its historical CTest run. Placement losses were close, not bit-identical.
+> The old counter exactness test also selected the new update on both sides;
+> the replacement oracle calls the old runtime helper directly. See
+> [the hardening report](vulkan-hardening-performance-2026-10-18.md) for fresh
+> numerical, memory, convergence and repeated throughput witnesses.
+
 Measured, same host, same data, same binaries family. This record documents the
 training-speed work and the evidence behind each number.
 

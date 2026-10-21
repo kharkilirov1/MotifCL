@@ -292,7 +292,7 @@ int main() {
                 auto o = blk.wo->forward(attn);
                 auto h = add(cur, o);
                 auto b2 = rmsnorm(h, blk.norm2, eps);
-                auto m = swiglu(blk.wup->forward(b2));
+                auto m = blk.wup->forward_swiglu(b2);
                 cur = add(h, blk.wdown->forward(m));
             }
             auto xf = rmsnorm(cur, norm_f, eps);
@@ -368,6 +368,8 @@ int main() {
 
         double win_ms = 0.0;
         int win_n = 0;
+        double win_gpu_ms = 0.0, win_sync_ms = 0.0;
+        int win_gpu_n = 0;
         double loss_ema = -1.0;
         for (int step = start_step; step < steps_total; ++step) {
             const auto t0 = std::chrono::steady_clock::now();
@@ -403,17 +405,23 @@ int main() {
 
             const auto t1 = std::chrono::steady_clock::now();
             win_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+            win_sync_ms += sync_ms;
+            if (std::isfinite(gpu_step_ms) && gpu_step_ms >= 0.0) {
+                win_gpu_ms += gpu_step_ms;
+                ++win_gpu_n;
+            }
             win_n += 1;
             if ((step + 1) % log_every == 0) {
                 const double ms = win_ms / win_n;
                 const double tok_s = (double)N * 1000.0 / ms;
                 const double eta_h = (double)(steps_total - step - 1) * ms / 3.6e6;
-                std::printf("step %d loss %.4f ema %.4f lr %.5f  %.0f tok/s  eta %.1f h  devmem %.0f/%.0f MB\n",
+                std::printf("step %d loss %.4f ema %.4f lr %.5f  %.0f tok/s  eta %.1f h  devmem %.0f/%.0f MB",
                             step + 1, lv, loss_ema, lr_c, tok_s, eta_h,
                             (double)runtime.buffer_bytes_live() / 1048576.0,
                             (double)runtime.buffer_bytes_peak() / 1048576.0);
                 if (gpu_timing) {
-                    std::printf("  ms gpu %.2f sync %.2f", gpu_step_ms, sync_ms);
+                    const double gpu_mean = win_gpu_n == win_n ? win_gpu_ms / win_n : -1.0;
+                    std::printf("  ms gpu %.2f sync %.2f window %d", gpu_mean, win_sync_ms / win_n, win_n);
                 }
                 {
                     const char* prof = std::getenv("MOTIFCL_VK_PROFILE");
@@ -436,8 +444,13 @@ int main() {
                         runtime.reset_kernel_profile();
                     }
                 }
+                std::printf("\n");
                 std::fflush(stdout);
-                win_ms = 0.0; win_n = 0;
+                win_ms = 0.0;
+                win_gpu_ms = 0.0;
+                win_sync_ms = 0.0;
+                win_gpu_n = 0;
+                win_n = 0;
             }
             if ((step + 1) % eval_every == 0) {
                 const float vl = eval_val();

@@ -1,0 +1,89 @@
+// Top-1 router + compact assignment lists for the sparse MoE path.
+//
+// Replaces the dense sequence {mm_f32_nn, add_bias_rows, fog_hard_route7_f32}
+// for the routing decision only: the same logits, the same bias-shifts-
+// selection-only rule, the same strict-'>' tie-break (lowest expert index wins
+// equal logits), but the winner is materialised as a compact per-expert token
+// list so the expert GEMMs can be dispatched over `count` rows instead of all
+// `tokens` rows.
+//
+// One workgroup per token. Lane l accumulates the seven router dot products
+// over a strided slice of the input row; the partial sums are reduced through
+// shared memory (no subgroup assumptions, so this runs on any Vulkan 1.0
+// compute device).
+//
+// Buffers:
+//   x        [tokens, dim]  f32, row-major
+//   router_w [dim, 7]       f32, w[i * 7 + e]
+//   router_b [7]            f32
+//   logits   [tokens, 7]    f32 out: router_b[e] already added (the biased
+//                           logits the balance-bias update and the routing
+//                           backward consume)
+//   counts   [8]            u32 out: counts[e] = tokens assigned to expert e
+//                           (entry 7 is left untouched as padding)
+//   list     [7 * capacity] u32 out: list[e * capacity + slot] = token id
+//
+// capacity MUST be >= tokens: every token is assigned to exactly one expert,
+// so a per-expert list can never exceed `tokens` entries and no token is ever
+// dropped. The kernel asserts this by clamping the slot index.
+
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) readonly buffer RouterBuf { float router_w[]; };
+layout(std430, set = 0, binding = 2) readonly buffer BiasBuf { float router_b[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer LogitsBuf { float logits[]; };
+layout(std430, set = 0, binding = 4) buffer CountBuf { uint counts[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer ListBuf { uint list[]; };
+
+layout(push_constant) uniform Push {
+    uint tokens;
+    uint dim;
+    uint capacity;
+} p;
+
+#define EXPERTS 7
+#define LANES 64
+
+shared float partial[EXPERTS][LANES];
+
+void main() {
+    const uint token = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (token >= p.tokens) return;
+
+    float acc[EXPERTS];
+    for (int e = 0; e < EXPERTS; ++e) acc[e] = 0.0;
+
+    const uint row = token * p.dim;
+    for (uint i = lane; i < p.dim; i += uint(LANES)) {
+        const float v = x[row + i];
+        for (int e = 0; e < EXPERTS; ++e) acc[e] += v * router_w[i * uint(EXPERTS) + uint(e)];
+    }
+    for (int e = 0; e < EXPERTS; ++e) partial[e][lane] = acc[e];
+    barrier();
+
+    if (lane == 0u) {
+        float biased[EXPERTS];
+        for (int e = 0; e < EXPERTS; ++e) {
+            float s = 0.0;
+            for (uint j = 0u; j < uint(LANES); ++j) s += partial[e][j];
+            biased[e] = s + router_b[e];
+            logits[row + uint(e)] = biased[e];
+        }
+        // Strict '>' keeps the lowest expert index on ties, matching
+        // fog_hard_route7_f32.comp and the CPU reference.
+        uint best = 0u;
+        float best_value = biased[0];
+        for (int e = 1; e < EXPERTS; ++e) {
+            if (biased[e] > best_value) {
+                best_value = biased[e];
+                best = uint(e);
+            }
+        }
+        const uint slot = atomicAdd(counts[best], 1u);
+        if (slot < p.capacity) list[best * p.capacity + slot] = token;
+    }
+}
