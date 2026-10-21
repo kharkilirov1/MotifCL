@@ -805,6 +805,32 @@ using PFN_vkCreateDevice = VkResult (*)(VkPhysicalDevice physicalDevice,
                                         const VkDeviceCreateInfo* pCreateInfo,
                                         const void* pAllocator,
                                         VkDevice* pDevice);
+// VK_AMD_shader_info: the only way to see the *final* register allocation,
+// because the ISA compile happens in the driver, not in glslc. Used to reason
+// about occupancy (waves per SIMD) instead of guessing it from the source.
+using PFN_vkGetShaderInfoAMD = VkResult (*)(VkDevice device, VkPipeline pipeline,
+                                            std::uint32_t shaderStage, std::uint32_t infoType,
+                                            std::size_t* pInfoSize, void* pInfo);
+struct AmdShaderResourceUsage {
+    std::uint32_t numUsedVgprs;
+    std::uint32_t numUsedSgprs;
+    std::uint32_t ldsSizePerLocalWorkGroup;
+    std::size_t ldsUsageSizeInBytes;
+    std::size_t scratchMemUsageInBytes;
+};
+struct AmdShaderStatisticsInfo {
+    std::uint32_t shaderStageMask;
+    AmdShaderResourceUsage resourceUsage;
+    std::uint32_t numPhysicalVgprs;
+    std::uint32_t numPhysicalSgprs;
+    std::uint32_t numAvailableVgprs;
+    std::uint32_t numAvailableSgprs;
+    std::uint32_t computeWorkGroupSize[3];
+};
+constexpr std::uint32_t kShaderStageComputeBit = 0x00000020u;
+// VkShaderInfoTypeAMD: STATISTICS = 0, BINARY = 1, DISASSEMBLY = 2.
+constexpr std::uint32_t kShaderInfoTypeStatisticsAmd = 0u;
+
 using PFN_vkDestroyDevice = void (*)(VkDevice device, const void* pAllocator);
 using PFN_vkGetDeviceQueue = void (*)(VkDevice device, std::uint32_t queueFamilyIndex,
                                       std::uint32_t queueIndex, VkQueue* pQueue);
@@ -4652,6 +4678,8 @@ struct VulkanRuntime::Impl {
 
     PFN_vkDestroyDevice destroy_device = nullptr;
     PFN_vkGetDeviceQueue get_device_queue = nullptr;
+    PFN_vkGetShaderInfoAMD get_shader_info_amd = nullptr;
+    bool shader_info_enabled = false;
     PFN_vkCreateBuffer create_buffer = nullptr;
     PFN_vkDestroyBuffer destroy_buffer = nullptr;
     PFN_vkGetBufferMemoryRequirements get_buffer_memory_requirements = nullptr;
@@ -5227,6 +5255,10 @@ struct VulkanRuntime::Impl {
         trace_immediate = trace_env && *trace_env && *trace_env != '0';
         const char* gap_env = std::getenv("MOTIFCL_VK_OP_PROFILE");
         op_gap_enabled = gap_env && *gap_env && *gap_env != '0';
+        // MOTIFCL_VK_SHADER_INFO=1 prints the driver's final register allocation
+        // and LDS footprint per pipeline, i.e. the inputs to occupancy.
+        const char* shader_env = std::getenv("MOTIFCL_VK_SHADER_INFO");
+        shader_info_enabled = shader_env && *shader_env && *shader_env != '0';
         return true;
     }
 
@@ -5340,6 +5372,34 @@ struct VulkanRuntime::Impl {
             return nullptr;
         }
         pipeline_cache.emplace(key, pipeline);
+        if (shader_info_enabled && get_shader_info_amd) {
+            // Two-step protocol: size first, then the payload.
+            std::size_t info_size = 0;
+            AmdShaderStatisticsInfo info{};
+            const VkResult size_rc = get_shader_info_amd(device, pipeline, kShaderStageComputeBit,
+                                                         kShaderInfoTypeStatisticsAmd, &info_size, nullptr);
+            const VkResult info_rc =
+                (size_rc == VK_SUCCESS && info_size >= sizeof(info))
+                    ? get_shader_info_amd(device, pipeline, kShaderStageComputeBit,
+                                          kShaderInfoTypeStatisticsAmd, &info_size, &info)
+                    : size_rc;
+            if (info_rc == VK_SUCCESS) {
+                // waves/SIMD is the occupancy ceiling: a wave64 needs 64 lanes'
+                // worth of VGPRs out of the SIMD's 256-per-lane file, so
+                // floor(256 / vgprs) waves fit, further capped by the 40-wave
+                // workgroup limit and by LDS (64 KB per CU / lds per group).
+                const std::uint32_t vgprs = info.resourceUsage.numUsedVgprs ? info.resourceUsage.numUsedVgprs : 1u;
+                const std::uint32_t waves_by_vgpr = (info.numAvailableVgprs ? info.numAvailableVgprs : 256u) / vgprs;
+                const double lds_bytes = static_cast<double>(info.resourceUsage.ldsUsageSizeInBytes);
+                const double waves_by_lds = lds_bytes > 0.0 ? (65536.0 / lds_bytes) : 64.0;
+                std::fprintf(stderr,
+                             "[shaderinfo] %-34s vgpr %3u/%3u sgpr %3u/%3u lds %5.0f B scratch %zu B"
+                             "  -> %u waves/SIMD (lds cap %.1f)\n",
+                             spirv_kernel_name(spirv), info.resourceUsage.numUsedVgprs,
+                             info.numAvailableVgprs, info.resourceUsage.numUsedSgprs, info.numAvailableSgprs,
+                             lds_bytes, info.resourceUsage.scratchMemUsageInBytes, waves_by_vgpr, waves_by_lds);
+            }
+        }
         return pipeline;
     }
 
@@ -6127,6 +6187,7 @@ struct VulkanRuntime::Impl {
 
         bool has_i8_storage_extension = false;
         bool has_atomic_float_extension = false;
+        bool has_shader_info_extension = false;
         if (enumerate_device_extension_properties) {
             std::uint32_t extension_count = 0;
             if (enumerate_device_extension_properties(physical_device, nullptr, &extension_count, nullptr) ==
@@ -6141,6 +6202,9 @@ struct VulkanRuntime::Impl {
                         }
                         if (std::strcmp(extension.extensionName, "VK_EXT_shader_atomic_float") == 0) {
                             has_atomic_float_extension = true;
+                        }
+                        if (std::strcmp(extension.extensionName, "VK_AMD_shader_info") == 0) {
+                            has_shader_info_extension = true;
                         }
                     }
                 }
@@ -6179,9 +6243,14 @@ struct VulkanRuntime::Impl {
         // atomics); the scatter path stays dormant and the brute-force
         // embedding weight backward is used instead.
         const bool enable_atomic_float = has_atomic_float_extension;
+        // VK_AMD_shader_info must be enabled at device creation for
+        // vkGetDeviceProcAddr to return vkGetShaderInfoAMD; enabling it is free
+        // and it is the only way to read the driver's final register allocation.
+        const char* shader_info_extension = "VK_AMD_shader_info";
         std::vector<const char*> enabled_device_extensions;
         if (enable_i8_storage) enabled_device_extensions.push_back(i8_storage_extension);
         if (enable_atomic_float) enabled_device_extensions.push_back(atomic_float_extension);
+        if (has_shader_info_extension) enabled_device_extensions.push_back(shader_info_extension);
 
         const float priority = 1.0f;
         const VkDeviceQueueCreateInfo queue_create_info{
@@ -6246,6 +6315,7 @@ struct VulkanRuntime::Impl {
         destroy_shader_module = load_device(PFN_vkDestroyShaderModule{}, "vkDestroyShaderModule");
         create_compute_pipelines = load_device(PFN_vkCreateComputePipelines{}, "vkCreateComputePipelines");
         destroy_pipeline = load_device(PFN_vkDestroyPipeline{}, "vkDestroyPipeline");
+        get_shader_info_amd = load_device(PFN_vkGetShaderInfoAMD{}, "vkGetShaderInfoAMD");
         create_pipeline_cache = load_device(PFN_vkCreatePipelineCache{}, "vkCreatePipelineCache");
         destroy_pipeline_cache = load_device(PFN_vkDestroyPipelineCache{}, "vkDestroyPipelineCache");
         get_pipeline_cache_data = load_device(PFN_vkGetPipelineCacheData{}, "vkGetPipelineCacheData");

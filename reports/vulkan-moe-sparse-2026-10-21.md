@@ -1,4 +1,4 @@
-# Vulkan MoE sparse execution — phases A–E
+# Vulkan MoE sparse execution — phases A–F
 
 Date 2026-10-21/22. Repo `motifcl_production`, branch `perf/vulkan-moe-sparse`
 (created from `main` at `ad6a00f`), base commit
@@ -700,4 +700,124 @@ is now:
 
 The GPU is now decisively the critical path again: 171.7 ms of a 200.5 ms step
 is device execution, and the single largest kernel remains `counter_gemm_db` at
-29.6% of it.
+29.6% of it. **That is why the ordering above is not the priority order.** The
+next thing to do is not (2) or (3); it is Phase F — measuring whether the
+dominant kernel is efficient at all, because 29.6% of the step sitting at 14%
+of peak is a bigger and cheaper lever than either. Phase F found that it is
+not, and why.
+
+# Phase F — Investigation of counter_gemm_db
+
+Scope: measurement only, no kernel changes. The question was whether the
+29.6%-of-step kernel is inefficient (and therefore a lever) or simply doing the
+work it must do.
+
+## F.1 Reading the driver's real register allocation
+
+`glslc` cannot answer occupancy questions — the ISA compile happens in the
+driver. `VK_AMD_shader_info` can, and two things were needed to get it:
+
+1. The extension must be **enabled at device creation** for
+   `vkGetDeviceProcAddr` to return `vkGetShaderInfoAMD`; without it the pointer
+   is null and the first attempt silently produced nothing.
+2. `VK_SHADER_INFO_TYPE_STATISTICS_AMD` is **0**, not 1 (the enum is
+   STATISTICS=0, BINARY=1, DISASSEMBLY=2), and the call is a two-step
+   size-then-payload protocol.
+
+Both are now in the runtime behind `MOTIFCL_VK_SHADER_INFO=1`, which prints
+VGPR/SGPR/LDS/scratch per pipeline plus the resulting waves per SIMD.
+
+## F.2 Occupancy (RX 580, Polaris 10, 4 SIMDs/CU, 36 CU)
+
+| kernel | VGPR | SGPR | LDS | waves/SIMD | limiter |
+|---|---:|---:|---:|---:|---|
+| `counter_gemm_db` | 103 | 34 | 8448 B | **2** | VGPR |
+| `counter_gemm_gather_db` | 103 | 34 | 8448 B | **2** | VGPR |
+| `mm_f32_db32` | 99 | 26 | 8192 B | 2 | VGPR |
+| `mm_f32_db64` | 73 | 26 | 16384 B | 3 | VGPR (LDS allows 4) |
+| `mm_f32_nn_rb4` | 38 | 26 | 4288 B | 6 | VGPR |
+| `mm_f32_nt` / `tn` | 24-25 | 28 | 2176 B | 10 | - |
+| `mm_f32_nn` | 31 | 24 | 2112 B | 8 | - |
+| `gqa_fwd_causal4_f32` | 24 | 27 | 5120 B | 10 | LDS |
+| `swiglu_f32`, `swiglu_bwd_f32` | 5 | 18-22 | 0 | 51 | - |
+| `rmsnorm_f32_subgroup` | 6 | 22 | 0 | 42 | - |
+
+A wave64 needs 64 lanes of VGPRs from a 256-per-lane file, so
+`waves/SIMD = floor(256 / vgprs)`; the cap is 10. `counter_gemm_db` sits at
+**2 of 10**, i.e. 20% of the hardware's latency-hiding capacity. The 4x4
+per-lane accumulator tile alone is 16 registers, so 103 means the decode chain
+is being kept live across the k-loop.
+
+## F.3 Achieved throughput, same arithmetic
+
+| kernel | shape | FLOPs | time | GFLOP/s | % of 6.17 TFLOP/s |
+|---|---|---:|---:|---:|---:|
+| `counter_gemm_db` (dense, 14 calls) | 7 x [2048,288]x[288,192] | 3.17 G | 3663.8 us | **866** | 14.0% |
+| `counter_gemm_gather_db` (sparse, 14 calls) | 7 x [~293,288]x[288,192] | 0.453 G useful | 1037.1 us | **437** | 7.1% |
+| `mm_f32_db64` (LM head) | [2048,288]x[288,32000] | 37.75 G | 13.175 ms | **2866** | 46.4% |
+
+Two separate gaps, and they have different causes.
+
+## F.4 The sparse kernel's gap is parallelism, not waste
+
+The sparse GEMM does the *same tile arithmetic* as the dense one and still
+runs at half the efficiency per useful FLOP. The reason is the grid size, not
+the gather:
+
+- dense: 64 row tiles x 6 column tiles = **384 workgroups** per expert, one
+  wave each, against a machine that holds 288 waves concurrently (36 CU x
+  4 SIMD x 2 waves). One dispatch nearly fills it.
+- sparse: ~10 live row tiles x 6 = **60 workgroups** per expert dispatch. The
+  grid is still sized for 64 row tiles, so 324 of 384 workgroups exit
+  immediately — but even the 60 real ones occupy only 60 of 288 slots, i.e.
+  **21% of the machine**, and no amount of removing empty workgroups changes
+  that.
+
+This is the missing explanation for the Phase C anomaly (`gather_db` = 948 us
+of a 1040 us prefill dispatch, 1.65x less efficient per FLOP than dense): the
+work is real, but it is delivered in seven small batches instead of one big
+one.
+
+**Consequence:** the fix is not a better tile, it is **one dispatch for all
+seven experts** — a flat job list of (expert, row-tile, col-tile) triples, with
+the grid size read on the device via `vkCmdDispatchIndirect`. That turns
+7 x 60 = 420 workgroups into a single dispatch that fills the machine, and the
+dense number (866 GFLOP/s) is the reference it should approach. Estimated
+prefill GEMM: 948 us -> ~500 us.
+
+This also corrects an earlier judgement: the Phase C report deferred indirect
+dispatch on the grounds that empty workgroups probably cost little. They do
+cost little — but the *small live grid* costs half the throughput, and indirect
+dispatch is the only way to fix it, because the grid size depends on a value
+the host does not have.
+
+## F.5 The dense kernel's gap is occupancy (hypothesis)
+
+`counter_gemm_db` at 866 GFLOP/s is 3.3x below `mm_f32_db64` at 2866 GFLOP/s,
+despite reading **5.4x fewer weight bytes** (6-bit packed vs F32). Bandwidth is
+therefore not the limiter; the byte-load decode path and occupancy are.
+
+The correlation is suggestive and not yet proven: `mm_f32_db64` runs at 3
+waves/SIMD with 73 VGPRs, `counter_gemm_db` at 2 waves with 103. Going from 2 to
+3 waves is a 50% increase in in-flight work to hide the `state[]` load latency.
+Reducing the kernel below 85 VGPRs would give 3 waves, below 64 would give 4
+(LDS allows 7.8, so LDS is not binding).
+
+What is *not* yet separated: how much of the 866 vs 2866 gap is occupancy and
+how much is the decode instruction stream itself (3 scalar byte loads plus a
+`scale[]` load per group of four weights, with a 216-byte stride between
+adjacent output columns). Separating them needs a variant kernel, which is the
+next step rather than a conclusion.
+
+## F.6 Next steps, in order
+
+1. **Flat job list + `vkCmdDispatchIndirect`** for the sparse expert GEMMs.
+   Largest, best-understood win: recovers roughly half of a 948 us prefill
+   dispatch, and it is the only fix for the small-grid problem.
+2. **VGPR budget for `counter_gemm_db`**: get 103 -> <=85 for 3 waves/SIMD and
+   re-measure. Cheap to try, and the measurement says occupancy is the
+   difference between this kernel and the F32 one.
+3. **State layout**: if (2) does not move the number, transpose the packed
+   state so a warp's lanes read contiguous bytes instead of 12 bytes every
+   216, and re-measure. This changes the on-disk checkpoint layout, so it is
+   deliberately last.
