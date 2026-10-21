@@ -621,12 +621,19 @@ worth saying so plainly:
 
 ## E.4 The larger lever is that host and device never overlap
 
-From §D.5: a step is 73 ms of host work **serialized with** 178 ms of GPU work,
-because `batch_begin` records the entire graph and `batch_end` submits and
-waits. The step is therefore `CPU + GPU`, not `max(CPU, GPU)`. Double-buffering
-the activations and recording step N+1 while step N executes would take the
-step from ~258 ms toward ~185 ms, i.e. **up to +40%**, for no change to any
-kernel or to the numerics.
+From §D.5: at the time of that measurement a step was 73 ms of host work
+**serialized with** 178 ms of GPU work, because `batch_begin` records the
+entire graph and `batch_end` submits and waits. The step was therefore
+`CPU + GPU`, not `max(CPU, GPU)`, and overlapping them looked like a +40%
+ceiling.
+
+**That estimate is stale and the honest number is much smaller.** §E.6 removed
+34 ms of that host work (the pool misses), so the current step is ~29 ms of
+host work against 171.7 ms of GPU time. The overlap ceiling is therefore about
+`max(171.7, 29) = 171.7` versus the present 200.5 ms, i.e. **~+16%**, and less
+in practice because the balance read-back and the optimizer both consume GPU
+results and cannot be recorded ahead of them. The measurement that made the
+overlap look like the big prize was measuring an allocation bug.
 
 That is the real Phase E/F target, and it is an architectural change to the
 trainer and the runtime's batch ownership: two command buffers, two descriptor
@@ -683,8 +690,14 @@ is now:
 1. ~~Reduce the retained-activation footprint so double buffering fits~~ —
    done, by fixing allocation classes rather than by touching activations
    (§E.6): 2360 MB, 630/630 pool hits, +21.3% end-to-end.
-2. Overlap host recording with device execution (~+40% ceiling). The VRAM gate
-   is cleared and the remaining work is two command buffers, two fences and two
-   descriptor sets in flight, with the trainer submitting the forward before
-   recording the backward.
+2. Overlap host recording with device execution. The ceiling is now ~+16%,
+   not the +40% §E.4 originally projected, because fixing the allocation
+   classes removed most of the host work that would have been hidden. The
+   remaining work is two command buffers, two fences and two descriptor sets in
+   flight, with the trainer submitting the forward before recording the
+   backward; it does not require doubling the activations (§E.4).
 3. Sparse backward (~10% of step GPU) — only worth its complexity after 2.
+
+The GPU is now decisively the critical path again: 171.7 ms of a 200.5 ms step
+is device execution, and the single largest kernel remains `counter_gemm_db` at
+29.6% of it.
