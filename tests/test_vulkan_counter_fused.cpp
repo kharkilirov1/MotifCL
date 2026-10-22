@@ -199,8 +199,11 @@ void run_case(motifcl::Backend& backend, int rows, int in_features,
         autograd::begin_graph_capture();
         auto y_fast = fast.forward(x_fast);
         const auto forward_graph = autograd::end_graph_capture();
-        if (!graph_has_op(forward_graph,
-                          "compact_counter_forward_vulkan_f32_rb4")) {
+        // The counter forward may run the decode-inside-GEMM kernel (rb4) or the
+        // MOTIFCL_COUNTER_DECODE_DENSE decode-then-dense-GEMM path; both must
+        // still record themselves in the captured graph.
+        if (!graph_has_op(forward_graph, "compact_counter_forward_vulkan_f32_rb4") &&
+            !graph_has_op(forward_graph, "compact_counter_forward_vulkan_f32_decode_dense")) {
             throw std::runtime_error(
                 "counter forward is missing Vulkan graph metadata");
         }
@@ -228,20 +231,35 @@ void run_case(motifcl::Backend& backend, int rows, int in_features,
         std::uint64_t db_calls = 0;
         std::uint64_t word_db_calls = 0;
         std::uint64_t scalar_grad_x_calls = 0;
+        std::uint64_t decode_calls = 0;
         for (const auto& profile : backend.vulkan_runtime().kernel_profile()) {
             if (profile.calls == 0) continue;
             saw_tiled |= profile.name == "counter_update_apply_f32";
             saw_legacy |= profile.name == "counter_apply_update_fused_f32";
             if (profile.name == "counter_gemm_db") db_calls += profile.calls;
             if (profile.name == "counter_gemm_word_db") word_db_calls += profile.calls;
+            if (profile.name == "counter_decode_weight_f32") decode_calls += profile.calls;
             if (profile.name == "counter_backward_input_f32_rb4") {
                 scalar_grad_x_calls += profile.calls;
             }
         }
+        // MOTIFCL_COUNTER_DECODE_DENSE replaces each projection with a decode plus
+        // a dense FP32 GEMM. One decode per projection is the equivalent signal
+        // that a real Vulkan projection kernel ran, which is what this assertion
+        // is about; the kernel identity is not the property under test.
+        const char* dense_env = std::getenv("MOTIFCL_COUNTER_DECODE_DENSE");
+        const bool dense_path = dense_env && *dense_env == '1';
+        // Only rewrite the expectation when the dense path actually engaged: the
+        // module also gates it on the row count, and these shapes are small.
+        const bool dense_engaged = dense_path && decode_calls > 0;
+        if (dense_engaged) {
+            db_calls = decode_calls;
+            word_db_calls = 0;
+        }
         if (can_profile && (saw_tiled != expect_tiled || saw_legacy == expect_tiled)) {
             throw std::runtime_error("counter update selected an unexpected profiled path");
         }
-        const bool expect_word = word_load && in_features % 4 == 0 && out_features % 4 == 0;
+        const bool expect_word = !dense_engaged && word_load && in_features % 4 == 0 && out_features % 4 == 0;
         const std::uint64_t expected_db = out_features % 4 == 0 ? 2u : 1u;
         if (can_profile && (word_db_calls != (expect_word ? expected_db : 0u) ||
             db_calls != (expect_word ? 0u : expected_db) ||

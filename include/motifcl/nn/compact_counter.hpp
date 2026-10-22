@@ -54,6 +54,13 @@ public:
     Tensor v;       // F32 [out]
 
 private:
+    // Lazily allocated dense [out,in] FP32 mirror of the packed state. Only the
+    // MOTIFCL_COUNTER_DECODE_DENSE A/B path uses it; it is refreshed from the
+    // packed state on every call (the state moves every optimizer step) and the
+    // buffer is reused so the path does not pay an allocation per projection.
+    const Tensor& ensure_dense_weight() const;
+    mutable Tensor dense_weight_;
+
     Backend* backend_ = nullptr;
     int in_ = 0;
     int out_ = 0;

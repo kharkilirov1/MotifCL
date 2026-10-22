@@ -12,6 +12,8 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <cctype>
+#include <cctype>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -830,6 +832,7 @@ struct AmdShaderStatisticsInfo {
 constexpr std::uint32_t kShaderStageComputeBit = 0x00000020u;
 // VkShaderInfoTypeAMD: STATISTICS = 0, BINARY = 1, DISASSEMBLY = 2.
 constexpr std::uint32_t kShaderInfoTypeStatisticsAmd = 0u;
+constexpr std::uint32_t kShaderInfoTypeDisassemblyAmd = 2u;
 
 using PFN_vkDestroyDevice = void (*)(VkDevice device, const void* pAllocator);
 using PFN_vkGetDeviceQueue = void (*)(VkDevice device, std::uint32_t queueFamilyIndex,
@@ -4680,6 +4683,10 @@ struct VulkanRuntime::Impl {
     PFN_vkGetDeviceQueue get_device_queue = nullptr;
     PFN_vkGetShaderInfoAMD get_shader_info_amd = nullptr;
     bool shader_info_enabled = false;
+    // MOTIFCL_VK_SHADER_ISA=<kernel>|all dumps the driver's GCN disassembly to
+    // isa_<kernel>.txt and prints an opcode histogram. The statistics query
+    // says how many registers a kernel uses; only the ISA says why.
+    std::string shader_isa_filter;
     PFN_vkCreateBuffer create_buffer = nullptr;
     PFN_vkDestroyBuffer destroy_buffer = nullptr;
     PFN_vkGetBufferMemoryRequirements get_buffer_memory_requirements = nullptr;
@@ -5259,6 +5266,11 @@ struct VulkanRuntime::Impl {
         // and LDS footprint per pipeline, i.e. the inputs to occupancy.
         const char* shader_env = std::getenv("MOTIFCL_VK_SHADER_INFO");
         shader_info_enabled = shader_env && *shader_env && *shader_env != '0';
+        const char* isa_env = std::getenv("MOTIFCL_VK_SHADER_ISA");
+        if (isa_env && *isa_env && std::strcmp(isa_env, "0") != 0) {
+            shader_isa_filter = isa_env;
+            shader_info_enabled = true;
+        }
         return true;
     }
 
@@ -5372,6 +5384,57 @@ struct VulkanRuntime::Impl {
             return nullptr;
         }
         pipeline_cache.emplace(key, pipeline);
+        if (!shader_isa_filter.empty() && get_shader_info_amd) {
+            const char* kernel = spirv_kernel_name(spirv);
+            if (kernel && (shader_isa_filter == "all" || shader_isa_filter == kernel)) {
+                std::size_t isa_size = 0;
+                if (get_shader_info_amd(device, pipeline, kShaderStageComputeBit, kShaderInfoTypeDisassemblyAmd,
+                                        &isa_size, nullptr) == VK_SUCCESS &&
+                    isa_size > 1) {
+                    std::vector<char> isa(isa_size, '\0');
+                    if (get_shader_info_amd(device, pipeline, kShaderStageComputeBit,
+                                            kShaderInfoTypeDisassemblyAmd, &isa_size, isa.data()) == VK_SUCCESS) {
+                        const std::string path = std::string("isa_") + kernel + ".txt";
+                        if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
+                            std::fwrite(isa.data(), 1, isa_size, f);
+                            std::fclose(f);
+                        }
+                        // Opcode histogram: every instruction line starts with
+                        // whitespace then the mnemonic. This is what shows
+                        // whether a kernel is FMA-bound or issue-bound.
+                        std::unordered_map<std::string, std::uint32_t> hist;
+                        std::uint32_t total = 0;
+                        std::istringstream stream(std::string(isa.data(), isa_size));
+                        std::string line;
+                        while (std::getline(stream, line)) {
+                            std::size_t i = line.find_first_not_of(" \t");
+                            if (i == std::string::npos || line.compare(i, 2, "//") == 0) continue;
+                            if (line.find("/*", i) == 0) continue;
+                            std::size_t j = i;
+                            while (j < line.size() && (std::isalnum(static_cast<unsigned char>(line[j])) ||
+                                                       line[j] == '_')) {
+                                ++j;
+                            }
+                            if (j == i) continue;
+                            ++hist[line.substr(i, j - i)];
+                            ++total;
+                        }
+                        std::vector<std::pair<std::string, std::uint32_t>> rows(hist.begin(), hist.end());
+                        std::sort(rows.begin(), rows.end(),
+                                  [](const std::pair<std::string, std::uint32_t>& l,
+                                     const std::pair<std::string, std::uint32_t>& r) {
+                                      return l.second > r.second;
+                                  });
+                        std::fprintf(stderr, "[isa] %s: %u instructions -> %s\n", kernel, total, path.c_str());
+                        for (std::size_t i = 0; i < rows.size() && i < 14; ++i) {
+                            std::fprintf(stderr, "[isa]   %-14s %5u  %5.1f%%\n", rows[i].first.c_str(),
+                                         rows[i].second,
+                                         100.0 * static_cast<double>(rows[i].second) / static_cast<double>(total));
+                        }
+                    }
+                }
+            }
+        }
         if (shader_info_enabled && get_shader_info_amd) {
             // Two-step protocol: size first, then the payload.
             std::size_t info_size = 0;

@@ -9,6 +9,7 @@ set(MOTIFCL_BENCHMARKS
     bench_lora
     bench_vulkan_perf
     bench_vulkan_gemm_shapes
+    bench_vulkan_counter_gemm
 )
 
 foreach(bench ${MOTIFCL_BENCHMARKS})

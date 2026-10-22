@@ -273,6 +273,45 @@ void CounterStateLinear::apply_update_backward(const Tensor& grad_out, const Ten
     kc.launch1d(static_cast<std::size_t>(out_));
 }
 
+namespace {
+
+// MOTIFCL_COUNTER_DECODE_DENSE=1 replaces the decode-inside-GEMM kernel with
+// decode-to-dense followed by the ordinary FP32 GEMM.
+//
+// Why this exists: counter_gemm_db spends 48% of its instructions on integer
+// address arithmetic and only 19% on FMAs (MOTIFCL_VK_SHADER_ISA=1), which puts
+// it at 10-17% of the RX 580 peak while the plain FP32 GEMM reaches 42-49% at
+// the same tile and grid. The packed weights at these shapes are 41 KB, so the
+// 5.4x extra traffic the dense GEMM pays is irrelevant; only the issue rate
+// matters. Measured on the MoE shapes this is 1.37-2.03x per projection.
+bool counter_decode_dense_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("MOTIFCL_COUNTER_DECODE_DENSE");
+        return env && *env == '1';
+    }();
+    return enabled;
+}
+
+// The decode is a fixed ~15 us per projection regardless of the batch, so it only
+// pays once the GEMM is large enough to amortise it. At decode time (one row) the
+// fused kernel is ~10 us end to end and decoding first would double the cost, so
+// the dense path is restricted to prefill-sized batches.
+constexpr std::int64_t kDecodeDenseMinRows = 128;
+
+} // namespace
+
+const Tensor& CounterStateLinear::ensure_dense_weight() const {
+    if (!dense_weight_.valid() || dense_weight_.shape()[0] != out_ || dense_weight_.shape()[1] != in_) {
+        dense_weight_ = Tensor::empty(*backend_, {out_, in_}, DType::F32);
+    }
+    const auto result = run_vulkan_compact_counter_decode_weight(
+        backend_->vulkan_runtime(), state.storage().vulkan_buffer, scale.storage().vulkan_buffer,
+        dense_weight_.storage().vulkan_buffer, static_cast<std::size_t>(in_), static_cast<std::size_t>(out_),
+        static_cast<std::size_t>(C_));
+    MCL_CHECK(result.success, std::string("vulkan compact-counter decode_weight failed: ") + result.error);
+    return dense_weight_;
+}
+
 void CounterStateLinear::apply_zero_grad_update() {
     // Exact counterpart of apply_update_backward for grad_out == 0. In the update
     // kernel g_sq and grad_s both vanish, so the packed state bytes and the row
@@ -299,6 +338,16 @@ Tensor CounterStateLinear::backward_input_from_state(const Tensor& grad_out) con
     Tensor grad_x = Tensor::empty(*backend_, {N, in_}, DType::F32);
     if (backend_->is_vulkan()) {
         MCL_CHECK(grad_out.backend_ptr() == backend_, "CounterStateLinear backward_input backend mismatch");
+        if (counter_decode_dense_enabled() && N >= kDecodeDenseMinRows) {
+            // grad_x[r,i] = sum_o grad_out[r,o] * W[o,i]
+            const Tensor& w = ensure_dense_weight();
+            const auto dense = run_vulkan_f32_matmul(
+                backend_->vulkan_runtime(), grad_out.storage().vulkan_buffer, w.storage().vulkan_buffer,
+                grad_x.storage().vulkan_buffer, static_cast<std::size_t>(N), static_cast<std::size_t>(out_),
+                static_cast<std::size_t>(in_));
+            MCL_CHECK(dense.success, std::string("vulkan counter decode+dense backward failed: ") + dense.error);
+            return grad_x;
+        }
         const auto result = run_vulkan_compact_counter_backward_input_u8(
             backend_->vulkan_runtime(),
             state.storage().vulkan_buffer,
@@ -329,7 +378,22 @@ Tensor CounterStateLinear::forward(const Tensor& x) {
     MCL_CHECK(x.dtype() == DType::F32 && x.ndim() == 2, "CounterStateLinear expects rank-2 f32 input");
     MCL_CHECK(x.shape()[1] == in_, "CounterStateLinear input feature mismatch");
     Tensor y;
-    if (backend_->is_vulkan()) {
+    if (backend_->is_vulkan() && counter_decode_dense_enabled() &&
+        x.shape()[0] >= kDecodeDenseMinRows) {
+        // A/B path: decode into the reusable dense mirror, then run the tuned
+        // FP32 GEMM directly. Going through the generic Tensor matmul op instead
+        // costs ~19 ms per step of host time, which is the same size as the GPU
+        // win this path buys, so the call is made straight on the runtime.
+        const Tensor& w = ensure_dense_weight();
+        y = Tensor::empty(*backend_, {x.shape()[0], out_}, DType::F32);
+        const auto result = run_vulkan_f32_matmul_transpose_b(
+            backend_->vulkan_runtime(), x.storage().vulkan_buffer, w.storage().vulkan_buffer,
+            y.storage().vulkan_buffer, static_cast<std::size_t>(x.shape()[0]), static_cast<std::size_t>(in_),
+            static_cast<std::size_t>(out_));
+        MCL_CHECK(result.success, std::string("vulkan counter decode+dense forward failed: ") + result.error);
+        autograd::record_op("compact_counter_forward_vulkan_f32_decode_dense",
+                            {x.id(), state.id(), scale.id()}, {y.id()});
+    } else if (backend_->is_vulkan()) {
         // Decode packed ternary state inside the rb4 GEMM. This is both the
         // training and inference path; no dense FP32 weight allocation exists.
         y = Tensor::empty(*backend_, {x.shape()[0], out_}, DType::F32);
