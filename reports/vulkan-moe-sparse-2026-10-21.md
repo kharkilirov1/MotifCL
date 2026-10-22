@@ -1,4 +1,4 @@
-# Vulkan MoE sparse execution — phases A–F
+# Vulkan MoE sparse execution — phases A–G
 
 Date 2026-10-21/22. Repo `motifcl_production`, branch `perf/vulkan-moe-sparse`
 (created from `main` at `ad6a00f`), base commit
@@ -793,6 +793,11 @@ the host does not have.
 
 ## F.5 The dense kernel's gap is occupancy (hypothesis)
 
+> **Superseded by G.2.** The ISA was read in the next phase and the hypothesis is
+> wrong: the gap is instruction issue, not occupancy. The VGPR count (103 vs 99
+> for the equivalent FP32 kernel) is a 4-register difference and cannot explain a
+> 3x throughput gap. Kept as written so the reasoning trail stays visible.
+
 `counter_gemm_db` at 866 GFLOP/s is 3.3x below `mm_f32_db64` at 2866 GFLOP/s,
 despite reading **5.4x fewer weight bytes** (6-bit packed vs F32). Bandwidth is
 therefore not the limiter; the byte-load decode path and occupancy are.
@@ -821,3 +826,172 @@ next step rather than a conclusion.
    state so a warp's lanes read contiguous bytes instead of 12 bytes every
    216, and re-measure. This changes the on-disk checkpoint layout, so it is
    deliberately last.
+
+# Phase G — The counter GEMM is issue-bound, and the measured way around it
+
+Phase F could only see VGPR/LDS and guessed at occupancy. This phase reads the
+driver's disassembly, settles the question, and measures a remedy.
+
+## G.1 An isolated harness first
+
+Iterating on a kernel through a 25-step trainer run is too slow and too noisy,
+so `benchmarks/bench_vulkan_counter_gemm.cpp` issues only the counter
+projection, at the trainer's exact shapes (`d_model=288`, `hidden_exp=192`,
+`batch=2048`), and reports GPU time from timestamp queries plus the achieved
+GFLOP/s. Every number below comes from it unless stated otherwise.
+
+## G.2 The ISA, which is the whole answer
+
+`MOTIFCL_VK_SHADER_ISA=<kernel>|all` dumps the GCN disassembly through
+`VK_SHADER_INFO_TYPE_DISASSEMBLY_AMD` (type **2**; the enum is
+STATISTICS=0, BINARY=1, DISASSEMBLY=2) and prints an opcode histogram.
+`counter_gemm_db` is **1381 instructions**, of which:
+
+| category | count | share |
+|---|---:|---:|
+| **FMA** (`v_mac_f32`) | **256** | **18.5%** |
+| integer address arithmetic (`v_add_u32`, `v_lshlrev_b32`, `v_and_b32`, `v_mul_lo_u32`, …) | 315 | 22.8% |
+| predication / branch (`s_and_b64`, `s_and_saveexec_b64`, `s_cbranch_execz`, `v_cmp_*`) | 197 | 14.3% |
+| waits (`s_waitcnt`) | 118 | 8.5% |
+| register moves (`v_mov_b32`) | 85 | 6.2% |
+| LDS reads (`ds_read_b128`, `ds_read_b32`) | 64 | 4.6% |
+| decode converts + FMUL (`v_cvt_f32_i32`, `v_mul_f32`) | 64 | 4.6% |
+| global loads (all `buffer_load_ubyte` except 12) | 36 | 2.6% |
+| LDS writes | 21 | 1.5% |
+| other | 225 | 16.3% |
+
+The kernel issues **5.4 instructions per FMA**, and only 18.5% of its
+instruction stream is the arithmetic it exists to perform. It is **issue-bound**
+on address computation and on the per-element bounds predication
+(`if (gc < p.out_features && gk < p.in_features)`) that wraps every decode.
+
+This retires the Phase F hypothesis. `mm_f32_db32` uses 99 VGPRs and this kernel
+103 — a 4-register difference cannot produce a 3x throughput gap — and moving
+from 2 to 3 waves/SIMD would not fix a 5:1 instruction overhead. Occupancy was
+never the lever.
+
+## G.3 Same tile, same grid, same FLOPs
+
+Forcing the FP32 kernel to the same variant removes every confound except the
+decode itself:
+
+| kernel | shape | time | GFLOP/s | % of 6.17 TFLOP/s |
+|---|---|---:|---:|---:|
+| `counter_gemm_db` | 2048×192×288 | 272.5–295.2 µs | 767–831 | 12.4–13.5% |
+| `mm_f32_db32` | 2048×192×288 | 159–164 µs | 2.52–2.62 TFLOP/s | 41–42% |
+| `counter_gemm_db` | 2048×288×288 | 351.4–387.7 µs | 877–967 | 14.2–15.7% |
+| `mm_f32_db32` | 2048×288×288 | 198–203 µs | 2.5–3.0 TFLOP/s | 42–49% |
+
+A consistent **1.5–2.0x**. The dense kernel reads 5.4x more weight bytes
+(41 KB vs 221 KB at the largest shape) and is still twice as fast, which
+confirms that at these shapes weight traffic is irrelevant and only issue rate
+matters.
+
+## G.4 Remedy: decode to dense, then the tuned GEMM
+
+`MOTIFCL_COUNTER_DECODE_DENSE=1` decodes the packed state into a reusable dense
+mirror (`counter_decode_weight_f32`, ~15 µs) and runs the ordinary FP32 GEMM on
+it. `CounterStateLinear` keeps the mirror as a private buffer and calls
+`run_vulkan_f32_matmul*` **directly** on the runtime — routing through the
+generic Tensor matmul op instead costs ~19 ms of host time per step, which is
+the same size as the GPU win and cancels it exactly (measured; see G.5).
+
+| shape | mode | counter | decode | dense GEMM | decode+GEMM | gain |
+|---|---|---:|---:|---:|---:|---:|
+| expert_up 2048×288×192 | forward | 349.0 | 15.5 | 161.0 | 177.9 | **1.96x** |
+| expert_down 2048×192×288 | forward | 295.2 | 15.5 | 164.2 | 181.8 | **1.62x** |
+| expert_up 2048×288×192 | backward | 273.4 | 15.2 | 160.6 | 177.3 | **1.54x** |
+| expert_down 2048×192×288 | backward | 272.5 | 15.2 | 159.2 | 174.2 | **1.56x** |
+| attn_qkv 2048×288×288 | forward | 351.4 | 20.8 | 202.9 | 225.4 | **1.56x** |
+| attn_qkv 2048×288×288 | backward | 387.7 | 20.8 | 197.8 | 221.4 | **1.75x** |
+| expert_up 1×288×192 | forward | 91.2 | 14.9 | 10.9 | 25.6 | **3.56x** |
+| expert_down 1×192×288 | forward | 64.8 | 14.7 | 10.2 | 24.5 | **2.65x** |
+
+## G.5 End to end: +6.9%, and why not the 13.7% of GPU it removes
+
+25 steps, seed 1337, B=8, T=256, three runs each, all four numbers from the
+same binary:
+
+| config | tok/s | fwd+bwd GPU | step total | FINAL VAL ppl |
+|---|---:|---:|---:|---:|
+| fused (default) | 9146 / 9177 / 9148 | 168.4–168.9 ms | 223.2–223.9 ms | 470.923 / 470.991 / 470.982 |
+| decode+dense | 9761 / 9751 / 9850 | 145.0–146.6 ms | 207.9–210.0 ms | 471.001 / 471.003 / 471.010 |
+
+**+6.9%** (mean 9157 → 9787 tok/s), GPU **−13.7%**, step **−6.4%**, validation
+perplexity unchanged to within the ~0.03 run-to-run spread already measured.
+
+The step gain is smaller than the GPU gain because a step is `CPU + GPU`
+serialized, not `max(CPU, GPU)`. Today's phase split makes that explicit:
+
+| phase | fused | decode+dense |
+|---|---:|---:|
+| host: forward record | 15.7 ms | 21.4 ms |
+| host+device: record incl. submit | 218.9 ms | 204.9 ms |
+| of which `batch_end` (submit + fence) | 169.3 ms | 147.2 ms |
+| host: balance read-back + bias | 8.5 ms | 8.5 ms |
+| host: optimizer | 4.9 ms | 4.9 ms |
+| **step total** | **223.9 ms** | **209.8 ms** |
+
+`record − submit` is the pure host recording cost: **49.6 ms fused vs 57.7 ms
+decode+dense**. The extra 8 ms is the added decode dispatch per projection, and
+it is why a 23 ms GPU win becomes a 14 ms step win. This is the quantitative
+form of the Phase E claim that host and device never overlap, and it is the
+strongest argument for the double-buffered submit: at these numbers, overlapping
+would recover the whole 14 ms difference and more.
+
+## G.6 The decode case
+
+At one row the fixed decode cost dominates the GEMM, so the path is gated to
+batches of **≥128 rows** and the mission's decode target is untouched. The
+microbenchmark says decode+dense is also faster at batch 1 (25.6 vs 91.2 µs and
+24.5 vs 64.8 µs), which is suspicious on its face — a 1-row GEMM taking 91 µs
+means the fused kernel's fixed cost, not its arithmetic, is what is being
+measured there. That is a lead, not a result: it is a kernel-level number and
+has not been confirmed end to end, so the gate stays.
+
+## G.7 A process error worth recording
+
+The first measurement of this phase was a probe that replaced the three global
+byte loads in the decode with constants, to see whether the loads were the cost.
+It showed 260 → 247 µs, i.e. 5%, so the loads were not the cost. The probe was
+then "reverted" — but the revert copied the backup over the file *after* the
+backup had itself been overwritten by the already-patched file (a retried
+command re-ran the backup step first). The probe stayed live.
+
+Everything measured between that point and its discovery — the isolated
+benchmark's baseline column, the ISA dump, and a full trainer A/B — was measured
+on the patched kernel. It was caught by `test_moe7_reference` reporting
+`rel_err=4.379` where it had been `1.168e-07`: the counter GEMM was returning
+constant-derived weights, the MoE forward no longer matched the CPU reference,
+and the trainer's baseline column produced perplexity ~11 000 instead of ~471.
+`git stash` proved HEAD was clean, `git diff` found the probe, and every number
+in G.2–G.6 was re-measured from a `git checkout`-restored kernel with all ten
+tests green.
+
+The lesson is not "check the revert"; it is that the *baseline* column silently
+became the broken arm and the result looked like a 6.9% win for the other arm.
+A correctness test in the A/B loop is what caught it, and it would not have been
+caught by the timing.
+
+## G.8 What is left in this kernel
+
+Decode+dense routes around the problem but does not fix it: it recovers 1.5–2.0x
+of a 3x gap, and it pays a dispatch and a 221 KB buffer to do so. The ISA says
+where the remaining 2x is, and none of it requires changing the algorithm:
+
+1. **Remove the per-element bounds predication** (197 instructions, 14.3%). Every
+   decode element tests `gc < out_features && gk < in_features` individually.
+   These shapes are all multiples of 32 in both dimensions, so a single uniform
+   "tile fully in bounds" test per workgroup would select a predication-free
+   fast path. This is the largest single block after addressing.
+2. **Hoist the address arithmetic** (315 instructions, 22.8%). The scattered
+   `vec4` stores in `store_a`/`store_b` recompute a full address per component;
+   the `gc * groups_per_row` and `gm * K` products are quarter-rate
+   `v_mul_lo_u32` and are re-issued per tile.
+3. **The 118 waits (8.5%)** follow from (1) and (2): they are the dependencies
+   the predicated chains create.
+
+A kernel with 2 instructions per FMA instead of 5.4 would reach the FP32 kernel's
+42–49% of peak *without* the decode dispatch and *bit-exactly*, which is strictly
+better than the path shipped here. That is the next piece of work, and the
+benchmark in G.1 makes it a minutes-long loop instead of a trainer run.
