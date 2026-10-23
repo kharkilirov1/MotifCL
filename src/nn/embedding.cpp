@@ -33,6 +33,25 @@ Tensor embedding_weight_backward(const Tensor& indices, const Tensor& grad_out, 
             autograd::record_op("embedding_weight_backward_f32_i32", {indices.id(), grad_out.id()}, {out.id()});
             return out;
         }
+        // Reproducibility. The scatter accumulates duplicate token rows in thread
+        // scheduling order, so two identical runs differ in the last bits of the
+        // embedding gradient (and, through Adam, in every checkpoint). The
+        // deterministic two-pass path costs ~0.5% of a step (measured A/B) and makes
+        // a whole training run bit-reproducible, so it is the default;
+        // MOTIFCL_EMBEDDING_NONDETERMINISTIC=1 restores the scatter.
+        static const bool env_nondeterministic =
+            std::getenv("MOTIFCL_EMBEDDING_NONDETERMINISTIC") != nullptr;
+        if (!env_nondeterministic && (embed_dim % 4) == 0) {
+            const auto result = run_vulkan_embedding_weight_backward_deterministic(
+                runtime, indices.storage().vulkan_buffer, grad_out.storage().vulkan_buffer,
+                out.storage().vulkan_buffer, static_cast<std::size_t>(vocab_size),
+                static_cast<std::size_t>(embed_dim), token_count);
+            if (result.success) {
+                autograd::record_op("embedding_weight_backward_f32_i32", {indices.id(), grad_out.id()}, {out.id()});
+                return out;
+            }
+            // Fall through to the scatter/brute-force paths on a rejected shape.
+        }
         // Scatter fast path: O(tokens*embed) work instead of O(vocab*tokens*embed),
         // a large win for NLP shapes (vocab=30k+, token_count=512) where the
         // brute-force scan is ~30x more work. Two variants, same result:

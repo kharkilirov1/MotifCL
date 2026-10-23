@@ -27,6 +27,8 @@
     { vkspirv::k_counter_update_apply_f32, "counter_update_apply_f32" },
     { vkspirv::k_dequantize_q4_scaled_f32, "dequantize_q4_scaled_f32" },
     { vkspirv::k_dequantize_q8_scaled_f32, "dequantize_q8_scaled_f32" },
+    { vkspirv::k_embedding_backward_dup_count_f32_i32, "embedding_backward_dup_count_f32_i32" },
+    { vkspirv::k_embedding_backward_dup_sum_f32_i32, "embedding_backward_dup_sum_f32_i32" },
     { vkspirv::k_embedding_gather_f32_i32, "embedding_gather_f32_i32" },
     { vkspirv::k_embedding_weight_backward_f32_i32, "embedding_weight_backward_f32_i32" },
     { vkspirv::k_embedding_weight_backward_f32_i32_scatter, "embedding_weight_backward_f32_i32_scatter" },

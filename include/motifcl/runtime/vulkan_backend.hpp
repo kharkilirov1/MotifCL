@@ -945,6 +945,20 @@ VulkanOpResult run_vulkan_embedding_weight_backward_scatter_cas(VulkanRuntime& r
                                                                 std::size_t vocab_size,
                                                                 std::size_t embed_dim,
                                                                 std::size_t token_count);
+// Reproducible embedding-weight backward. Pass 1 counts tokens per row with
+// integer atomics (order-independent) and writes each single-token row; pass 2
+// re-sums the rows that received duplicate token ids by walking the ids in
+// ascending order. The result therefore does not depend on thread scheduling,
+// unlike the default float compare-and-swap scatter, whose retry order changes the
+// last bits of every duplicated row (and, through Adam, of the whole checkpoint).
+// The output buffer is zero-filled internally. Requires embed_dim % 4 == 0.
+VulkanOpResult run_vulkan_embedding_weight_backward_deterministic(VulkanRuntime& runtime,
+                                                                  const VulkanBuffer& indices,
+                                                                  const VulkanBuffer& grad_out,
+                                                                  VulkanBuffer& grad_weight,
+                                                                  std::size_t vocab_size,
+                                                                  std::size_t embed_dim,
+                                                                  std::size_t token_count);
 // Token + position embedding: out = token_weight[token_ids] + pos_weight[pos].
 VulkanOpResult run_vulkan_token_position_embedding(VulkanRuntime& runtime,
                                                     const VulkanBuffer& token_weight,

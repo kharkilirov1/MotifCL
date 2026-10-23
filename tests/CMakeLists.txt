@@ -93,7 +93,7 @@ if(TARGET motifcl)
 endif()
 
 if(TARGET motifcl_vulkan_runtime)
-    foreach(test_name test_vulkan_counter_validation test_vulkan_ce_cached test_vulkan_rmsnorm_split test_vulkan_counter_swiglu test_vulkan_moe_balance_update test_vulkan_moe_balance_grad)
+    foreach(test_name test_vulkan_counter_validation test_vulkan_ce_cached test_vulkan_rmsnorm_split test_vulkan_counter_swiglu test_vulkan_moe_balance_update test_vulkan_moe_balance_grad test_vulkan_embedding_backward_det)
         add_executable(${test_name} ${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE motifcl_vulkan_runtime)
         motifcl_apply_compiler_options(${test_name})

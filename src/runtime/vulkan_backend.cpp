@@ -4232,6 +4232,73 @@ VulkanOpResult run_vulkan_embedding_weight_backward_scatter_cas(VulkanRuntime& r
                                    static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
 }
 
+VulkanOpResult run_vulkan_embedding_weight_backward_deterministic(VulkanRuntime& runtime,
+                                                                  const VulkanBuffer& indices,
+                                                                  const VulkanBuffer& grad_out,
+                                                                  VulkanBuffer& grad_weight,
+                                                                  std::size_t vocab_size,
+                                                                  std::size_t embed_dim,
+                                                                  std::size_t token_count) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    if (vocab_size == 0 || embed_dim == 0 || token_count == 0)
+        return fail("Vulkan embedding weight backward deterministic requires non-zero shapes");
+    if ((embed_dim % 4u) != 0) return fail("Vulkan embedding weight backward deterministic requires embed_dim % 4 == 0");
+    const auto kMaxU32 = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (vocab_size > kMaxU32 || token_count > kMaxU32) {
+        return fail("Vulkan embedding weight backward deterministic shape overflows uint32");
+    }
+    if (token_count > kMaxU32 / embed_dim) {
+        return fail("Vulkan embedding weight backward deterministic token_count*embed_dim overflows uint32");
+    }
+    const auto idx_bytes = token_count * sizeof(std::int32_t);
+    const auto grad_bytes = token_count * embed_dim * sizeof(float);
+    const auto out_bytes = vocab_size * embed_dim * sizeof(float);
+    if (indices.nbytes() < idx_bytes) {
+        return fail("Vulkan embedding weight backward deterministic indices buffer too small");
+    }
+    if (grad_out.nbytes() < grad_bytes) {
+        return fail("Vulkan embedding weight backward deterministic grad buffer too small");
+    }
+    if (grad_weight.nbytes() < out_bytes) {
+        return fail("Vulkan embedding weight backward deterministic output buffer too small");
+    }
+    // Rows whose token does not appear are left at zero, so the output is cleared
+    // first; the two passes then write every row exactly once in a fixed order.
+    const auto zero_out = run_vulkan_zero_f32(runtime, grad_weight, vocab_size * embed_dim);
+    if (!zero_out.success) return zero_out;
+
+    VulkanBuffer counts = runtime.create_scratch_buffer("embedding_bwd_counts", vocab_size * sizeof(std::int32_t));
+    VulkanBuffer dup_rows = runtime.create_scratch_buffer("embedding_bwd_dups", token_count * sizeof(std::int32_t));
+    VulkanBuffer dup_count = runtime.create_scratch_buffer("embedding_bwd_dup_count", sizeof(std::int32_t));
+    const auto zero_counts = run_vulkan_zero_f32(runtime, counts, vocab_size);
+    if (!zero_counts.success) return zero_counts;
+    const auto zero_dup_count = run_vulkan_zero_f32(runtime, dup_count, 1);
+    if (!zero_dup_count.success) return zero_dup_count;
+
+    const struct {
+        std::uint32_t tokens;
+        std::uint32_t embed4;
+    } push{static_cast<std::uint32_t>(token_count), static_cast<std::uint32_t>(embed_dim / 4)};
+    {
+        const std::vector<const VulkanBuffer*> buffers = {&indices, &grad_out, &grad_weight, &counts, &dup_rows,
+                                                          &dup_count};
+        auto staged = runtime.dispatch_cached(vkspirv::k_embedding_backward_dup_count_f32_i32,
+                                              vkspirv::k_embedding_backward_dup_count_f32_i32_words,
+                                              buffers, &push, sizeof(push),
+                                              static_cast<std::uint32_t>(token_count), 1, 1);
+        if (!staged.success) return staged;
+    }
+    const std::vector<const VulkanBuffer*> buffers = {&indices, &grad_out, &grad_weight, &dup_rows, &dup_count};
+    return runtime.dispatch_cached(vkspirv::k_embedding_backward_dup_sum_f32_i32,
+                                   vkspirv::k_embedding_backward_dup_sum_f32_i32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>(token_count), 1, 1);
+}
+
 VulkanOpResult run_vulkan_token_position_embedding(VulkanRuntime& runtime,
                                                     const VulkanBuffer& token_weight,
                                                     const VulkanBuffer& pos_weight,

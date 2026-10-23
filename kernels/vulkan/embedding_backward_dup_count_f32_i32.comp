@@ -1,0 +1,45 @@
+// Deterministic embedding-weight backward, pass 1: count tokens per row and
+// publish the rows that need ordered accumulation.
+//
+// One workgroup per token (grid = token_count), lanes cover the embedding dim.
+// The integer atomics only decide *ownership* (first occurrence) and bookkeeping;
+// neither decision depends on thread order for the result, because:
+//   * the first occurrence of a row writes its gradient row directly (single
+//     writer for that phase);
+//   * the first duplicate of that row appends it to a duplicate list, and the
+//     second kernel overwrites the row with an ordered sum.
+// The default scatter instead accumulates every contribution with a float
+// compare-and-swap loop, whose retry order changes the last bits.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer IdsBuf { int ids[]; };
+layout(std430, set = 0, binding = 1) readonly buffer GradBuf { vec4 grad4[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { vec4 out4[]; };
+layout(std430, set = 0, binding = 3) buffer CountBuf { int count[]; };
+layout(std430, set = 0, binding = 4) buffer DupBuf { int dup_rows[]; };
+layout(std430, set = 0, binding = 5) buffer DupCountBuf { int dup_count[]; };
+
+layout(push_constant) uniform Push {
+    uint tokens;
+    uint embed4;  // embed_dim / 4
+} p;
+
+shared int claimed;
+
+void main() {
+    const uint t = uint(gl_WorkGroupID.x);
+    if (t >= p.tokens) return;
+    const uint lane = uint(gl_LocalInvocationID.x);
+    const int row = ids[t];
+    const uint total = p.embed4;
+    if (lane == 0u) claimed = atomicAdd(count[row], 1);
+    barrier();
+    if (claimed == 0) {
+        for (uint q = lane; q < total; q += 64u) out4[uint(row) * total + q] = grad4[t * total + q];
+    } else if (claimed == 1 && lane == 0u) {
+        const int slot = atomicAdd(dup_count[0], 1);
+        dup_rows[slot] = row;
+    }
+}

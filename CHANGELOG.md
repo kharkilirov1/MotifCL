@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Reproducible training: deterministic embedding backward (2026-10-24)
+
+- Root cause of the run-to-run checkpoint differences: on GCN4 / RX 580 (no float
+  atomics) the embedding weight gradient was accumulated with a float
+  compare-and-swap scatter, so duplicate token ids were summed in thread
+  scheduling order. Bisection showed the drift was confined to the embedding row
+  and its Adam state; `MOTIFCL_DISABLE_EMBEDDING_SCATTER=1` made runs identical.
+- New deterministic path (default): `embedding_backward_dup_count_f32_i32` counts
+  tokens per row with order-independent integer atomics and writes the
+  single-token rows, publishing the duplicated rows; `embedding_backward_dup_sum_f32_i32`
+  re-sums those rows in ascending token order. One writer per row per phase.
+  `MOTIFCL_EMBEDDING_NONDETERMINISTIC=1` restores the scatter.
+- Cost: ~0.4 ms GPU per step (~0.3%) measured A/B. Two identical 6-step full
+  runs now produce 430 byte-identical checkpoint files with the same FINAL VAL
+  (6.4265), so checkpoint hashes become a usable exactness witness.
+- New witness `tests/test_vulkan_embedding_backward_det.cpp`: four fixtures
+  (unique/duplicate/all-equal ids and the 32000x288x2048 trainer shape) match an
+  independent CPU reference exactly (max_abs 0.0), repeat byte-identically, and
+  the invalid-argument controls mutate nothing.
+- Evidence: `reports/vulkan-moe-sparse-2026-10-21.md`, Phase L.
+
 ### Split forward/backward and GPU balance by default: +5.8% trainer throughput (2026-10-24)
 
 - `MOTIFCL_MOE_SPLIT_FWD_BWD` and `MOTIFCL_MOE_GPU_BALANCE` now default to on.

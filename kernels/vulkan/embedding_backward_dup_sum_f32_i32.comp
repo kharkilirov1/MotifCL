@@ -1,0 +1,37 @@
+// Deterministic embedding-weight backward, pass 2: ordered sum of duplicate rows.
+//
+// The duplicate list from embedding_backward_dup_count_f32_i32 names every row that
+// received more than one token. One workgroup per list entry re-sums that row by
+// walking the token ids in ascending order, so the accumulation order is fixed and
+// independent of scheduling. Rows with a single token were already written by the
+// first pass and are not revisited.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer IdsBuf { int ids[]; };
+layout(std430, set = 0, binding = 1) readonly buffer GradBuf { vec4 grad4[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { vec4 out4[]; };
+layout(std430, set = 0, binding = 3) readonly buffer DupBuf { int dup_rows[]; };
+layout(std430, set = 0, binding = 4) readonly buffer DupCountBuf { int dup_count[]; };
+
+layout(push_constant) uniform Push {
+    uint tokens;
+    uint embed4;  // embed_dim / 4
+} p;
+
+void main() {
+    const uint slot = uint(gl_WorkGroupID.x);
+    if (slot >= p.tokens) return;
+    if (slot >= uint(dup_count[0])) return;
+    const int row = dup_rows[slot];
+    const uint lane = uint(gl_LocalInvocationID.x);
+    const uint total = p.embed4;
+    for (uint q = lane; q < total; q += 64u) {
+        vec4 acc = vec4(0.0);
+        for (uint t = 0u; t < p.tokens; ++t) {
+            if (ids[t] == row) acc += grad4[t * total + q];
+        }
+        out4[uint(row) * total + q] = acc;
+    }
+}

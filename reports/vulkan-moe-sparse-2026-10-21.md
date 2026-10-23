@@ -1278,3 +1278,63 @@ phases (host read-back plus host record of the backward) is the natural place fo
 host/device overlap: the host records the backward while the forward executes,
 which is the largest structural item left (~19 ms of host time per step). That is
 the next project, not a flag.
+
+# Phase L — Why training was not reproducible, and the deterministic embedding backward
+
+Phase K recorded that two identical trainer invocations produce different
+checkpoints. This phase found the cause and removed it.
+
+## L.1 The nondeterminism is the embedding gradient
+
+Bisection by configuration size: with one layer and one step, two identical runs
+differ in exactly three files — `emb.mt`, `adam_m_0.mt`, `adam_v_0.mt` — while the
+head, the norms and all counter layers' state/scale/v are byte-identical. Param 0
+is the embedding matrix, so the nondeterminism enters through the embedding weight
+gradient. Setting `MOTIFCL_DISABLE_EMBEDDING_SCATTER=1` (the brute-force scan)
+made two runs byte-identical, which named the culprit: on GCN4 / RX 580 there are
+no float atomics, so the scatter accumulates with a float compare-and-swap loop
+(`embedding_weight_backward_f32_i32_scatter_cas`). CAS retry order depends on
+thread scheduling, and a batch of 2048 tokens over a 32000-token vocabulary
+contains ~65 duplicate ids whose gradients are then summed in a scheduling-
+dependent order. Adam amplifies the last-bit difference into the whole checkpoint
+within a few steps.
+
+## L.2 The fix
+
+`embedding_backward_dup_count_f32_i32` + `embedding_backward_dup_sum_f32_i32`
+replace the CAS accumulation with two passes whose order is fixed:
+
+1. one workgroup per token; integer atomics decide only *ownership*
+   (`atomicAdd(count[row], 1)`), so the result of this pass does not depend on
+   ordering. The first occurrence of a row writes that row (single writer), and
+   the first duplicate appends the row to a duplicate list.
+2. one workgroup per duplicate list entry re-sums that row by walking the token
+   ids in ascending order, overwriting the row.
+
+Every output row therefore has one writer per phase and a fixed summation order.
+Two earlier designs were rejected on measurement: `atomicMin`-based ownership (the
+owner buffer stayed zero on this driver, which the witness caught as rows left at
+zero) and a per-row id-scan kernel (correct and deterministic, but 23 ms per step
+because the id loads are latency-bound).
+
+`tests/test_vulkan_embedding_backward_det.cpp` covers it: four fixtures (unique
+ids, duplicates, all-ids-equal, the 32000x288x2048 trainer shape), each compared
+to an independent CPU implementation (max_abs 0.0 for all four), each run twice
+with byte-identical output, plus invalid-argument controls.
+
+## L.3 Cost and reproducibility
+
+Same-executable A/B, 25 steps (the tok/s column is noisy in this window because of
+host load; the GPU number is the stable one):
+
+| arm | tok/s | fwd+bwd GPU |
+|---|---:|---:|
+| scatter (`MOTIFCL_EMBEDDING_NONDETERMINISTIC=1`) | 9262-10336 | 144.5-144.6 ms |
+| deterministic (new default) | 9538-10399 | 144.7-145.6 ms |
+
+The deterministic path costs ~0.4 ms of GPU per step (~0.3%), and two identical
+6-step full-configuration runs then produce **430 byte-identical checkpoint files**
+with the same FINAL VAL (6.4265). It is the default; the scatter stays available
+via `MOTIFCL_EMBEDDING_NONDETERMINISTIC=1` for a pure-speed run. Checkpoint hashes
+are now a usable exactness witness for A/B, which the Phase K measurement did not
+have.
