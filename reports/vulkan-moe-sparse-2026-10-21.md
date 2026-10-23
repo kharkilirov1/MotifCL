@@ -1425,3 +1425,71 @@ The lesson from the two rejections is that the remaining per-kernel gains on thi
 card are no longer about instruction count: the kernels that could still move are
 either bandwidth-bound at ~200 GB/s (dense GEMMs, CE, elementwise) or limited by
 occupancy/wave count (GQA, the tiled matmuls, the [288,7] shape).
+
+# Phase O — The step-time accounting was wrong; wide GEMM tiles rejected
+
+## O.1 The host idle is 6-9 ms, not 30
+
+Every throughput comparison in Phases K-N used the trainer's window average, which
+includes the first step. That step pays the driver's first-use cost for 115
+pipeline objects and cost **~530 ms** in the same run that reported 177.5 ms/step;
+with `LOG_EVERY=25` it alone inflates the mean by ~14 ms. A per-step
+instrumentation run (temporary, `MOTIFCL_STEP_BREAKDOWN=1`) shows the real steady
+state:
+
+| | steady value |
+|---|---:|
+| step wall time | 150.7-153.8 ms |
+| GPU forward+backward | 141.4-141.5 ms |
+| GPU optimizer batch | 4.0 ms |
+| GPU idle inside both submits | 0.3-0.4 ms each |
+| host record (forward logits / CE / backward / optim) | 1.85 / 0.02 / 3.3-4.4 / 1.0 ms |
+
+So the pipeline is ~94% GPU-busy, and the split-mode "forward-length GPU stall
+while the host records the backward" that Phase D reasoned about is really the
+~6 ms of host recording, not the 30 ms a warmup-polluted average suggested.
+Consequence for the roadmap: host/device overlap (async submissions with deferred
+buffer recycling, sketched after Phase L) is worth 2-4%, not the 8-10% estimated
+from the window means, and it does not fit the 165 MB of free VRAM without a
+double-buffered activation set. It stays a lower priority than GPU-side work.
+
+The trainer now prints a warmup-excluded mean next to the window mean,
+`steady <tok/s> <ms/step> (n, warmup)`; `MOTIFCL_WARMUP_STEPS` (default 1) sets the
+skip. Same run: window mean 11512-11536 tok/s (177.5 ms) vs steady 13317-13586
+tok/s (150.7-153.8 ms). The window mean is kept unchanged so older numbers stay
+comparable.
+
+## O.2 Wide 128x64 / 64x128 dense GEMM tiles (rejected)
+
+The traffic model says the three LM-head GEMMs re-read their large operand:
+head forward reads the 36.9 MB weight once per 64-row m tile, head dA re-reads
+the 262 MB dlogits five times, head dB re-reads it once per m tile. Rectangular
+tiles halve the m-tile or n-tile count, which the model scores at ~25% fewer bytes.
+
+Implementation: a second body (`mm_f32_db_wide_body.glsl`) with flat tile staging,
+because the original body's `AQ = 64/TILE_N`, `BQ = 64/TILE_M` formulas cap tiles at
+64x64. Both 128x64 and 64x128 kernels were verified **bit-identical** to the 64x64
+kernel on small shapes and on the three LM-head shapes (17 assertions, including
+automatic selection and the `MOTIFCL_VK_MATMUL_DB_WIDE=0` kill switch), and a
+6-step training run with and without them produced the same 430 checkpoint files.
+
+It is still slower, on every shape (bench, batched, 15 reps):
+
+| shape | 64x64 | 128x64 | 64x128 |
+|---|---:|---:|---:|
+| head_fwd 2048x288x32000 | 10.97 ms | 13.23 ms | 13.18 ms |
+| head_dA 2048x32000x288 | 15.30 ms | 21.95 ms | 45.39 ms |
+| head_dB 288x2048x32000 | 11.44 ms | 16.32 ms | 13.90 ms |
+
+Trainer A/B, 25 steps: GPU forward+backward 141.4-142.5 ms with the wide tiles
+disabled vs 151.2-151.4 ms with them on. The first version was much worse still
+(head dA 46.6 ms) because the staged tile travelled through `inout vec4[N]`
+parameters and the driver kept those arrays in scratch memory; single-register
+staging fixed that but did not make the wide tiles competitive. The 64x64 kernel is
+a local optimum on this card: 256 threads = four waves and 16 KiB of LDS = four
+resident workgroups per CU buy more latency hiding than the traffic reduction is
+worth. Reverted, including its test.
+
+Also re-confirmed that the shipped tile heuristic is the right one: forcing
+`MOTIFCL_VK_MATMUL_DB_TILE=64` costs GPU 145.9-146.3 ms and forcing `32` costs
+164.9-165.5 ms, against 141.4-141.7 ms on auto.

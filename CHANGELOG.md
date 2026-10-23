@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Trainer: steady-state throughput line; step-time accounting corrected (2026-10-24)
+
+- `motifcl_train_moe15m` now prints a warmup-excluded mean next to the existing
+  window mean: `steady <tok/s> <ms/step> (n, warmup)`, with
+  `MOTIFCL_WARMUP_STEPS` (default 1). The first step pays the driver's first-use
+  cost for every pipeline and cost ~530 ms on a 25-step run, so the window mean
+  read 177.5 ms/step where the steady state is 150.7-153.8 ms (13317-13586 tok/s
+  vs 11512-11536). The window mean is unchanged so earlier numbers stay comparable.
+- Corrected accounting (`reports/vulkan-moe-sparse-2026-10-21.md`, Phase O): the
+  trainer is ~94% GPU-busy in steady state (GPU 141.4-141.5 ms forward+backward,
+  4.0 ms optimizer, 0.3-0.4 ms idle per submit, 6.4 ms host recording). The
+  "~30 ms of host idle per step" quoted in earlier phases was warmup-polluted, so
+  host/device overlap is worth 2-4%, not 8-10%.
+- Rejected on measurement: rectangular 128x64 / 64x128 dense GEMM tiles. They cut
+  the LM-head operand re-reads by ~25% in the traffic model and were verified
+  bit-identical to the 64x64 kernel (17 assertions plus identical checkpoints),
+  but measured slower on every head shape (head_fwd 10.97 -> 13.2 ms, head_dA
+  15.30 -> 21.95 ms, head_dB 11.44 -> 16.3 ms; trainer GPU 141.4-142.5 -> 151.2-
+  151.4 ms). The 64x64 tile's four-waves/four-workgroups-per-CU occupancy is a
+  local optimum. Reverted with its test.
+
 ### GQA causal forward: eight query rows by default (2026-10-24)
 
 - `gqa_fwd_causal8_f32` (eight causal query rows per workgroup, half the K/V

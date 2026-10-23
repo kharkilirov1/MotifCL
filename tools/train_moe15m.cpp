@@ -559,6 +559,16 @@ int main() {
         int win_n = 0;
         double win_gpu_fb_ms = 0.0, win_gpu_opt_ms = 0.0;
         int win_gpu_fb_n = 0, win_gpu_opt_n = 0;
+        // The first step pays the driver's pipeline/shader first-use cost (hundreds
+        // of milliseconds) and dominates a short window mean: on a 25-step run it
+        // inflated the reported step time from ~148 ms to ~180 ms. The steady mean
+        // below excludes MOTIFCL_WARMUP_STEPS steps so short A/B windows can be read
+        // without mentally subtracting the warmup.
+        // Set from MOTIFCL_WARMUP_STEPS right after ms_since below; the CPU-only
+        // timing-window probe extracts this block and has no env_int helper.
+        int metric_warmup_steps = 1;
+        double win_steady_ms = 0.0;
+        int win_steady_n = 0;
         double loss_ema = -1.0;
         struct StepPhases {
             double upload_ms = 0, record_ms = 0, submit_ms = 0, sync_ms = 0;
@@ -567,6 +577,7 @@ int main() {
         auto ms_since = [](std::chrono::steady_clock::time_point a) {
             return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count();
         };
+        metric_warmup_steps = env_int("MOTIFCL_WARMUP_STEPS", 1);
             // Forward/backward split: the forward batch is submitted, its routing
             // counts are read back, and only then is the backward recorded. That
             // freeze is what lets the MoE backward skip the losing experts, whose
@@ -724,6 +735,10 @@ int main() {
                 ++win_gpu_opt_n;
             }
             win_n += 1;
+            if (step >= metric_warmup_steps) {
+                win_steady_ms += phases.total_ms;
+                win_steady_n += 1;
+            }
             if ((step + 1) % log_every == 0) {
                 const double ms = win_ms / win_n;
                 const double tok_s = (double)N * 1000.0 / ms;
@@ -733,6 +748,11 @@ int main() {
                             (double)runtime.buffer_bytes_live() / 1048576.0,
                             (double)runtime.buffer_bytes_peak() / 1048576.0,
                             (double)runtime.buffer_bytes_requested_peak() / 1048576.0);
+                if (win_steady_n > 0) {
+                    const double steady_ms = win_steady_ms / win_steady_n;
+                    std::printf("  steady %.0f tok/s %.1f ms/step (n=%d, warmup %d)",
+                                (double)N * 1000.0 / steady_ms, steady_ms, win_steady_n, metric_warmup_steps);
+                }
                 if (gpu_timing) {
                     const double gpu_fb_mean = win_gpu_fb_n == win_n ? win_gpu_fb_ms / win_n : -1.0;
                     const double gpu_opt_mean = win_gpu_opt_n == win_n ? win_gpu_opt_ms / win_n : -1.0;
@@ -789,6 +809,8 @@ int main() {
                 std::printf("\n");
                 std::fflush(stdout);
                 win_ms = 0.0;
+        win_steady_ms = 0.0;
+        win_steady_n = 0;
                 win_phases = StepPhases{};
                 win_gpu_fb_ms = 0.0;
                 win_gpu_opt_ms = 0.0;
