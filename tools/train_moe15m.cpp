@@ -567,17 +567,21 @@ int main() {
         auto ms_since = [](std::chrono::steady_clock::time_point a) {
             return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count();
         };
-            // GPU balance-bias mode: record the per-block sign update inside the optimizer
-        // batch instead of a host readback/upload. MOTIFCL_MOE_GPU_BALANCE=0 forces the old
-        // host path; unsupported parameters explicitly select it before any batch opens.
-        // Default is the CPU path: the same-executable A/B (phase 18) measured +1.0%
-        // formal with pair effects +0.1..+2.4%, inside the A/A envelope (0.9055 formal,
-        // pairs 0.71..1.08) and with zero CPU-phase delta, so the GPU helper stays
-        // opt-in only (MOTIFCL_MOE_GPU_BALANCE=1).
-        const bool split_fwd_bwd = env_int("MOTIFCL_MOE_SPLIT_FWD_BWD", 0) != 0;
-        const bool gpu_balance_mode = env_int("MOTIFCL_MOE_GPU_BALANCE", 0) != 0 &&
-            std::isfinite(balance_gamma) && balance_gamma > 0.0f && std::isfinite(balance_clamp) &&
-            balance_clamp > 0.0f && runtime.caps().max_push_constant_bytes >= 48u;
+            // Forward/backward split: the forward batch is submitted, its routing
+            // counts are read back, and only then is the backward recorded. That
+            // freeze is what lets the MoE backward skip the losing experts, whose
+            // gradient is identically zero (tests/test_vulkan_moe7_zero_grad.cpp
+            // proves the dense and skip backward byte-identical). It is on by
+            // default; MOTIFCL_MOE_SPLIT_FWD_BWD=0 restores one-batch mode.
+            const bool split_fwd_bwd = env_int("MOTIFCL_MOE_SPLIT_FWD_BWD", 1) != 0;
+            // GPU balance-bias mode: record the per-block sign update inside the
+            // optimizer batch instead of a host readback/upload. Only pays with the
+            // split (the update then joins a batch that is still being recorded);
+            // on its own it measured inside the A/A envelope (phase 18, +1.0%
+            // formal). MOTIFCL_MOE_GPU_BALANCE=0 forces the host path.
+            const bool gpu_balance_mode = env_int("MOTIFCL_MOE_GPU_BALANCE", 1) != 0 &&
+                std::isfinite(balance_gamma) && balance_gamma > 0.0f && std::isfinite(balance_clamp) &&
+                balance_clamp > 0.0f && runtime.caps().max_push_constant_bytes >= 48u;
         std::vector<nn::MoE7FFN*> pending_balance;
         pending_balance.reserve(blocks.size());
         // Device-side balance gradient: the auxiliary router gradient is computed

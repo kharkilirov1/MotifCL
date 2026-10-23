@@ -1224,3 +1224,48 @@ logits for six blocks and computes load/spread/pick statistics on the host. The
 device already computes per-expert counts for the sparse path
 (`moe_route_top1_f32`), so a counts-only variant plus a small read-back would
 remove most of that. Beyond it, the structural lever remains host/device overlap.
+
+# Phase K — Split forward/backward becomes the default path
+
+## K.1 What the switch does
+
+`MOTIFCL_MOE_SPLIT_FWD_BWD=1` submits the forward batch, reads the routing counts
+back, and only then records the backward. That freeze is what lets the MoE
+backward skip the losing experts: their gradient is identically zero, and
+`tests/test_vulkan_moe7_zero_grad.cpp` already proves the dense and the skip
+backward byte-identical (`router_grad`, `input_grad`, and every counter layer's
+packed state, scale and v).
+
+Phase D measured the combination at +16.7% and still kept it opt-in, for two
+stated reasons: the split alone costs a forward-length GPU stall while the host
+records the backward, and the skip only fires when routing is starved. Both were
+true then. What changed is that the step's other blocks got much cheaper (Phase H
+counter GEMM, Phase J device balance gradient) while the skip's saving is a fixed
+fan-out of the backward, and the load read-out of the current configuration shows
+exactly the starved routing the skip is for (per-step load spread of 0.02..0.25
+over the seven experts). Same-executable A/B in that configuration:
+
+| arm | tok/s | step | fwd+bwd GPU |
+|---|---:|---:|---:|
+| split off (old default) | 10538-10679 | 191.8-194.3 ms | 154.5-156.1 ms |
+| split on, GPU balance on | 11199-11290 | 181.4-182.9 ms | 145.2-145.9 ms |
+
++5.8% with disjoint ranges over three ABBA pairs: the GPU forward+backward loses
+~9.6 ms (the skipped losing-expert graphs) and the step loses 10.6 ms. The final
+validation loss and every printed step loss are identical in both arms
+(10.4277, 10.2058, 8.8452, 7.2389, 6.7947, 6.5197; FINAL VAL 6.4265).
+
+The GPU balance-bias update becomes the default alongside it: on its own it is
+inside the A/A envelope (Phase 18), but with the split it removes the remaining
+host bias round trip from the gap between the two batches (+1.9% over split
+alone: 11015 -> 11225 tok/s in the same session). Both switches keep their `=0`
+env overrides for A/B, and both are exact: the skip is proved byte-identical by
+the zero-grad witness, the bias kernel by `test_vulkan_moe_balance_update`.
+
+## K.2 What this means for the remaining levers
+
+The trainer now runs split batches by default, so the gap between the two GPU
+phases (host read-back plus host record of the backward) is the natural place for
+host/device overlap: the host records the backward while the forward executes,
+which is the largest structural item left (~19 ms of host time per step). That is
+the next project, not a flag.

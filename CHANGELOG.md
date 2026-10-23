@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Split forward/backward and GPU balance by default: +5.8% trainer throughput (2026-10-24)
+
+- `MOTIFCL_MOE_SPLIT_FWD_BWD` and `MOTIFCL_MOE_GPU_BALANCE` now default to on.
+  The split submits the forward batch, reads the routing counts back, and records
+  the backward afterwards, which lets the MoE backward skip losing experts (their
+  gradient is identically zero; `tests/test_vulkan_moe7_zero_grad.cpp` proves the
+  dense and skip backwards byte-identical). The GPU balance-bias update joins the
+  optimizer batch instead of a host round trip between the two batches.
+- 25-step A/B, three ABBA pairs, same executable: 10538-10679 -> 11199-11290
+  tok/s (+5.8%, disjoint ranges), step 192.7 -> 182.1 ms, GPU forward+backward
+  155.1 -> 145.5 ms. Every printed step loss and the final validation loss are
+  identical (10.4277, 10.2058, 8.8452, 7.2389, 6.7947, 6.5197; FINAL VAL 6.4265).
+- `=0` env overrides keep the previous one-batch / host-bias path for A/B.
+- Evidence: `reports/vulkan-moe-sparse-2026-10-21.md`, Phase K.
+
 ### Device-side MoE balance gradient: +2.0% trainer throughput (2026-10-24)
 
 - `moe_balance_grad_f32` computes the auxiliary load-balancing router gradient
