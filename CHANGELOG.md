@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### GQA causal forward: eight query rows by default (2026-10-24)
+
+- `gqa_fwd_causal8_f32` (eight causal query rows per workgroup, half the K/V
+  re-reads) is now the kernel the causal fast path selects;
+  `MOTIFCL_VK_GQA_FWD_ROWS=4` restores the four-row kernel.
+- End-to-end evidence: two 6-step full runs, one per kernel, produce 430
+  byte-identical checkpoint files with the same FINAL VAL (6.4265); 25-step A/B,
+  three pairs, GPU forward+backward 142.16-143.01 -> 141.48-142.46 ms (~0.5%),
+  tok/s within host noise.
+- Also recorded in `reports/vulkan-moe-sparse-2026-10-21.md` (Phase N): two
+  audited dead ends. A vec4 cached-CE backward was flat (the pass is already
+  bandwidth-bound at ~140 GB/s and the kernel itself got slower), and a dedicated
+  width-8 register kernel for the twelve [288,7] router/balance-gradient GEMMs cost
+  10 ms of GPU per step because five workgroups cannot hide memory latency that
+  the tiled kernel's LDS staging does. Both were reverted.
+
 ### Split RMSNorm grad_w by default: +1.5% trainer throughput (2026-10-24)
 
 - The non-split `rmsnorm_bwd_w_f32` launches one workgroup per 64 columns (5 for a

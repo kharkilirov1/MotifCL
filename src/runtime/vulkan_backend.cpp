@@ -10575,8 +10575,13 @@ VulkanOpResult run_vulkan_grouped_query_attention_general(
                         static_cast<std::uint32_t>(key_tokens), static_cast<std::uint32_t>(n_head),
                         static_cast<std::uint32_t>(n_kv_head), static_cast<std::uint32_t>(head_dim), scale};
             const std::vector<const VulkanBuffer*> fast_buffers = {&q, &k, &v, &out};
+            // Eight causal query rows per workgroup halve the K/V re-reads and
+            // measured 5.3% faster than the four-row form on the trainer shapes
+            // (byte-identical output, see test_vulkan_gqa_causal8_fwd), so it is the
+            // default; MOTIFCL_VK_GQA_FWD_ROWS=4 forces the older kernel.
             const char* rows_env = std::getenv("MOTIFCL_VK_GQA_FWD_ROWS");
-            if (rows_env && std::strcmp(rows_env, "8") == 0) {
+            const bool rows4 = rows_env && std::strcmp(rows_env, "4") == 0;
+            if (!rows4) {
                 return runtime.dispatch_cached(vkspirv::k_gqa_fwd_causal8_f32, vkspirv::k_gqa_fwd_causal8_f32_words,
                                                fast_buffers, &fast_push, sizeof(fast_push),
                                                static_cast<std::uint32_t>((query_tokens + 7) / 8),

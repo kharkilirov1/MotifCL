@@ -291,7 +291,13 @@ void run_causal_training_case(motifcl::Backend& backend, int tokens,
     const auto& caps = backend.vulkan_runtime().caps();
     const bool wave64 = caps.subgroup_arithmetic_compute && caps.subgroup_size == 64;
     if (caps.timestamps) {
-        require_kernel_calls(got.profile, "gqa_fwd_causal4_f32", wave64 ? 1 : 0);
+        // The causal fast path defaults to the eight-row forward kernel (half the
+        // K/V re-reads, byte-identical output; MOTIFCL_VK_GQA_FWD_ROWS=4 forces the
+        // four-row kernel).
+        const char* rows_env = std::getenv("MOTIFCL_VK_GQA_FWD_ROWS");
+        const bool rows4 = rows_env && std::string(rows_env) == "4";
+        const std::string causal_fwd = rows4 ? "gqa_fwd_causal4_f32" : "gqa_fwd_causal8_f32";
+        require_kernel_calls(got.profile, causal_fwd, wave64 ? 1 : 0);
         require_kernel_calls(got.profile, "gqa_bwd_probs_causal4_f32", wave64 ? 1 : 0);
         require_kernel_calls(got.profile, "gqa_bwd_dkv_causal_tile_f32",
                              wave64 && dim % 4 == 0 ? 1 : 0);

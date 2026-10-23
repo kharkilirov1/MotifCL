@@ -1368,3 +1368,60 @@ launch and a number pins the split count.
 Verification: two identical 6-step full runs with the new default are still 430
 byte-identical checkpoint files with FINAL VAL 6.4265, and the full CTest suite
 covers the split parity (`test_vulkan_rmsnorm_split`).
+
+# Phase N — Profile-driven micro-optimization audit (one win, two dead ends)
+
+Fresh 25-step profile of the post-Phase-M defaults, as a share of GPU time:
+
+| kernel group | share | per-step cost |
+|---|---:|---:|
+| `mm_f32_db64` (LM head fwd / dA / dB) | 24.5% | 36.5 ms |
+| `counter_gemm_db` (this card has no tensor cores / no fp16 math) | 22.1% | 33.0 ms |
+| `mm_f32_db32` (dense expert/shared GEMMs) | 17.1% | 25.5 ms |
+| GQA (fwd causal4 4.6%, bwd_probs 8.0%, bwd_dkv 4.2%) | 16.8% | 25.0 ms |
+| CE stats + cached backward | 4.2% | 6.3 ms |
+| everything else (norms, swiglu, rope, adds, Adam) | 15.3% | 22.8 ms |
+
+Three experiments came out of reading that table. Only one is kept.
+
+## N.1 CE backward with vec4 (rejected)
+
+`ce_bwd_cached_f32` is a flat elementwise pass over 2048x32000 logits (read 262
+MB, write 262 MB) and measured 3.73 ms, i.e. ~140 GB/s. A vec4 variant (four
+elements per invocation, guarded by `cols % 4 == 0`) was expected to save ~1 ms
+of instruction issue. It measured **4.96 ms per call** instead, and the end-to-end
+A/B was flat (GPU 142.58-143.39 new vs 142.73-142.97 baseline). The pass is
+already bandwidth-bound; wider accesses only changed the access granularity.
+Reverted, along with the test-side profile-name plumbing it needed.
+
+## N.2 The [288, 7] narrow transpose-A matmul (rejected)
+
+Twelve GEMMs per step are [in=288, experts=7] (six router weight gradients plus the
+six auxiliary balance gradients) and go through the tiled `mm_f32_tn` kernel at
+0.19 ms each — 2.3 ms/step for 4M MAC. A dedicated width-8 kernel (one lane per
+output row, eight register accumulators) looked like an easy 10x. It measured
+**~0.8 ms per call**, i.e. four times slower than the kernel it replaced, and cost
+10 ms of GPU per step. The reason is the launch shape: `ceil(288/64) = 5`
+workgroups means one wave per busy CU, and the inner loop has a dependent global
+load per k, so 2048 iterations pay full memory latency with nothing to interleave.
+The tiled kernel exists precisely because its LDS staging and multiple waves hide
+that latency. Reverted; a real win here needs a k-split reduction (hundreds of
+workgroups plus a partial buffer), which was not worth the complexity for 2.3 ms.
+
+## N.3 GQA causal forward: eight query rows by default (kept)
+
+`gqa_fwd_causal8_f32` keeps eight causal query rows per workgroup instead of four,
+which halves the K/V re-reads; the existing witness already showed byte-identical
+output against the four-row kernel across the trainer shapes. It is now the default
+(`MOTIFCL_VK_GQA_FWD_ROWS=4` forces the old kernel), and the end-to-end evidence
+is stronger than the micro-benchmark:
+
+- two 6-step full runs, one per kernel, produce **430 byte-identical checkpoint
+  files** and the same FINAL VAL (6.4265);
+- 25-step A/B, three pairs: GPU forward+backward 142.16-143.01 -> 141.48-142.46 ms
+  (~0.5%), tok/s within host noise (11385-11467 vs 11395-11475).
+
+The lesson from the two rejections is that the remaining per-kernel gains on this
+card are no longer about instruction count: the kernels that could still move are
+either bandwidth-bound at ~200 GB/s (dense GEMMs, CE, elementwise) or limited by
+occupancy/wave count (GQA, the tiled matmuls, the [288,7] shape).
