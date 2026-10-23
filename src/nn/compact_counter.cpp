@@ -284,10 +284,14 @@ namespace {
 // the same tile and grid. The packed weights at these shapes are 41 KB, so the
 // 5.4x extra traffic the dense GEMM pays is irrelevant; only the issue rate
 // matters. Measured on the MoE shapes this is 1.37-2.03x per projection.
+// Decode-then-dense is the default: the fused decode-inside-GEMM kernel wins for
+// small batches (one row), but at prefill-sized batches the dense FP32 GEMM on a
+// decoded mirror produces bit-identical output and measured 4.2 ms/step faster on
+// the trainer (2.8%). MOTIFCL_COUNTER_DECODE_DENSE=0 restores the fused path.
 bool counter_decode_dense_enabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("MOTIFCL_COUNTER_DECODE_DENSE");
-        return env && *env == '1';
+        return !(env && *env == '0');
     }();
     return enabled;
 }

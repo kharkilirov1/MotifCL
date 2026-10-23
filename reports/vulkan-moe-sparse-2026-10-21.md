@@ -1543,3 +1543,36 @@ cost, LM-head traffic), not kernel micro-tuning. The decode mirror path
 (`counter_decode_dense_enabled`, `kDecodeDenseMinRows`) already exists in
 `CounterStateLinear` for exactly this shape of problem and is a candidate for the
 next phase.
+
+# Phase Q — Decode-then-dense counter projections by default: +3.0%
+
+Phase P named the counter path as the next lever and pointed at the existing
+`MOTIFCL_COUNTER_DECODE_DENSE` mirror path, which had been A/B-only and off by
+default because an earlier phase measured its host overhead (the naive Tensor-op
+version) as large as its GPU win.
+
+Measured on the current pipeline it is a clear win, and it is exact:
+
+- two 6-step full runs, one with the fused decode-inside-GEMM kernels and one with
+  decode-then-dense, produce **430 byte-identical checkpoint files** and the same
+  FINAL VAL (6.4265). The decoded mirror is not an approximation: it is the same
+  weights, and both GEMM paths sum k in ascending order.
+- 25-step A/B, three pairs, steady-state line:
+  fused 153.2 / 153.7 / 154.5 ms (13260-13368 tok/s) vs decode-dense
+  **149.0 / 149.3 / 149.3 ms (13718-13748 tok/s)**, i.e. -4.4 ms per step (+3.0%).
+- kernel profile, 10-step window: the counter block drops from 34.5 ms/step of
+  `counter_gemm_db` to 2.9 ms of `counter_decode_weight_f32` plus the expert
+  projections folded into `mm_f32_db32`/`mm_f32_db64` (total GPU time 1514 -> 1462
+  ms per 10 steps).
+
+`MOTIFCL_COUNTER_DECODE_DENSE=0` restores the fused path; the row-count gate
+(`kDecodeDenseMinRows = 128`) still keeps one-row decode steps on the fused kernel.
+`test_vulkan_counter_fused` now derives the expected kernel names from the same
+rule. Full CTest stays green.
+
+What is left inside this path is now launch structure rather than kernel work: the
+dense-over-experts forward still issues one small GEMM per expert (48 projections
+per step for the up matrix, 48 for the down matrix, plus the gradient directions)
+where a single wide GEMM over the concatenated 8-expert weight matrix would cut the
+launch count and give the GEMM a 3072-wide output. That needs MoE7FFN to consume a
+concatenated expert output, so it is a separate phase.

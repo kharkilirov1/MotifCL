@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Counter projections: decode-then-dense by default, +3.0% (2026-10-24)
+
+- `MOTIFCL_COUNTER_DECODE_DENSE` is now the default (set it to `0` to restore the
+  fused decode-inside-GEMM kernels). The mirror path decodes the 11-counter packed
+  weights into a dense FP32 mirror and runs the tuned GEMM; on the trainer shapes
+  the fused kernel was only ~25% of peak because it re-decodes every weight element
+  on every call.
+- Bit-identical, not approximate: two 6-step full runs, one per path, produce 430
+  byte-identical checkpoint files with the same FINAL VAL (6.4265).
+- 25-step A/B, three pairs, steady-state line: fused 153.2/153.7/154.5 ms
+  (13260-13368 tok/s) vs decode-dense 149.0/149.3/149.3 ms (13718-13748 tok/s),
+  i.e. -4.4 ms per step (+3.0%). Kernel profile: `counter_gemm_db` 34.5 ms/step
+  collapses to 2.9 ms of `counter_decode_weight_f32` plus the expert projections in
+  the dense GEMM family.
+- `test_vulkan_counter_fused` derives the expected kernel names from the same rule.
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase Q.
+
 ### Attention backward: eight query rows by default (2026-10-24)
 
 - The causal attention backward stage 1 is now generated from a rows-parameterized

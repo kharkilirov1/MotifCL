@@ -248,7 +248,7 @@ void run_case(motifcl::Backend& backend, int rows, int in_features,
         // that a real Vulkan projection kernel ran, which is what this assertion
         // is about; the kernel identity is not the property under test.
         const char* dense_env = std::getenv("MOTIFCL_COUNTER_DECODE_DENSE");
-        const bool dense_path = dense_env && *dense_env == '1';
+        const bool dense_path = !(dense_env && *dense_env == '0');
         // Only rewrite the expectation when the dense path actually engaged: the
         // module also gates it on the row count, and these shapes are small.
         const bool dense_engaged = dense_path && decode_calls > 0;
