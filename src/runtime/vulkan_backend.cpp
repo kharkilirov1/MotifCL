@@ -10907,10 +10907,25 @@ VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtim
         } fast_push{static_cast<std::uint32_t>(batch), static_cast<std::uint32_t>(query_tokens),
                     static_cast<std::uint32_t>(key_tokens), static_cast<std::uint32_t>(n_head),
                     static_cast<std::uint32_t>(n_kv_head), static_cast<std::uint32_t>(head_dim), scale};
-        auto fast_stage = runtime.dispatch_cached(
-            vkspirv::k_gqa_bwd_probs_causal4_f32, vkspirv::k_gqa_bwd_probs_causal4_f32_words, probs_buffers,
-            &fast_push, sizeof(fast_push), static_cast<std::uint32_t>((query_tokens + 3) / 4),
-            static_cast<std::uint32_t>(n_head), static_cast<std::uint32_t>(batch));
+        // Eight query rows per workgroup halve the K/V re-reads of stage 1 (which
+        // streams K twice and V once per workgroup), at the cost of 20 KiB of shared
+        // memory instead of 10. The per-element math and reduction order are
+        // unchanged, so a rows8 run produces bit-identical p/ds/dQ to a rows4 run
+        // (and bit-identical checkpoints end to end). It is the default;
+        // MOTIFCL_VK_GQA_BWD_ROWS=4 restores the four-row kernel.
+        const char* bwd_rows_env = std::getenv("MOTIFCL_VK_GQA_BWD_ROWS");
+        const bool bwd_rows4 = bwd_rows_env && std::strcmp(bwd_rows_env, "4") == 0;
+        auto fast_stage = !bwd_rows4
+                              ? runtime.dispatch_cached(
+                                    vkspirv::k_gqa_bwd_probs_causal_rows_f32,
+                                    vkspirv::k_gqa_bwd_probs_causal_rows_f32_words, probs_buffers, &fast_push,
+                                    sizeof(fast_push), static_cast<std::uint32_t>((query_tokens + 7) / 8),
+                                    static_cast<std::uint32_t>(n_head), static_cast<std::uint32_t>(batch))
+                              : runtime.dispatch_cached(
+                                    vkspirv::k_gqa_bwd_probs_causal4_f32,
+                                    vkspirv::k_gqa_bwd_probs_causal4_f32_words, probs_buffers, &fast_push,
+                                    sizeof(fast_push), static_cast<std::uint32_t>((query_tokens + 3) / 4),
+                                    static_cast<std::uint32_t>(n_head), static_cast<std::uint32_t>(batch));
         if (!fast_stage.success) return fast_stage;
         // Stage 2 also takes the tiled kernel when the vector width allows it:
         // one 64-key tile per workgroup, q/dout rows broadcast to the lanes.

@@ -44,6 +44,7 @@
     { vkspirv::k_gqa_bwd_dkv_f32, "gqa_bwd_dkv_f32" },
     { vkspirv::k_gqa_bwd_dq_f32, "gqa_bwd_dq_f32" },
     { vkspirv::k_gqa_bwd_probs_causal4_f32, "gqa_bwd_probs_causal4_f32" },
+    { vkspirv::k_gqa_bwd_probs_causal_rows_f32, "gqa_bwd_probs_causal_rows_f32" },
     { vkspirv::k_gqa_bwd_probs_f32, "gqa_bwd_probs_f32" },
     { vkspirv::k_gqa_bwd_probs_f32_subgroup, "gqa_bwd_probs_f32_subgroup" },
     { vkspirv::k_gqa_fwd_causal4_f32, "gqa_fwd_causal4_f32" },

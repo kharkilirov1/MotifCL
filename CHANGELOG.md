@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Attention backward: eight query rows by default (2026-10-24)
+
+- The causal attention backward stage 1 is now generated from a rows-parameterized
+  body (gqa_bwd_probs_causal_rows_f32, shared by ROWS=4 and ROWS=8) instead of a
+  four-row copy. Eight rows halve the workgroup count and therefore the K/V
+  re-reads (the kernel streams K twice and V once per workgroup).
+  MOTIFCL_VK_GQA_BWD_ROWS=4 restores the four-row kernel.
+- Verified bit-identical, not merely close: two 6-step full runs, one per kernel,
+  produce 430 byte-identical checkpoint files with the same FINAL VAL (6.4265).
+- 25-step A/B, three pairs, steady-state metric: 153.9/154.2/154.0 ms with four
+  rows vs 153.3/153.3/153.2 ms with eight rows (~0.5%, steady 13281-13308 ->
+  13355-13367 tok/s).
+- 
+eports/vulkan-moe-sparse-2026-10-21.md (Phase P) also characterizes the
+  second largest GPU block: counter_gemm_db is called ~840 times per step for
+  only three shapes, because the MoE forward is dense over experts (6 layers x 7
+  experts x 8 projections of the full 2048-row batch), at ~25% of peak with an
+  11-counter decode before each GEMM.
+
 ### Trainer: steady-state throughput line; step-time accounting corrected (2026-10-24)
 
 - `motifcl_train_moe15m` now prints a warmup-excluded mean next to the existing

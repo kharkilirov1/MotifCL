@@ -1493,3 +1493,53 @@ worth. Reverted, including its test.
 Also re-confirmed that the shipped tile heuristic is the right one: forcing
 `MOTIFCL_VK_MATMUL_DB_TILE=64` costs GPU 145.9-146.3 ms and forcing `32` costs
 164.9-165.5 ms, against 141.4-141.7 ms on auto.
+
+# Phase P — Eight query rows in attention backward stage 1; what the counter path really is
+
+## P.1 The backward stage-1 kernel, parameterized by rows (kept)
+
+Phase M's forward counterpart (`gqa_fwd_causal8_f32`) showed that doubling the
+number of causal query rows per workgroup halves the K/V re-reads. The backward
+stage 1 (`gqa_bwd_probs_causal4_f32`) had the same structure hardcoded to four
+rows, streaming K twice and V once per workgroup. It is now generated from one
+body with a `ROWS` macro (`gqa_bwd_probs_causal_rows_f32`), so the eight-row form
+shares the code instead of being another copy.
+
+Because every per-element operation and every reduction order is unchanged, the
+steered forms must agree bit for bit. They do:
+
+- two 6-step full runs, one per kernel, produce **430 byte-identical checkpoint
+  files** and the same FINAL VAL (6.4265);
+- 25-step A/B, three pairs, using the new steady-state line: 153.9, 154.2, 154.0 ms
+  with four rows vs 153.3, 153.3, 153.2 ms with eight rows (~0.7 ms, 0.5%), steady
+  throughput 13281-13308 -> 13355-13367 tok/s.
+
+Eight rows is the default now; `MOTIFCL_VK_GQA_BWD_ROWS=4` restores the four-row
+kernel. `test_vulkan_gqa_training` accepts either stage-1 kernel name depending on
+that variable.
+
+## P.2 The counter path is dense over experts, and that is most of its cost
+
+`counter_gemm_db` was the second largest block (22% of GPU time). A temporary
+shape log (2 steps, not committed) shows the counter matmul is called ~840 times
+per step with only three shapes, all `C=11` counters:
+
+| shape (counters, in, out, batch) | calls/step |
+|---|---:|
+| 11, 288, 384, 2048 | 336 |
+| 11, 192, 288, 2048 | 336 |
+| 11, 288, 288, 2048 | 168 |
+
+336 = 6 layers x 7 experts x 8, i.e. the MoE forward is *dense over experts*: each
+layer projects the full 2048-row batch through every expert (plus the shared
+expert), and masking/routing happens outside the GEMM. The kernel is then at
+~25% of peak because each call is a 2.5G-MAC-on-paper shape that first has to
+decode 11 counters per weight element (384x288x11 decodes) and only then stream
+the GEMM. The per-10-step profile puts this at 345 ms of 1514 ms (22.8%), i.e.
+34.5 ms per step.
+
+That reframes the remaining large wins: they are architectural (dense-over-experts
+cost, LM-head traffic), not kernel micro-tuning. The decode mirror path
+(`counter_decode_dense_enabled`, `kDecodeDenseMinRows`) already exists in
+`CounterStateLinear` for exactly this shape of problem and is a candidate for the
+next phase.
