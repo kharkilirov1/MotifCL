@@ -120,6 +120,27 @@ int main(int argc, char** argv) {
             // The same comparator checked by the CPU-only negative controls
             // validates every element before diagnostic maxima are accumulated.
             require_close(got, ref, tol_abs, label);
+
+            // The split-K path only engages inside an open batch (outside one,
+            // every split would be its own submit+fence). Issue the same op in a
+            // batch so the partial-block + reduce path is compared as well.
+            {
+                auto& runtime = backend.vulkan_runtime();
+                if (!runtime.batch_begin()) throw std::runtime_error("batched GEMM parity: batch_begin failed");
+                Tensor vc_batched;
+                if (transpose_a) {
+                    vc_batched = matmul_transpose_a(va, vb);
+                } else if (transpose_b) {
+                    vc_batched = matmul_transpose_b(va, vb);
+                } else {
+                    vc_batched = matmul(va, vb);
+                }
+                const auto submitted = runtime.batch_end();
+                if (!submitted.success) {
+                    throw std::runtime_error("batched GEMM parity: batch_end failed: " + submitted.error);
+                }
+                require_close(vc_batched.to_vector<float>(), ref, tol_abs, label + " (batched)");
+            }
             double max_abs = 0.0;
             for (std::size_t i = 0; i < ref.size(); ++i) {
                 const double diff = std::fabs(static_cast<double>(got[i]) - static_cast<double>(ref[i]));

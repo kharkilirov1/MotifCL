@@ -112,7 +112,12 @@ int main(int argc, char** argv) {
             std::vector<double> gpu_ms;
             gpu_ms.reserve(static_cast<std::size_t>(reps));
             for (int i = 0; i < reps; ++i) {
+                // Time the op inside a one-dispatch batch: that is how the trainer
+                // issues it, and it also covers multi-dispatch paths such as the
+                // split-K GEMM (a bare dispatch would only time the final reduce).
+                if (!runtime.batch_begin()) return 1;
                 if (!dispatch_shape(shape, runtime, a, b, c)) return 1;
+                if (!runtime.batch_end().success) return 1;
                 const double us = runtime.last_gpu_time_us();
                 if (us > 0.0) gpu_ms.push_back(us / 1000.0);
             }

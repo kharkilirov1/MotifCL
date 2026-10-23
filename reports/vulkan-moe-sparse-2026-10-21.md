@@ -1082,3 +1082,72 @@ selection), regenerated `src/runtime/vulkan_spirv_kernels.inc`.
 Full CTest at this tree: 37 passed, 30 skipped (OpenCL unavailable), 0 failed of
 67 registered. The trainer A/B above is the end-to-end witness; the guarded
 pipeline remains the reference for the edge tiles.
+
+# Phase I — What does not help: split-K on the Polaris GEMMs
+
+Phase H left `counter_gemm_db` at 22.5% of a step. The remaining dense GEMMs were
+the next question, so this phase attributed them and then tested the most obvious
+remedy for the small ones.
+
+## I.1 Where the 120 `mm_f32_db32` calls per step come from
+
+A temporary `MOTIFCL_VK_MM_SHAPE_LOG=1` in `dispatch_vulkan_matmul_db` logged the
+shapes of two trainer steps. The 120 db32 dispatches per step are not attention
+projections: they are the transposed-A grad_w GEMMs, all with k = batch = 2048:
+
+| shape (m x k x n) | calls/step | grid (tile 32) |
+|---|---:|---:|
+| 288 x 2048 x 192 | 48 | 9 x 6 = 54 |
+| 384 x 2048 x 288 | 48 | 12 x 9 = 108 |
+| 288 x 2048 x 288 | 24 | 9 x 9 = 81 |
+
+The LM head contributes three db64 calls per step (fwd 2048x288x32000, dA
+2048x32000x288, dB 288x2048x32000). At the recorded 22-30% of peak the three
+grad_w shapes are ~30 ms of the ~170 ms step, and they launch 54-108 workgroups
+against 288 wave slots, so "small grid" looked like the cause.
+
+## I.2 Split-K was implemented, measured, and does not pay
+
+The double-buffered body grew an explicit k range plus a C4 block offset, a new
+`mm_split_reduce_f32` summed the blocks, and `dispatch_vulkan_matmul_db` chose
+2-8 splits whenever `workgroups * splits < 288`. It only splits inside a batch:
+outside one every split would be its own submit+fence. `MOTIFCL_VK_MATMUL_SPLIT_K`
+turned it off or forced a count.
+
+Measured with `bench_vulkan_gemm_shapes` (the benchmark now times each op inside a
+one-dispatch batch, so a multi-dispatch path is measured end to end instead of
+measuring only its last dispatch):
+
+| shape | split-K off | auto | |
+|---|---:|---:|---:|
+| expert_gradw 384x2048x288 | 0.248 ms | 0.277 ms (4) | -12% |
+| attn_gradw 288x2048x288 | 0.247 ms | 0.271 ms (4) | -10% |
+| expert_up 2048x288x384 | 0.171 ms | 0.230 ms (2) | -34% |
+| attn_qkv 2048x288x288 | 0.123 ms | 0.114 ms (1) | not split |
+| head_dA 2048x32000x288 | 15.109 ms | 15.185 ms (2) | ~0% |
+| head_dB 288x2048x32000 | 11.651 ms | 11.475 ms (1) | not split |
+
+The grad_w shapes are transposed-A GEMMs: each workgroup streams the full k of
+its 32-column output slice, so they are bandwidth-bound rather than wave-starved.
+Splitting k leaves the traffic unchanged (the same bytes are still read once per
+output tile) and adds a dispatch plus a reduce. The LM-head dA is bandwidth-bound
+for the same reason: it re-reads the 2048x32000 dy once per output tile, and 160
+workgroups already saturate the read path. That is what the numbers show, so the
+implementation was reverted rather than shipped behind a flag.
+
+Two supporting changes were kept: the GEMM benchmark now times ops inside a batch
+(a bare dispatch under-reports any multi-dispatch path), and
+`test_vulkan_gemm_parity` also checks every shape through a batch, so batched
+execution (barriers, keepalive, scratch reuse) is covered by the parity test.
+
+## I.3 Where that leaves the step
+
+The LM head is the best-tuned block (fwd 56.8% of peak, dB 53%, dA 41%); its dA
+is bandwidth-bound by the dy re-read. The worst GEMMs (grad_w, 22-30%) are
+bandwidth-bound as well, so neither a bigger tile (too few workgroups: tile 64
+measured 0.295 ms vs 0.248) nor split-K helps on this device; the remaining lever
+there is a different decomposition with fewer re-reads, e.g. storing activations
+transposed so grad_w becomes an n-tile-friendly layout. The other blocks are
+`counter_gemm_db` (22.5%), GQA (15.7%) and CE (4.2%, already at the memory
+bandwidth floor). Host time outside dispatch is ~19 ms of the ~170 ms step, so
+host/device overlap is still the largest structural lever (~+11% ceiling).
