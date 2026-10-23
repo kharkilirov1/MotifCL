@@ -183,6 +183,10 @@ void CounterStateLinear::apply_update_backward(const Tensor& grad_out, const Ten
         // The command stream consumes grad_w before the next layer overwrites
         // the same workspace. Persistent state remains packed; large layers use
         // the allocation-free recompute path.
+        // The packed state and the row scale move below, so a cached decoded mirror
+        // is stale from here on (the invalidation is host-side; the rebuild and the
+        // update kernels stay ordered on the queue).
+        invalidate_dense_mirror();
         constexpr std::int64_t kGradWScratchLimitBytes = 32LL * 1024 * 1024;
         const std::int64_t grad_w_bytes = static_cast<std::int64_t>(out_) * in_ * (std::int64_t)sizeof(float);
         auto& rt = backend_->vulkan_runtime();
@@ -305,7 +309,10 @@ constexpr std::int64_t kDecodeDenseMinRows = 128;
 } // namespace
 
 const Tensor& CounterStateLinear::ensure_dense_weight() const {
-    if (!dense_weight_.valid() || dense_weight_.shape()[0] != out_ || dense_weight_.shape()[1] != in_) {
+    const bool shape_ok =
+        dense_weight_.valid() && dense_weight_.shape()[0] == out_ && dense_weight_.shape()[1] == in_;
+    if (dense_mirror_cached_ && dense_mirror_valid_ && shape_ok) return dense_weight_;
+    if (!shape_ok) {
         dense_weight_ = Tensor::empty(*backend_, {out_, in_}, DType::F32);
     }
     const auto result = run_vulkan_compact_counter_decode_weight(
@@ -313,6 +320,7 @@ const Tensor& CounterStateLinear::ensure_dense_weight() const {
         dense_weight_.storage().vulkan_buffer, static_cast<std::size_t>(in_), static_cast<std::size_t>(out_),
         static_cast<std::size_t>(C_));
     MCL_CHECK(result.success, std::string("vulkan compact-counter decode_weight failed: ") + result.error);
+    dense_mirror_valid_ = dense_mirror_cached_;
     return dense_weight_;
 }
 
@@ -323,6 +331,8 @@ void CounterStateLinear::apply_zero_grad_update() {
     // nothing from the seed stream matches the dense path: the seed is drawn at
     // forward time (CounterBackwardNode is constructed with next_seed()), not here.
     if (!training_) return;
+    // Only the row second moment v moves; state and scale (what the mirror decodes)
+    // do not, so the cache stays valid.
     if (backend_->is_vulkan()) {
         const auto run = run_vulkan_compact_counter_decay_v(
             backend_->vulkan_runtime(), v.storage().vulkan_buffer,

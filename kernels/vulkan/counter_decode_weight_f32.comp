@@ -2,6 +2,12 @@
 // kernels/compact_counter.cl decode_counter_state_weight_f32:
 //   w[row, g*4+k] = scale[row] * t   with t = code/(2C-1) - 1.
 // One invocation per packed group of 4 weights.
+//
+// The first version divided by (2C-1) four times per invocation and stored the four
+// results as four separate floats; at 12.4 us per projection that made this the
+// single largest counter-bookkeeping cost once the dense mirror path became the
+// default. The quotient only depends on a 6-bit code, so it is tabulated once per
+// workgroup in shared memory, and the four outputs are written as one vec4.
 #version 450
 #extension GL_EXT_shader_8bit_storage : require
 
@@ -9,7 +15,7 @@ layout(local_size_x = 64) in;
 
 layout(std430, set = 0, binding = 0) readonly buffer StateBuf { uint8_t state[]; };
 layout(std430, set = 0, binding = 1) readonly buffer ScaleBuf { float scale[]; };
-layout(std430, set = 0, binding = 2) writeonly buffer WBuf { float w[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer WBuf { vec4 w4[]; };
 
 layout(push_constant) uniform Push {
     int C;
@@ -17,7 +23,14 @@ layout(push_constant) uniform Push {
     int n_groups;
 } p;
 
+shared int t_table[64];
+
 void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const int lv = 2 * p.C - 1;
+    t_table[lane] = int(lane) / lv - 1;
+    barrier();
+
     const int gid = int(gl_GlobalInvocationID.x);
     if (gid >= p.n_groups) return;
     const int gpr = p.in_features / 4;
@@ -27,15 +40,10 @@ void main() {
     const int b0 = int(uint(state[base]));
     const int b1 = int(uint(state[base + 1]));
     const int b2 = int(uint(state[base + 2]));
-    int cc[4];
-    cc[0] = b0 & 0x3F;
-    cc[1] = ((b0 >> 6) | (b1 << 2)) & 0x3F;
-    cc[2] = ((b1 >> 4) | (b2 << 4)) & 0x3F;
-    cc[3] = (b2 >> 2) & 0x3F;
-    const int lv = 2 * p.C - 1;
-    const float s = scale[row];
-    for (int k = 0; k < 4; ++k) {
-        const int t = cc[k] / lv - 1;
-        w[row * p.in_features + g * 4 + k] = s * float(t);
-    }
+    const vec4 s = vec4(scale[row]);
+    const vec4 t = vec4(float(t_table[b0 & 0x3F]),
+                        float(t_table[((b0 >> 6) | (b1 << 2)) & 0x3F]),
+                        float(t_table[((b1 >> 4) | (b2 << 4)) & 0x3F]),
+                        float(t_table[(b2 >> 2) & 0x3F]));
+    w4[gid] = s * t;
 }

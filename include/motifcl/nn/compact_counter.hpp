@@ -48,6 +48,18 @@ public:
     int in_features() const { return in_; }
     int out_features() const { return out_; }
 
+    // Opt-in decoded-mirror cache. The dense mirror is rebuilt on every
+    // decode_weight()/forward()/backward path by default (226 rebuilds per training
+    // step, 2.5 ms). With the cache enabled a rebuild happens once per counter
+    // update instead; the class's own update methods invalidate it, but writing to
+    // `state`/`scale` directly bypasses that, so the cache is off unless the caller
+    // knows it only mutates them through apply_update_*/apply_zero_grad_update.
+    void set_dense_mirror_cached(bool enabled) {
+        dense_mirror_cached_ = enabled;
+        if (!enabled) dense_mirror_valid_ = false;
+    }
+    bool dense_mirror_cached() const { return dense_mirror_cached_; }
+
     // Persistent state (saved/restored as buffers, not optimizer-touched).
     Tensor state;   // U8  [out, in]
     Tensor scale;   // F32 [out]
@@ -59,7 +71,10 @@ private:
     // packed state on every call (the state moves every optimizer step) and the
     // buffer is reused so the path does not pay an allocation per projection.
     const Tensor& ensure_dense_weight() const;
+    void invalidate_dense_mirror() const { dense_mirror_valid_ = false; }
     mutable Tensor dense_weight_;
+    mutable bool dense_mirror_valid_ = false;
+    bool dense_mirror_cached_ = false;
 
     Backend* backend_ = nullptr;
     int in_ = 0;

@@ -366,6 +366,17 @@ int main() {
             tg = Tensor::from_cpu(backend, {bs * T}, DType::I32, th.data());
         };
 
+        // The trainer mutates counter state only through apply_update_backward /
+        // apply_zero_grad_update, which invalidate the decoded mirror themselves, so
+        // the mirror can be built once per update instead of once per projection
+        // (226 rebuilds per step -> 96). MOTIFCL_COUNTER_MIRROR_CACHE=0 disables it.
+        {
+            const char* cache_env = std::getenv("MOTIFCL_COUNTER_MIRROR_CACHE");
+            const bool cache = !(cache_env && *cache_env == '0');
+            for (auto& blk : blocks) {
+                for (auto* layer : blk.moe->counter_layers()) layer->set_dense_mirror_cached(cache);
+            }
+        }
         auto set_counter_lr = [&](float lr) {
             for (auto& blk : blocks) {
                 for (auto* l : {blk.wq.get(), blk.wk.get(), blk.wv.get(), blk.wo.get()}) l->set_lr(lr);

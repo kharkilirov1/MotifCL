@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Counter bookkeeping: cheaper decode kernel and an opt-in mirror cache (2026-10-24)
+
+- `counter_decode_weight_f32` tabulates `code/(2C-1) - 1` once per workgroup in
+  shared memory (the quotient only depends on a 6-bit code) and writes the four
+  decoded weights as one vec4: 12.4 -> 11.3 us per rebuild, same values.
+- `CounterStateLinear::set_dense_mirror_cached(true)` keeps the decoded dense mirror
+  across calls and invalidates it in `apply_update_backward`, so the trainer rebuilds
+  a mirror once per update instead of once per projection (226 -> 96 rebuilds per
+  step). The trainer enables it (`MOTIFCL_COUNTER_MIRROR_CACHE=0` disables); it stays
+  opt-in for library users because `state`/`scale` are public tensors.
+- Exact: a 6-step full run with both changes produces the same 430 checkpoint files
+  as before. Cache A/B: 148.8 ms/step off vs 147.6-147.9 ms on (+0.7%); with the
+  kernel change the round is 149.0 -> 147.7 ms per steady step.
+- Also re-modelled the concatenated expert up-projection from Phase Q and cancelled
+  it: stacking the seven up-matrices leaves the byte counts identical, so it would
+  only save launches. `reports/vulkan-moe-sparse-2026-10-21.md`, Phase S.
+
 ### Attention backward: one shared body for the stage-1 widths (2026-10-24)
 
 - `gqa_bwd_probs_causal_body.glsl` now holds the stage-1 kernel and thin wrappers

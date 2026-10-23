@@ -1615,3 +1615,34 @@ exactly what the cached-vs-legacy bit-exactness witness pins, so it stays opt-in
 That closes the "maybe an old switch is now a win" hypothesis: the remaining large
 items are the ones listed at the end of Phase Q (concatenated expert projections and
 the LM-head traffic), not dormant flags.
+
+# Phase S — Counter bookkeeping: a cheaper decode and a mirror cache
+
+Phase Q moved the counter projections onto the decoded dense mirror, which left two
+bookkeeping costs: `counter_decode_weight_f32` (226 rebuilds per step, 2.8 ms) and
+`counter_update_apply_f32` (2.4 ms). Before optimizing the concatenation idea from
+Phase Q, its traffic was re-modelled: stacking the seven expert up-matrices into one
+2688-row GEMM leaves the byte counts unchanged (per-expert: 7 x (6 n-tiles x 2.36 MB
+of A + 32 m-tiles x 0.44 MB of B); stacked: 42 n-tiles x 2.36 MB of A + 32 m-tiles x
+3.1 MB of B = the same 198 MB), so it would only save launches, not work. That
+cancelled the project before it was built.
+
+The bookkeeping itself does have room:
+
+- the decode kernel divided by (2C-1) four times per invocation and stored four
+  scalars; the quotient only depends on a 6-bit code, so it is now tabulated once per
+  workgroup in shared memory and the four outputs leave as one vec4: 12.4 -> 11.3 us
+  per rebuild. What is left is the launch count, not the kernel;
+- `CounterStateLinear` gained an **opt-in** decoded-mirror cache
+  (`set_dense_mirror_cached`), invalidated by its own `apply_update_backward`, so a
+  mirror is rebuilt once per update instead of once per projection: 226 -> 96
+  rebuilds per step. The trainer enables it for its counter layers
+  (`MOTIFCL_COUNTER_MIRROR_CACHE=0` disables it). It is deliberately not the default
+  for library users: `state`/`scale` are public tensors and writing them directly
+  would bypass the invalidation.
+
+Both changes are exact: a 6-step full run with the new decode kernel and the cache
+enabled produces the same 430 checkpoint files as before, and the cache A/B isolates
+its effect: 148.8 ms/step with the cache off vs **147.6-147.9 ms** with it on
+(13761-13762 -> 13843-13879 tok/s, +0.7%). Together with the kernel change this
+round is 149.0 -> 147.7 ms per steady step.
