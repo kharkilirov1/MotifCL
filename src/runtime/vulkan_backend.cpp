@@ -8770,11 +8770,17 @@ VulkanOpResult run_vulkan_rmsnorm_backward_weight(VulkanRuntime& runtime,
         return fail("Vulkan RMSNorm weight backward output buffer is too small");
     }
 
+    // The non-split kernel launches one workgroup per 64 columns (5 for the
+    // trainer's 288-wide norms) and walks all 2048 rows in each, so the CUs are
+    // nearly idle: 0.285 ms for 4.7 MB of reads. The split form keeps the same
+    // reduction but spreads it over splits x groups workgroups, and is the default
+    // for training-shaped problems (measured 2.4 ms/step, ~1.7% of the GPU time).
+    // MOTIFCL_VK_RMS_DW_SPLIT=0 disables it; a number > 1 pins the split count.
     const char* split_mode = std::getenv("MOTIFCL_VK_RMS_DW_SPLIT");
-    if (split_mode && *split_mode >= '1' && *split_mode <= '9' &&
-        rows >= 256 && rows <= 65535 && cols <= 1024) {
+    const bool split_disabled = split_mode && std::strcmp(split_mode, "0") == 0;
+    if (!split_disabled && rows >= 256 && rows <= 65535 && cols <= 1024) {
         auto splits = std::min<std::size_t>((rows + 31) / 32, 64);
-        if (split_mode && *split_mode) {
+        if (split_mode && *split_mode >= '1' && *split_mode <= '9') {
             const auto requested = std::strtoul(split_mode, nullptr, 10);
             if (requested > 1) splits = std::min<std::size_t>(requested, 64);
         }

@@ -1338,3 +1338,33 @@ with the same FINAL VAL (6.4265). It is the default; the scatter stays available
 via `MOTIFCL_EMBEDDING_NONDETERMINISTIC=1` for a pure-speed run. Checkpoint hashes
 are now a usable exactness witness for A/B, which the Phase K measurement did not
 have.
+
+# Phase M — A tiny grid hid 2.5% of the step: RMSNorm grad_w
+
+The fresh profile after Phase L put `rmsnorm_bwd_w_f32` at 2.5% of the step: 13
+dispatches per step (two norms per block plus the final norm), 0.285 ms each,
+reading 4.7 MB. That is ~16 GB/s, nowhere near the card's bandwidth, and the reason
+is the launch shape: the kernel maps one workgroup per 64 columns, so a 288-wide
+norm launches **5 workgroups** and each of them walks all 2048 rows.
+
+The split form (`rmsnorm_bwd_w_partial_f32` + `rmsnorm_bwd_w_reduce_f32`, already in
+the tree behind `MOTIFCL_VK_RMS_DW_SPLIT`) keeps the same reduction but spreads it
+over `splits x ceil(cols/64)` workgroups; for the trainer that is 64 x 5 = 320
+workgroups instead of 5. It was opt-in because it adds one dispatch (the partial
+pass), so this phase measured it end to end.
+
+25 steps, three ABBA pairs, same executable:
+
+| arm | tok/s | fwd+bwd GPU |
+|---|---:|---:|
+| non-split (`MOTIFCL_VK_RMS_DW_SPLIT=0`) | 11219-11304 | 145.2-146.1 ms |
+| split (new default) | 11420-11432 | 142.8-143.0 ms |
+
++1.5% throughput with disjoint ranges (GPU loses 2.6 ms of the 3.7 ms the kernel
+was spending). The split path is now the default on training-shaped problems
+(rows 256..65535, cols <= 1024); `MOTIFCL_VK_RMS_DW_SPLIT=0` restores the old
+launch and a number pins the split count.
+
+Verification: two identical 6-step full runs with the new default are still 430
+byte-identical checkpoint files with FINAL VAL 6.4265, and the full CTest suite
+covers the split parity (`test_vulkan_rmsnorm_split`).

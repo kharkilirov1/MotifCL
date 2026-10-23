@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Split RMSNorm grad_w by default: +1.5% trainer throughput (2026-10-24)
+
+- The non-split `rmsnorm_bwd_w_f32` launches one workgroup per 64 columns (5 for a
+  288-wide norm) and walks all 2048 rows in each, so 13 calls per step cost 2.5% of
+  the GPU at ~16 GB/s. The already-implemented split form
+  (`rmsnorm_bwd_w_partial_f32` + `rmsnorm_bwd_w_reduce_f32`, 64 x 5 = 320
+  workgroups) is now the default for training shapes (rows 256..65535,
+  cols <= 1024); `MOTIFCL_VK_RMS_DW_SPLIT=0` restores the old launch, a number pins
+  the split count.
+- 25-step A/B, three ABBA pairs, same executable: 11219-11304 -> 11420-11432 tok/s
+  (+1.5%, disjoint ranges), GPU forward+backward 145.2-146.1 -> 142.8-143.0 ms.
+- Two identical 6-step full runs stay 430 byte-identical checkpoint files with
+  FINAL VAL 6.4265. Evidence: `reports/vulkan-moe-sparse-2026-10-21.md`, Phase M.
+
 ### Reproducible training: deterministic embedding backward (2026-10-24)
 
 - Root cause of the run-to-run checkpoint differences: on GCN4 / RX 580 (no float
