@@ -2,6 +2,58 @@
 
 ## Unreleased
 
+### MoE sparse execution, counter-GEMM measurement, allocation classes (2026-10-21/22)
+
+- Sparse Vulkan MoE7 forward: `moe_route_top1_f32` (router dot product, bias,
+  strict `>` argmax, atomic per-expert compaction on device),
+  `counter_gemm_gather_db` (gather/scatter row addressing around the list, same
+  tile and accumulation order as the dense kernel), `moe_swiglu_bounded_f32`
+  (gated on the expert's live row count). Full MoE forward: prefill T=2048
+  3663.8 -> 1037.1 us (3.53x), decode T=1 1164.2 -> 228.8 us (5.09x), 28 -> 23
+  dispatches, `rel_err 0` against the dense path. A sparse forward cannot train
+  (the router gradient needs the losing experts' values); the sparse backward is
+  scoped, not enabled.
+- Zero-gradient expert skip (default on): a losing top-1 expert's backward graph
+  is skipped and its counter second moment is decayed explicitly, proven
+  bit-identical across 16 counter layers x 5 steps
+  (`tests/test_vulkan_moe7_zero_grad.cpp`). It only engages with the opt-in
+  `MOTIFCL_MOE_SPLIT_FWD_BWD=1` ordering, which submits the forward, reads the
+  routing back, then records the backward.
+- Buffer pool size classes are the next eighth of an octave instead of the next
+  power of two: reserved 3343 -> 2360 MB, slow allocations 28 -> 0 per step,
+  step 258.7 -> 220.1 ms, 7917 -> 9305 tok/s (+21.3% over the Phase D baseline).
+  Adds `buffer_bytes_requested()` / `buffer_bytes_requested_peak()`; the trainers
+  print both.
+- Counter GEMM investigation: `MOTIFCL_VK_SHADER_INFO=1` prints driver-reported
+  VGPR/SGPR/LDS and waves per SIMD through `VK_AMD_shader_info`;
+  `MOTIFCL_VK_SHADER_ISA=<kernel>|all` dumps the GCN ISA and opcode histogram.
+  They show `counter_gemm_db` (29.6% of a training step) is issue-bound at
+  ~5.4 instructions per FMA. The measured workaround,
+  `MOTIFCL_COUNTER_DECODE_DENSE=1`, decodes the packed state into a reusable
+  dense mirror and runs the tuned FP32 GEMM: 1.5-2.0x per projection, +6.9% end
+  to end (9146 -> 9760 tok/s), validation perplexity unchanged within the
+  measured spread; gated to >=128 rows because the decode is a fixed ~15 us.
+- Evidence: `reports/vulkan-moe-sparse-2026-10-21.md` (phases A-G, including the
+  process error that invalidated one A/B and how the correctness test caught it).
+
+### Vulkan hardening: cached CE, bounded workspaces, guards (2026-10-18)
+
+- Training cross-entropy caches each row's max and inverse exponential sum on
+  device and uses a coalesced cached backward; portable (non-subgroup) statistics
+  are the default and are bit-exact against the legacy composition.
+  `MOTIFCL_VK_CE_CACHE=0` forces the old path.
+- One wave64 predicate (`supports_wave64_arithmetic()`) now gates every
+  subgroup-only reduction (counter update, CE, softmax, RMSNorm, GQA).
+- Counter update validates dtype, shape, backend and optimizer parameters before
+  dispatch; the constructor restricts C to [1,11].
+- Command-ordered weak workspace reuse replaces per-layer dense `grad_w`
+  scratch and slightly growing shapes reuse one capacity bucket (65 live
+  requests: 67.6 MB -> 1.6 MB, 65 -> 2 allocations).
+- Optional RMSNorm weight-gradient row split for rows >=256 / cols <=1024.
+- Python timing-window and benchmark-runner tests are now registered as CTest
+  targets, so trainer log-format changes cannot silently break them.
+- Evidence: `reports/vulkan-hardening-performance-2026-10-18.md`.
+
 ### Tiled causal attention + counter decode LUT (3rd pass)
 
 - New tiled causal GQA attention fast path (causal, no mask, query_offset 0,

@@ -131,3 +131,20 @@ if(TARGET motifcl)
     target_link_libraries(bench_ternary15m PRIVATE motifcl)
     motifcl_apply_compiler_options(bench_ternary15m)
 endif()
+
+# CPU-only Python witnesses. They compile the trainers' timing snippets and drive
+# the benchmark runner without a GPU, so they catch trainer log-format and runner
+# regressions the C++ suite cannot see (a new step-line argument broke the
+# timing-window probe once). Registered here so they cannot rot unobserved.
+find_program(MOTIFCL_TEST_PYTHON NAMES python python3)
+if(MOTIFCL_TEST_PYTHON)
+    foreach(py_test test_training_timing_window test_benchmark_vulkan_training)
+        add_test(NAME ${py_test}
+                 COMMAND "${MOTIFCL_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/${py_test}.py")
+        set_tests_properties(${py_test} PROPERTIES TIMEOUT 300)
+        if(_motifcl_test_env)
+            set_tests_properties(${py_test} PROPERTIES
+                ENVIRONMENT_MODIFICATION "${_motifcl_test_env}")
+        endif()
+    endforeach()
+endif()

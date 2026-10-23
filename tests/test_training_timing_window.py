@@ -56,6 +56,7 @@ def build_probe(name: str) -> str:
 struct MockRuntime {
     double buffer_bytes_live() const { return 0; }
     double buffer_bytes_peak() const { return 0; }
+    double buffer_bytes_requested_peak() const { return 0; }
 } runtime;
 int main() {
     constexpr int N = 2048, steps_total = 200;
@@ -113,7 +114,8 @@ class TimingWindowTest(unittest.TestCase):
 
     def test_moe_average_reset_and_missing_gpu(self):
         pattern = (r"ms fwd\+bwd gpu ([-\d.]+) opt gpu ([-\d.]+) sync ([-\d.]+)"
-                   r"\s+phases upload ([\d.]+) fwd ([\d.]+) record ([\d.]+) submit ([\d.]+)"
+                   r"\s+phases upload ([\d.]+) fwd ([\d.]+) record ([\d.]+)"
+                   r" bwdrec [-\d.]+ submit ([\d.]+)"
                    r" balance ([\d.]+) optim ([\d.]+) total ([\d.]+)")
         got = [tuple(map(float, m)) for m in re.findall(pattern, self.output["train_moe15m.cpp"])]
         self.assertEqual(got, [
