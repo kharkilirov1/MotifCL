@@ -9583,6 +9583,52 @@ VulkanOpResult run_vulkan_moe_balance_bias_update(VulkanRuntime& runtime,
                                    buffers, &push, sizeof(push), 1, 1, 1);
 }
 
+VulkanOpResult run_vulkan_moe_balance_gradient(VulkanRuntime& runtime,
+                                               const VulkanBuffer& logits,
+                                               VulkanBuffer& grad,
+                                               std::size_t rows,
+                                               const std::array<float, 7>& loads,
+                                               float scale) {
+    VulkanOpResult result;
+    auto fail = [&](const std::string& message) {
+        result.error = message;
+        return result;
+    };
+    constexpr std::uint32_t kExperts = 7;
+    if (!runtime.available()) return fail("Vulkan balance-gradient requires an available runtime");
+    if (rows == 0) return fail("Vulkan balance-gradient requires non-zero rows");
+    if (rows > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return fail("Vulkan balance-gradient rows exceed the push-constant range");
+    }
+    if (!std::isfinite(scale)) return fail("Vulkan balance-gradient requires a finite scale");
+    for (float load : loads) {
+        if (!std::isfinite(load)) return fail("Vulkan balance-gradient requires finite loads");
+    }
+    if (!logits.valid() || !grad.valid()) return fail("Vulkan balance-gradient requires valid buffers");
+    if (&logits == &grad) return fail("Vulkan balance-gradient requires a separate output buffer");
+    if (rows > std::numeric_limits<std::size_t>::max() / (kExperts * sizeof(float))) {
+        return fail("Vulkan balance-gradient buffer size overflows size_t");
+    }
+    const std::size_t bytes = rows * kExperts * sizeof(float);
+    if (logits.nbytes() < bytes || grad.nbytes() < bytes) {
+        return fail("Vulkan balance-gradient buffer is too small");
+    }
+    struct Push {
+        std::uint32_t rows;
+        float scale;
+        float loads[7];
+    } push{};
+    static_assert(offsetof(Push, loads) == 8, "balance-gradient push layout must match the GLSL block");
+    static_assert(sizeof(Push) == 36, "balance-gradient push block must be 36 bytes");
+    push.rows = static_cast<std::uint32_t>(rows);
+    push.scale = scale;
+    for (std::size_t i = 0; i < loads.size(); ++i) push.loads[i] = loads[i];
+    const std::vector<const VulkanBuffer*> buffers = {&logits, &grad};
+    return runtime.dispatch_cached(vkspirv::k_moe_balance_grad_f32, vkspirv::k_moe_balance_grad_f32_words,
+                                   buffers, &push, sizeof(push),
+                                   static_cast<std::uint32_t>((rows + 63u) / 64u), 1, 1);
+}
+
 VulkanOpResult run_vulkan_compact_counter_update_apply(VulkanRuntime& runtime,
                                                        VulkanBuffer& state,
                                                        VulkanBuffer& scale,

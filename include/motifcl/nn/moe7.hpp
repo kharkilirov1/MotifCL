@@ -99,6 +99,11 @@ public:
     // the same read-back (prepare_*), then turned into a weight gradient on the
     // device (inject_*) and accumulated into the router parameter. No new kernel.
     void prepare_balance_gradient(float aux_weight);
+    // Same dL_aux/dlogits as prepare_balance_gradient, computed on the device from
+    // the forward's logits buffer (no [N,7] host download/upload per block per
+    // step). Records the kernel in the current batch; returns false when the
+    // caller should use the host path (no Vulkan backend or no logits available).
+    bool prepare_balance_gradient_on_device(float aux_weight);
     void inject_balance_gradient();
     const std::array<float, kExperts>& last_load() const { return last_load_; }
     // Per-token winning expert of the most recent forward (filled by

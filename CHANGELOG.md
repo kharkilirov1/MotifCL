@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Device-side MoE balance gradient: +2.0% trainer throughput (2026-10-24)
+
+- `moe_balance_grad_f32` computes the auxiliary load-balancing router gradient
+  on the device from the forward's logits, instead of downloading [N,7] logits
+  and uploading [N,7] gradients per MoE block per step
+  (`MOTIFCL_MOE_HOST_BALANCE_GRAD=1` restores the host path). The balance phase
+  drops 8.5 -> 2.0 ms/step; 25-step A/B 10302-10394 -> 10569-10597 tok/s (+2.0%,
+  disjoint ranges), with identical training losses at printed precision.
+- New standalone witness `tests/test_vulkan_moe_balance_grad.cpp`: four fixtures
+  against an independent CPU implementation (max_abs 1.3e-12..3.3e-11) plus
+  invalid-argument controls (rows, NaN/Inf, aliasing, undersized buffers).
+- Evidence: `reports/vulkan-moe-sparse-2026-10-21.md`, Phase J.
+
 ### Counter GEMM full-tile pipeline: +12.1% trainer throughput (2026-10-24)
 
 - `counter_gemm_db` selects a bounds-free, hoisted-address pipeline for tiles

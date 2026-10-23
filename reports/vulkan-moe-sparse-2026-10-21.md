@@ -1151,3 +1151,76 @@ transposed so grad_w becomes an n-tile-friendly layout. The other blocks are
 `counter_gemm_db` (22.5%), GQA (15.7%) and CE (4.2%, already at the memory
 bandwidth floor). Host time outside dispatch is ~19 ms of the ~170 ms step, so
 host/device overlap is still the largest structural lever (~+11% ceiling).
+
+# Phase J — The balance phase: a device-side auxiliary router gradient
+
+Phase I left host time outside dispatch as the largest single lever. The trainer's
+own phase split put ~8.5 ms of it in `balance`; this phase located that cost and
+removed most of it.
+
+## J.1 What the balance phase actually does
+
+The balance phase runs once per MoE block (6 of them): read the routing counts
+back, build the auxiliary-loss router gradient, and update the router bias. Three
+25-step runs with everything else equal separate the contributors:
+
+| variant | balance ms/step |
+|---|---:|
+| baseline | 8.5 |
+| `AUX_WEIGHT=0` (no balance gradient) | 1.9 |
+| `BALANCE_GAMMA=0` (no bias update) | 8.2 |
+| both disabled | 1.7 |
+
+So the bias update is ~0.3 ms and the routing read-back ~1.7 ms; ~6.6 ms is
+`prepare_balance_gradient`: a host softmax over the [2048,7] logits plus a
+`Tensor::from_cpu` upload of the [2048,7] gradient, per block, per step. 57 KB per
+block does not sound like 1.1 ms, but the upload is a staging submit+fence and six
+blocks are six round trips.
+
+## J.2 The kernel
+
+`moe_balance_grad_f32` computes the same formula on the device, reading the logits
+buffer the forward already produced:
+
+    p[n,j]   = softmax(logits[n])[j]
+    dl[n,j]  = scale * p[n,j] * (f_j - sum_e f_e p[n,e]),  scale = (E/N)*aux_weight
+
+One lane per row (N/64 workgroups), the seven loads as scalar push constants (the
+target driver only indexes push-constant arrays by dynamically uniform values --
+the same convention as the bias kernel).
+`MoE7FFN::prepare_balance_gradient_on_device` allocates or reuses the [N,7]
+gradient tensor and records the kernel in the optimizer batch, so there is no host
+round trip and no extra submit. The host path stays as the non-Vulkan fallback and
+as the A/B arm via `MOTIFCL_MOE_HOST_BALANCE_GRAD=1`.
+
+## J.3 Measured
+
+25 steps, seed 1337, three ABBA pairs, same executable:
+
+| arm | tok/s | step | balance | GPU fwd+bwd |
+|---|---:|---:|---:|---:|
+| host gradient | 10302-10394 | 197.0-198.8 ms | 8.5-8.6 ms | 153.2-154.8 ms |
+| device gradient | 10569-10597 | 193.3-193.8 ms | 1.9-2.0 ms | 155.2-156.4 ms |
+
++2.0% throughput with disjoint ranges. The balance phase loses 6.6 ms, the GPU side
+gains 2.6 ms (six extra dispatches plus the kernel, now inside the optimizer
+batch), so the step wins 3.5 ms net. Six-step losses and the final validation loss
+are identical at printed precision (10.4277, 10.2058, 8.8452, 7.2389, 6.7947,
+6.5197; FINAL VAL 6.4265 in both arms).
+
+A new standalone witness (`tests/test_vulkan_moe_balance_grad.cpp`, links only the
+Vulkan runtime) compares four fixtures against an independent CPU implementation
+(max_abs 1.3e-12..3.3e-11) and requires invalid arguments (zero/overflow rows, NaN
+scale or loads, aliased buffers, undersized buffers) to fail before dispatch and
+without mutating the output. Its kernel-engagement assertion also caught a real
+trap: `tools/gen_vulkan_spirv.py` and `tools/gen_vulkan_spirv_names.py` are two
+separate generators, and a kernel missing from the name table still executes but
+is invisible to the profiler.
+
+## J.4 What is left in the host path
+
+`read_token_counts` still costs ~1.7 ms per step: it downloads the [2048,7] biased
+logits for six blocks and computes load/spread/pick statistics on the host. The
+device already computes per-expert counts for the sparse path
+(`moe_route_top1_f32`), so a counts-only variant plus a small read-back would
+remove most of that. Beyond it, the structural lever remains host/device overlap.

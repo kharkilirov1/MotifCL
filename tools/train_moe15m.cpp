@@ -580,6 +580,14 @@ int main() {
             balance_clamp > 0.0f && runtime.caps().max_push_constant_bytes >= 48u;
         std::vector<nn::MoE7FFN*> pending_balance;
         pending_balance.reserve(blocks.size());
+        // Device-side balance gradient: the auxiliary router gradient is computed
+        // from the forward's logits on the GPU inside the optimizer batch instead
+        // of downloading [N,7] and uploading [N,7] for every block every step.
+        // MOTIFCL_MOE_HOST_BALANCE_GRAD=1 forces the host path for A/B.
+        const bool device_balance_grad = env_int("MOTIFCL_MOE_HOST_BALANCE_GRAD", 0) == 0 &&
+            std::isfinite(aux_weight) && aux_weight > 0.0f;
+        std::vector<nn::MoE7FFN*> pending_balance_grad;
+        pending_balance_grad.reserve(blocks.size());
     for (int step = start_step; step < steps_total; ++step) {
             phases = StepPhases{};
             const auto t0 = std::chrono::steady_clock::now();
@@ -611,6 +619,7 @@ int main() {
                 phases.sync_ms = ms_since(t_sync0);
                 if (!std::isfinite(lv)) { std::cerr << "non-finite loss at step " << step << "\n"; return false; }
                 pending_balance.clear();
+                pending_balance_grad.clear();
                 const auto t_bal = std::chrono::steady_clock::now();
                 for (auto& blk : blocks) {
                     if (!blk.moe->read_token_counts()) continue;
@@ -618,7 +627,8 @@ int main() {
                     const auto& load = blk.moe->last_load();
                     for (std::size_t e = 0; e < load.size(); ++e) load_sum[e] += (double)load[e];
                     load_n += 1;
-                    blk.moe->prepare_balance_gradient(aux_weight);
+                    if (device_balance_grad) pending_balance_grad.push_back(blk.moe.get());
+                    else blk.moe->prepare_balance_gradient(aux_weight);
                     if (gpu_balance_mode) pending_balance.push_back(blk.moe.get());
                     else blk.moe->update_balance_bias(balance_gamma);
                 }
@@ -666,6 +676,13 @@ int main() {
             if (!runtime.batch_begin()) { std::cerr << "batch_begin (optim) failed\n"; return 1; }
             for (auto* moe_ptr : pending_balance) moe_ptr->update_balance_bias(balance_gamma);
             pending_balance.clear();
+            for (auto* moe_ptr : pending_balance_grad) {
+                if (!moe_ptr->prepare_balance_gradient_on_device(aux_weight)) {
+                    std::cerr << "device balance gradient dispatch failed\n";
+                    return 1;
+                }
+            }
+            pending_balance_grad.clear();
             for (auto& blk : blocks) blk.moe->inject_balance_gradient();
             for (std::size_t pi = 0; pi < fp.size(); ++pi) {
                 auto& p = fp[pi];

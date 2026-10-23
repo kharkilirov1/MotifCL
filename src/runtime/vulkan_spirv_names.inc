@@ -77,6 +77,7 @@
     { vkspirv::k_mm_q8q4_scaled_f32, "mm_q8q4_scaled_f32" },
     { vkspirv::k_mm_q8q8_scaled_f32, "mm_q8q8_scaled_f32" },
     { vkspirv::k_moe_balance_bias_update_f32, "moe_balance_bias_update_f32" },
+    { vkspirv::k_moe_balance_grad_f32, "moe_balance_grad_f32" },
     { vkspirv::k_moe_route_top1_f32, "moe_route_top1_f32" },
     { vkspirv::k_moe_swiglu_bounded_f32, "moe_swiglu_bounded_f32" },
     { vkspirv::k_mul_f32, "mul_f32" },

@@ -222,6 +222,24 @@ void MoE7FFN::prepare_balance_gradient(float aux_weight) {
                                      DType::F32, dl.data());
 }
 
+bool MoE7FFN::prepare_balance_gradient_on_device(float aux_weight) {
+    if (!(aux_weight > 0.0f) || last_rows_ <= 0) return false;
+    if (!last_biased_logits_.valid()) return false;
+    Backend& backend = last_biased_logits_.backend();
+    if (!backend.is_vulkan()) return false;
+    VulkanRuntime& runtime = backend.vulkan_runtime();
+    if (!balance_grad_.valid() || balance_grad_.backend_ptr() != &backend ||
+        balance_grad_.shape()[0] != last_rows_ || balance_grad_.shape()[1] != kExperts) {
+        balance_grad_ = Tensor::empty(backend, {last_rows_, kExperts}, DType::F32);
+    }
+    const float e_over_n = static_cast<float>(kExperts) / static_cast<float>(last_rows_);
+    const auto result = run_vulkan_moe_balance_gradient(
+        runtime, last_biased_logits_.storage().vulkan_buffer, balance_grad_.storage().vulkan_buffer,
+        static_cast<std::size_t>(last_rows_), last_load_, e_over_n * aux_weight);
+    MCL_CHECK(result.success, std::string("MoE7FFN device balance gradient failed: ") + result.error);
+    return true;
+}
+
 void MoE7FFN::inject_balance_gradient() {
     if (!balance_grad_.valid() || !last_input_.valid()) return;
     // gW = x^T * (dL_aux/dlogits) -> [dim, kExperts], accumulated into the router grad.

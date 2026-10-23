@@ -848,6 +848,18 @@ VulkanOpResult run_vulkan_moe_balance_bias_update(VulkanRuntime& runtime,
                                             float gamma,
                                             float clamp_value);
 
+// Device-side load-balancing gradient for the MoE router:
+//   dl[n,j] = scale * p[n,j] * (f_j - sum_e f_e p[n,e]), p = softmax(logits[n])
+// with scale = (E/N) * aux_weight. The host path downloads the [N,7] logits and
+// uploads the [N,7] gradient per block per step; this writes the gradient straight
+// from the forward's logits buffer. `rows` is the logits row count.
+VulkanOpResult run_vulkan_moe_balance_gradient(VulkanRuntime& runtime,
+                                               const VulkanBuffer& logits,
+                                               VulkanBuffer& grad,
+                                               std::size_t rows,
+                                               const std::array<float, 7>& loads,
+                                               float scale);
+
 VulkanOpResult run_vulkan_compact_counter_update_apply(VulkanRuntime& runtime,
                                                        VulkanBuffer& state,
                                                        VulkanBuffer& scale,

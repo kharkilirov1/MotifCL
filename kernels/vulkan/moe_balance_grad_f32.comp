@@ -1,0 +1,59 @@
+// Auxiliary load-balancing gradient for the MoE router, computed on the device.
+//
+//   p[n,j] = softmax(logits[n])[j]
+//   dl[n,j] = (E/N) * aux_weight * p[n,j] * (f_j - sum_e f_e p[n,e])
+//
+// where f is the frozen expert load (computed from the same forward's routing).
+// The host version of this formula (nn::MoE7FFN::prepare_balance_gradient) has to
+// download the [N,7] logits and upload the [N,7] gradient for every MoE block on
+// every step; at N=2048 that is 57 KB per direction per block and dominates the
+// trainer's balance phase. This kernel reads the logits the forward already
+// produced and writes the gradient for the router GEMM.
+//
+// One lane per row. The seven loads are scalar push-constant members rather than
+// an array: the driver this project targets only indexes push-constant arrays by
+// dynamically uniform values, and keeping them scalar avoids that pitfall (same
+// convention as moe_balance_bias_update_f32).
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer LogitsBuf { float logits[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer GradBuf { float grad[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    float scale;  // (E/N) * aux_weight
+    float f0;
+    float f1;
+    float f2;
+    float f3;
+    float f4;
+    float f5;
+    float f6;
+} p;
+
+void main() {
+    const uint row = uint(gl_GlobalInvocationID.x);
+    if (row >= p.rows) return;
+    const uint base = row * 7u;
+
+    const float f[7] = float[7](p.f0, p.f1, p.f2, p.f3, p.f4, p.f5, p.f6);
+    float probs[7];
+    float mx = logits[base];
+    for (int j = 1; j < 7; ++j) mx = max(mx, logits[base + uint(j)]);
+    float z = 0.0;
+    for (int j = 0; j < 7; ++j) {
+        probs[j] = exp(logits[base + uint(j)] - mx);
+        z += probs[j];
+    }
+    const float inv_z = 1.0 / z;
+    float load_dot = 0.0;
+    for (int j = 0; j < 7; ++j) {
+        probs[j] *= inv_z;
+        load_dot += f[j] * probs[j];
+    }
+    for (int j = 0; j < 7; ++j) {
+        grad[base + uint(j)] = p.scale * probs[j] * (f[j] - load_dot);
+    }
+}
