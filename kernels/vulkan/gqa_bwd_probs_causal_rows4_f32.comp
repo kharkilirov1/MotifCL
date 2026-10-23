@@ -1,0 +1,18 @@
+// Tiled causal grouped-query attention backward stage 1 (probability recompute,
+// softmax backward term `ds`, and dQ), ROWS query rows per workgroup.
+//
+// The body is shared by the four-row and eight-row forms (and the experimental
+// sixteen-row one); ROWS is the only knob. Wider rows halve the workgroup count,
+// which halves the K/V re-reads of the kernel (K is streamed twice and V once per
+// workgroup), at the cost of more shared memory (probs/dps are ROWS x 256 floats)
+// and more per-lane accumulators.
+//
+// Every per-element operation and every reduction order is independent of ROWS, so
+// all widths must produce bit-identical p, ds and dQ.
+#version 450
+
+layout(local_size_x = 64) in;
+
+#define ROWS 4
+
+#include "gqa_bwd_probs_causal_body.glsl"

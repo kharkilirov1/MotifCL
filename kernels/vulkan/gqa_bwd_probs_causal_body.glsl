@@ -1,18 +1,3 @@
-// Tiled causal grouped-query attention backward stage 1 (probability recompute,
-// softmax backward term `ds`, and dQ) with a parameterized number of query rows.
-//
-// The four-row form (gqa_bwd_probs_causal4_f32) keeps ROWS=4 consecutive causal
-// query rows per workgroup and was written with vec4 arithmetic over those rows.
-// This file generalizes it: the rows are held in small constant-indexed arrays
-// that unroll, so ROWS can be 8 (half the workgroups, therefore half the K/V
-// re-reads) or 4. Every per-element operation and every reduction order is
-// unchanged, so ROWS=8 must produce bit-identical p, ds and dQ to ROWS=4.
-//
-// Preconditions are the caller's: causal, no mask tensor, query_offset == 0,
-// sliding_window == 0, key_stride == key_tokens == query_tokens <= 256,
-// head_dim == v_head_dim <= 64.
-#version 450
-
 #extension GL_KHR_shader_subgroup_arithmetic : enable
 #extension GL_KHR_shader_subgroup_basic : enable
 
@@ -36,9 +21,6 @@ layout(push_constant) uniform Push {
     float scale;
 } p;
 
-#ifndef ROWS
-#define ROWS 8
-#endif
 #define MAXK 256
 #define MAXD 64
 

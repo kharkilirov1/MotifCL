@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Attention backward: one shared body for the stage-1 widths (2026-10-24)
+
+- `gqa_bwd_probs_causal_body.glsl` now holds the stage-1 kernel and thin wrappers
+  pick `ROWS` (4 or 8, default 8; `MOTIFCL_VK_GQA_BWD_ROWS`). The original
+  hand-written four-row file is gone; both widths are bit-identical (two 6-step
+  runs, 430 identical checkpoint files).
+- Width 16 measured and rejected: rows8 150.5 ms, rows4 151.2 ms, rows16
+  160.3-160.6 ms per step - 40 KiB of shared memory leaves one workgroup per CU and
+  the sixteen row accumulators spill.
+- Screened every remaining off-by-default gate on the current pipeline (15-step
+  steady means): CE subgroup stats 151.3 ms against a 150.6 baseline, GQA no-temp
+  backward 150.8, GQA partial-K/V backward 150.6, counter-fused SwiGLU 154.9 - none
+  is a win, so the "stale flag" hypothesis is closed.
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase R.
+
 ### Counter projections: decode-then-dense by default, +3.0% (2026-10-24)
 
 - `MOTIFCL_COUNTER_DECODE_DENSE` is now the default (set it to `0` to restore the

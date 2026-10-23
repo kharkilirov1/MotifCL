@@ -1576,3 +1576,42 @@ per step for the up matrix, 48 for the down matrix, plus the gradient directions
 where a single wide GEMM over the concatenated 8-expert weight matrix would cut the
 launch count and give the GEMM a 3072-wide output. That needs MoE7FFN to consume a
 concatenated expert output, so it is a separate phase.
+
+# Phase R — Attention-backward width search, and a screen of every off-by-default gate
+
+Two thin, cheap experiments after Phase Q came back negative; both are worth
+recording because they close questions that would otherwise be re-opened.
+
+## R.1 Stage-1 attention backward: one body, widths 4/8/16
+
+The rows-parameterized kernel from Phase P was split into a shared body
+(`gqa_bwd_probs_causal_body.glsl`) plus thin wrappers that only pick `ROWS`, and the
+original hand-written four-row kernel was dropped in favour of the wrapper (all
+widths are bit-identical: two 6-step runs, rows8 default vs forced rows4, produce
+430 identical checkpoint files).
+
+Width 16 was measured and rejected. 15-step steady means: rows8 150.5 ms (13605
+tok/s), rows4 151.2 ms (13544), **rows16 160.3-160.6 ms (12754-12776)**. The wider
+form needs 40 KiB of shared memory for the probability caches, which leaves one
+workgroup per CU, and the sixteen live row accumulators spill; the halved K/V
+re-reads do not pay for either.
+
+## R.2 Screening every off-by-default gate
+
+Phase Q's win came from flipping L. The pipeline has changed enough since the other
+gates were added that several could be stale, so all four remaining off-by-default
+switches were run through the trainer (15 steps, steady line):
+
+| gate | steady ms | vs baseline |
+|---|---:|---:|
+| baseline | 150.6 | - |
+| `MOTIFCL_VK_CE_STATS_SUBGROUP=1` | 151.3 | worse |
+| `MOTIFCL_ENABLE_GQA_NO_TMP_BWD=1` | 150.8 | neutral |
+| `MOTIFCL_ENABLE_GQA_PARTIAL_KV_BWD=1` | 150.6 | neutral |
+| `MOTIFCL_VK_COUNTER_SWIGLU=1` | 154.9 | much worse |
+
+None qualifies. The subgroup CE reduction also changes the reduction order, which is
+exactly what the cached-vs-legacy bit-exactness witness pins, so it stays opt-in.
+That closes the "maybe an old switch is now a win" hypothesis: the remaining large
+items are the ones listed at the end of Phase Q (concatenated expert projections and
+the LM-head traffic), not dormant flags.
