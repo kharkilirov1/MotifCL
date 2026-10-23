@@ -14,6 +14,8 @@
   tok/s (+5.8%, disjoint ranges), step 192.7 -> 182.1 ms, GPU forward+backward
   155.1 -> 145.5 ms. Every printed step loss and the final validation loss are
   identical (10.4277, 10.2058, 8.8452, 7.2389, 6.7947, 6.5197; FINAL VAL 6.4265).
+  The trainer is not run-to-run bit-reproducible, so the skip's exactness rests
+  on its dedicated byte-for-byte witness, not on checkpoint hashes.
 - `=0` env overrides keep the previous one-batch / host-bias path for A/B.
 - Evidence: `reports/vulkan-moe-sparse-2026-10-21.md`, Phase K.
 

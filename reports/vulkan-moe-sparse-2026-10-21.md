@@ -1255,6 +1255,15 @@ over the seven experts). Same-executable A/B in that configuration:
 validation loss and every printed step loss are identical in both arms
 (10.4277, 10.2058, 8.8452, 7.2389, 6.7947, 6.5197; FINAL VAL 6.4265).
 
+Bit-level checkpoint equality is *not* usable as a witness here: the trainer is
+not run-to-run bit-reproducible. Two identical invocations of the same binary,
+same data order, same seed, produce different checkpoint bytes (verified with
+`AUX_WEIGHT=0` and `BALANCE_GAMMA=0`, so the drift is in the base step and not in
+the balance code). The drift is last-bit and leaves the printed losses identical.
+The exactness argument for the skip therefore rests on its own witness
+(`tests/test_vulkan_moe7_zero_grad.cpp` compares a dense and a skip backward byte
+for byte) plus the printed-loss equality above, not on checkpoint hashes.
+
 The GPU balance-bias update becomes the default alongside it: on its own it is
 inside the A/A envelope (Phase 18), but with the split it removes the remaining
 host bias round trip from the gap between the two batches (+1.9% over split
