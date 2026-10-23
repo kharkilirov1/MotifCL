@@ -18,6 +18,17 @@
 // 3-byte group always describes four consecutive in_features of one out row, so
 // four consecutive k rows of the shared tile (forward) or four consecutive n
 // columns (backward) are produced at a time.
+//
+// Two pipelines. The trainer's shapes are 2048 rows and 288/192 features, so all
+// but the last row/column tiles are completely inside the matrix, and both
+// features are multiples of 16, so no k tile is partial either. For those tiles
+// every per-element bounds test in the load/store helpers is dead and the byte
+// offsets advance by a constant per k tile, so the same arithmetic runs in a
+// bounds-free loop (`*_full` helpers, mode-specialised so the forward's constant
+// scale lookup and the backward's per-tile scale lookup do not share a loop).
+// ISA measurement of the guarded pipeline: 5.4 instructions per FMA, 14.3%
+// bounds predication and 22.8% integer address arithmetic. The edge tiles keep
+// the guarded pipeline unchanged, so the kernel stays correct for every shape.
 #version 450
 #extension GL_EXT_shader_8bit_storage : require
 
@@ -96,28 +107,29 @@ void store_a(int buf, uint lid, vec4 r0, vec4 r1) {
 // ---- weight decode (B) -----------------------------------------------------
 // Each lane decodes PER_LANE packed groups into four weights each.
 
+vec4 decode_weights(uint base, float s) {
+    const int b0 = int(uint(state[base]));
+    const int b1 = int(uint(state[base + 1u]));
+    const int b2 = int(uint(state[base + 2u]));
+    return vec4(s * float(tlut[b0 & 0x3F]),
+                s * float(tlut[((b0 >> 6) | (b1 << 2)) & 0x3F]),
+                s * float(tlut[((b1 >> 4) | (b2 << 4)) & 0x3F]),
+                s * float(tlut[(b2 >> 2) & 0x3F]));
+}
+
 void load_b(uint lid, uint n0, uint kt, uint K, out vec4 r0, out vec4 r1) {
     const uint groups_per_row = p.in_features / 4u;
-    const int levels = levels_of(p.C);
     for (int i = 0; i < PER_LANE; ++i) {
         const uint idx = lid + uint(i) * uint(LANES);
         vec4 w = vec4(0.0);
-        if (p.mode == 0u) {
+        if ((p.mode & 1u) == 0u) {
             // idx -> (out column c, group of four in_features kg)
             const uint c = idx >> 2;
             const uint kg = idx & 3u;
             const uint gc = n0 + c;
             const uint gk = kt + kg * 4u;
             if (gc < p.out_features && gk < p.in_features) {
-                const uint base = (gc * groups_per_row + (gk >> 2)) * 3u;
-                const int b0 = int(uint(state[base]));
-                const int b1 = int(uint(state[base + 1u]));
-                const int b2 = int(uint(state[base + 2u]));
-                const float s = scale[gc];
-                w.x = s * float(tlut[b0 & 0x3F]);
-                w.y = s * float(tlut[((b0 >> 6) | (b1 << 2)) & 0x3F]);
-                w.z = s * float(tlut[((b1 >> 4) | (b2 << 4)) & 0x3F]);
-                w.w = s * float(tlut[(b2 >> 2) & 0x3F]);
+                w = decode_weights((gc * groups_per_row + (gk >> 2)) * 3u, scale[gc]);
             }
         } else {
             // idx -> (out row kr within the tile, group of four in_features cg)
@@ -126,15 +138,7 @@ void load_b(uint lid, uint n0, uint kt, uint K, out vec4 r0, out vec4 r1) {
             const uint gk = kt + kr;
             const uint gc = n0 + cg * 4u;
             if (gk < p.out_features && gc < p.in_features) {
-                const uint base = (gk * groups_per_row + (gc >> 2)) * 3u;
-                const int b0 = int(uint(state[base]));
-                const int b1 = int(uint(state[base + 1u]));
-                const int b2 = int(uint(state[base + 2u]));
-                const float s = scale[gk];
-                w.x = s * float(tlut[b0 & 0x3F]);
-                w.y = s * float(tlut[((b0 >> 6) | (b1 << 2)) & 0x3F]);
-                w.z = s * float(tlut[((b1 >> 4) | (b2 << 4)) & 0x3F]);
-                w.w = s * float(tlut[(b2 >> 2) & 0x3F]);
+                w = decode_weights((gk * groups_per_row + (gc >> 2)) * 3u, scale[gk]);
             }
         }
         if (i == 0) r0 = w; else r1 = w;
@@ -145,7 +149,7 @@ void store_b(int buf, uint lid, vec4 r0, vec4 r1) {
     for (int i = 0; i < PER_LANE; ++i) {
         const vec4 w = (i == 0) ? r0 : r1;
         const uint idx = lid + uint(i) * uint(LANES);
-        if (p.mode == 0u) {
+        if ((p.mode & 1u) == 0u) {
             // Four consecutive k rows, one out column -> transposing scatter.
             const uint c = idx >> 2;
             const uint kg = idx & 3u;
@@ -164,6 +168,44 @@ void store_b(int buf, uint lid, vec4 r0, vec4 r1) {
     }
 }
 
+// ---- full-tile pipeline: no bounds tests, constant byte offsets -------------
+// Precondition (checked once per workgroup): m0+RB <= batch, n0+RB <= N and
+// K % KT == 0, so every element this pipeline touches is in bounds.
+
+void load_a_full(uint k4, uint a0, uint a1, out vec4 r0, out vec4 r1) {
+    r0 = A4[a0 + k4];
+    r1 = A4[a1 + k4];
+}
+
+void store_a_full(int buf, uint kq, uint q0, uint q1, uint e, vec4 r0, vec4 r1) {
+    const uint k = kq * 4u;
+    As[buf][k + 0u][q0][e] = r0.x;
+    As[buf][k + 1u][q0][e] = r0.y;
+    As[buf][k + 2u][q0][e] = r0.z;
+    As[buf][k + 3u][q0][e] = r0.w;
+    As[buf][k + 0u][q1][e] = r1.x;
+    As[buf][k + 1u][q1][e] = r1.y;
+    As[buf][k + 2u][q1][e] = r1.z;
+    As[buf][k + 3u][q1][e] = r1.w;
+}
+
+void store_b_full_fwd(int buf, uint kq, uint q0, uint q1, uint e, vec4 r0, vec4 r1) {
+    const uint k = kq * 4u;
+    Ws[buf][k + 0u][q0][e] = r0.x;
+    Ws[buf][k + 1u][q0][e] = r0.y;
+    Ws[buf][k + 2u][q0][e] = r0.z;
+    Ws[buf][k + 3u][q0][e] = r0.w;
+    Ws[buf][k + 0u][q1][e] = r1.x;
+    Ws[buf][k + 1u][q1][e] = r1.y;
+    Ws[buf][k + 2u][q1][e] = r1.z;
+    Ws[buf][k + 3u][q1][e] = r1.w;
+}
+
+void store_b_full_bwd(int buf, uint kr0, uint kr1, uint cg, vec4 r0, vec4 r1) {
+    Ws[buf][kr0][cg] = r0;
+    Ws[buf][kr1][cg] = r1;
+}
+
 // ---- main ------------------------------------------------------------------
 
 void main() {
@@ -172,8 +214,8 @@ void main() {
     const uint lid = lrow * 8u + lcol;
     const uint n0 = uint(gl_WorkGroupID.x) * uint(RB);
     const uint m0 = uint(gl_WorkGroupID.y) * uint(RB);
-    const uint K = (p.mode == 0u) ? p.in_features : p.out_features;
-    const uint N = (p.mode == 0u) ? p.out_features : p.in_features;
+    const uint K = ((p.mode & 1u) == 0u) ? p.in_features : p.out_features;
+    const uint N = ((p.mode & 1u) == 0u) ? p.out_features : p.in_features;
     const uint ktiles = (K + uint(KT) - 1u) / uint(KT);
 
         if (lid < 64u) tlut[lid] = ternary_from_code(int(lid), levels_of(p.C));
@@ -183,18 +225,141 @@ void main() {
     vec4 ra1 = vec4(0.0);
     vec4 rb0 = vec4(0.0);
     vec4 rb1 = vec4(0.0);
+    vec4 acc0 = vec4(0.0);
+    vec4 acc1 = vec4(0.0);
+    vec4 acc2 = vec4(0.0);
+    vec4 acc3 = vec4(0.0);
+    uint cur = 0u;
 
+    // Per-lane lane geometry, used by both full-tile branches: item i covers
+    // rows/columns lid + 64*i of the tile, i.e. 4x4 lanes give two vec4 items.
+    // Bit 8 of the mode word forces the guarded pipeline; the same binary then
+    // A/B compares both pipelines without a rebuild (MOTIFCL_COUNTER_GEMM_GUARDED).
+    const bool full_tile = ((p.mode & 0x100u) == 0u) && ((K & 15u) == 0u) &&
+        (m0 + uint(RB) <= p.batch) && (n0 + uint(RB) <= N);
+    const uint kq = lid & 3u;
+    const uint e = (lid >> 2u) & 3u;
+    const uint q0 = lid >> 4u;
+    const uint q1 = q0 + 4u;
+    const uint groups_per_row = p.in_features / 4u;
+    const uint K4 = K >> 2u;
+    const uint a0 = (m0 + (lid >> 2u)) * K4 + kq;
+    const uint a1 = a0 + 16u * K4;
+
+    if (full_tile && (p.mode & 1u) == 0u) {
+        // Forward: the decode base is tile-invariant except for a constant +12
+        // per k tile, and scale is constant over k.
+        const uint b0 = (n0 + (lid >> 2u)) * groups_per_row * 3u + 3u * kq;
+        const uint b1 = b0 + 16u * groups_per_row * 3u;
+        const float s0 = scale[n0 + (lid >> 2u)];
+        const float s1 = scale[n0 + ((lid >> 2u) + 16u)];
+
+        load_a_full(0u, a0, a1, ra0, ra1);
+        rb0 = decode_weights(b0, s0);
+        rb1 = decode_weights(b1, s1);
+        store_a_full(0, kq, q0, q1, e, ra0, ra1);
+        store_b_full_fwd(0, kq, q0, q1, e, rb0, rb1);
+        barrier();
+
+        for (uint t = 0u; t < ktiles; ++t) {
+            const bool has_next = (t + 1u) < ktiles;
+            if (has_next) {
+                load_a_full((t + 1u) * 4u, a0, a1, ra0, ra1);
+                const uint nb = (t + 1u) * 12u;
+                rb0 = decode_weights(b0 + nb, s0);
+                rb1 = decode_weights(b1 + nb, s1);
+            }
+            for (int kk = 0; kk < KT; ++kk) {
+                const vec4 a = As[cur][kk][lrow];
+                const vec4 b = Ws[cur][kk][lcol];
+                acc0 += a.x * b;
+                acc1 += a.y * b;
+                acc2 += a.z * b;
+                acc3 += a.w * b;
+            }
+            if (has_next) {
+                store_a_full(int(cur ^ 1u), kq, q0, q1, e, ra0, ra1);
+                store_b_full_fwd(int(cur ^ 1u), kq, q0, q1, e, rb0, rb1);
+            }
+            barrier();
+            cur ^= 1u;
+        }
+
+        const uint row0 = m0 + lrow * 4u;
+        const uint col0 = n0 + lcol * 4u;
+        const uint o0 = row0 * N + col0;
+        const uint o1 = o0 + N;
+        const uint o2 = o1 + N;
+        const uint o3 = o2 + N;
+        c_out[o0] = acc0.x; c_out[o0 + 1u] = acc0.y; c_out[o0 + 2u] = acc0.z; c_out[o0 + 3u] = acc0.w;
+        c_out[o1] = acc1.x; c_out[o1 + 1u] = acc1.y; c_out[o1 + 2u] = acc1.z; c_out[o1 + 3u] = acc1.w;
+        c_out[o2] = acc2.x; c_out[o2 + 1u] = acc2.y; c_out[o2 + 2u] = acc2.z; c_out[o2 + 3u] = acc2.w;
+        c_out[o3] = acc3.x; c_out[o3 + 1u] = acc3.y; c_out[o3 + 2u] = acc3.z; c_out[o3 + 3u] = acc3.w;
+        return;
+    }
+
+    if (full_tile) {
+        // Backward: four consecutive n columns per item, decode base advances by
+        // 16*groups_per_row*3 per k tile, scale index is the tile's k row.
+        const uint kr0 = lid >> 3u;
+        const uint kr1 = kr0 + 8u;
+        const uint cg = lid & 7u;
+        const uint b0 = kr0 * groups_per_row * 3u + ((n0 >> 2u) + cg) * 3u;
+        const uint b1 = b0 + 8u * groups_per_row * 3u;
+        const uint bstep = 16u * groups_per_row * 3u;
+
+        load_a_full(0u, a0, a1, ra0, ra1);
+        rb0 = decode_weights(b0, scale[kr0]);
+        rb1 = decode_weights(b1, scale[kr1]);
+        store_a_full(0, kq, q0, q1, e, ra0, ra1);
+        store_b_full_bwd(0, kr0, kr1, cg, rb0, rb1);
+        barrier();
+
+        for (uint t = 0u; t < ktiles; ++t) {
+            const bool has_next = (t + 1u) < ktiles;
+            if (has_next) {
+                load_a_full((t + 1u) * 4u, a0, a1, ra0, ra1);
+                const uint base = (t + 1u) * bstep;
+                const uint sk = (t + 1u) * 16u;
+                rb0 = decode_weights(b0 + base, scale[sk + kr0]);
+                rb1 = decode_weights(b1 + base, scale[sk + kr1]);
+            }
+            for (int kk = 0; kk < KT; ++kk) {
+                const vec4 a = As[cur][kk][lrow];
+                const vec4 b = Ws[cur][kk][lcol];
+                acc0 += a.x * b;
+                acc1 += a.y * b;
+                acc2 += a.z * b;
+                acc3 += a.w * b;
+            }
+            if (has_next) {
+                store_a_full(int(cur ^ 1u), kq, q0, q1, e, ra0, ra1);
+                store_b_full_bwd(int(cur ^ 1u), kr0, kr1, cg, rb0, rb1);
+            }
+            barrier();
+            cur ^= 1u;
+        }
+
+        const uint row0 = m0 + lrow * 4u;
+        const uint col0 = n0 + lcol * 4u;
+        const uint o0 = row0 * N + col0;
+        const uint o1 = o0 + N;
+        const uint o2 = o1 + N;
+        const uint o3 = o2 + N;
+        c_out[o0] = acc0.x; c_out[o0 + 1u] = acc0.y; c_out[o0 + 2u] = acc0.z; c_out[o0 + 3u] = acc0.w;
+        c_out[o1] = acc1.x; c_out[o1 + 1u] = acc1.y; c_out[o1 + 2u] = acc1.z; c_out[o1 + 3u] = acc1.w;
+        c_out[o2] = acc2.x; c_out[o2 + 1u] = acc2.y; c_out[o2 + 2u] = acc2.z; c_out[o2 + 3u] = acc2.w;
+        c_out[o3] = acc3.x; c_out[o3 + 1u] = acc3.y; c_out[o3 + 2u] = acc3.z; c_out[o3 + 3u] = acc3.w;
+        return;
+    }
+
+    // ---- edge tiles: the guarded pipeline ----------------------------------
     load_a(lid, m0, 0u, K, ra0, ra1);
     load_b(lid, n0, 0u, K, rb0, rb1);
     store_a(0, lid, ra0, ra1);
     store_b(0, lid, rb0, rb1);
     barrier();
 
-    vec4 acc0 = vec4(0.0);
-    vec4 acc1 = vec4(0.0);
-    vec4 acc2 = vec4(0.0);
-    vec4 acc3 = vec4(0.0);
-    uint cur = 0u;
     for (uint t = 0u; t < ktiles; ++t) {
         const bool has_next = (t + 1u) < ktiles;
         if (has_next) {

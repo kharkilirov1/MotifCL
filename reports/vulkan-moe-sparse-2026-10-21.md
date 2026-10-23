@@ -995,3 +995,90 @@ A kernel with 2 instructions per FMA instead of 5.4 would reach the FP32 kernel'
 42–49% of peak *without* the decode dispatch and *bit-exactly*, which is strictly
 better than the path shipped here. That is the next piece of work, and the
 benchmark in G.1 makes it a minutes-long loop instead of a trainer run.
+
+# Phase H — Full-tile pipeline: 1.5–2.0x on the counter GEMM, bit-exact
+
+Phase G named the two instruction blocks to remove: per-element bounds predication
+(14.3%) and the repeated address arithmetic (22.8%). This phase removes both from
+the tiles that do not need them.
+
+## H.1 Why a full-tile path is possible
+
+The trainer's shapes are batch 2048 (a multiple of the 32-row tile) with in/out
+features 288/192 (multiples of 16), so all but the last column tile are fully
+inside the matrix and no K tile is partial. For those tiles every `gm < batch`,
+`gk < K` and `gc < N` test in the load/store helpers is dead, and every byte
+offset advances by a constant per K tile. The edge tiles (and any shape that is
+not a multiple of the tile, including decode batch 1) keep the guarded pipeline
+unchanged.
+
+## H.2 Implementation
+
+Both pipelines live in one SPIR-V module; the choice is a per-workgroup uniform
+branch, so there is no extra dispatch and the arithmetic order is untouched:
+
+- activation offsets are `row * K/4 + kq` plus `4` per K tile (no multiply per
+  tile); decode byte offsets are `column * groups_per_row * 3` plus `12` (forward)
+  or `16 * groups_per_row * 3` (backward) per K tile;
+- the forward loop loads `scale[column]` once per workgroup instead of once per K
+  tile because it does not depend on K; the backward loop keeps its per-tile
+  scale index, which is the tile's k row;
+- the two directions get separate loops rather than one loop that branches on
+  mode, so the forward loop never carries the backward's scale arithmetic;
+- the epilogue writes the full 4x4 lane tile unguarded with a precomputed row
+  stride.
+
+`MOTIFCL_COUNTER_GEMM_GUARDED=1` sets bit 8 of the mode word and forces the
+guarded pipeline. Both pipelines are in the same binary, so the A/B below is one
+executable with one environment variable rather than two builds.
+
+## H.3 Measured (RX 580, bench_vulkan_counter_gemm, 25 reps, 4 ABBA pairs)
+
+| shape | mode | guarded | full-tile | speedup |
+|---|---|---:|---:|---:|
+| expert_up | forward | 452 us | 294 us | 1.54x |
+| expert_down | forward | 273 us | 185 us | 1.48x |
+| expert_up | backward_input | 291 us | 178 us | 1.63x |
+| expert_down | backward_input | 321 us | 165 us | 1.95x |
+| attn_qkv | forward | 344 us | 221 us | 1.56x |
+| attn_qkv | backward_input | 389 us | 210 us | 1.85x |
+| expert_up | forward (decode, batch 1) | 92 us | 93 us | 1.00x |
+| expert_down | forward (decode, batch 1) | 66 us | 66 us | 1.01x |
+
+The decode rows run the guarded pipeline under both arms, which is the control
+for measurement drift: they agree to 1%. VGPR went 103 -> 104 and the pipeline
+stays at 2 waves/SIMD, so occupancy did not change.
+
+End to end, 25 steps, seed 1337, three ABBA pairs, same executable:
+
+| arm | tok/s | step | GPU fwd+bwd |
+|---|---:|---:|---:|
+| guarded | 10702-10712 | 191.2-191.4 ms | 171.6-172.0 ms |
+| full-tile | 11990-12030 | 170.2-170.8 ms | 151.0-151.4 ms |
+
++12.1% throughput, and the training trajectory is bit-identical: the six-step
+losses and the final validation loss match exactly (10.4277, 10.2058, 8.8452,
+7.2389, 6.7947, 6.5197; FINAL VAL 6.4265 in both arms).
+
+## H.4 What the numbers say
+
+The full-tile path is at parity with or ahead of decode+dense on five of the six
+training shapes (decode+dense from G.4 measured 173-221 us in the same harness)
+without the decode dispatch and the 221 KB dense mirror. The exception is
+expert_up forward (K=288, N=192) at 294 us versus 196 us for decode+dense, and
+the cause is the launch geometry rather than the instruction count: that shape
+issues 64 x 6 = 384 workgroups against a machine that holds 288 waves, so it runs
+as 1.3 waves and cannot fill the CUs; expert_down forward issues 64 x 9 = 576 and
+reaches 1.48x. This is the same small-grid effect Phase F.4 found in the sparse
+kernel. A 32x64 tile or a 2-way k split would fill the machine for that shape,
+and both are compatible with the full-tile pipeline.
+
+## H.5 Files and verification
+
+`kernels/vulkan/counter_gemm_db.comp` (full-tile pipeline and the mode-word bit),
+`src/runtime/vulkan_backend.cpp` (the wrapper's `MOTIFCL_COUNTER_GEMM_GUARDED`
+selection), regenerated `src/runtime/vulkan_spirv_kernels.inc`.
+
+Full CTest at this tree: 37 passed, 30 skipped (OpenCL unavailable), 0 failed of
+67 registered. The trainer A/B above is the end-to-end witness; the guarded
+pipeline remains the reference for the edge tiles.

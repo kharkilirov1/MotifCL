@@ -9680,6 +9680,21 @@ VulkanOpResult run_vulkan_compact_counter_decay_v(VulkanRuntime& runtime,
                                    buffers, &push, sizeof(push), groups, 1, 1);
 }
 
+namespace {
+
+// MOTIFCL_COUNTER_GEMM_GUARDED=1 forces counter_gemm_db's edge-safe pipeline.
+// Both pipelines live in one SPIR-V module (bit 8 of the mode word selects the
+// guarded one), so the full-tile fast path can be A/B measured in one binary.
+bool counter_gemm_guarded_forced() {
+    static const bool forced = [] {
+        const char* env = std::getenv("MOTIFCL_COUNTER_GEMM_GUARDED");
+        return env && *env == '1';
+    }();
+    return forced;
+}
+
+} // namespace
+
 VulkanOpResult run_vulkan_compact_counter_forward_u8(VulkanRuntime& runtime,
                                                       const VulkanBuffer& x,
                                                       const VulkanBuffer& state,
@@ -9735,6 +9750,7 @@ VulkanOpResult run_vulkan_compact_counter_forward_u8(VulkanRuntime& runtime,
     // packed-group alignment are guaranteed; the older kernel stays as the
     // fallback for anything that ever relaxes that contract.
     if (in_features % 4 == 0) {
+        const std::uint32_t db_mode = counter_gemm_guarded_forced() ? 0x100u : 0u;
         const struct {
             std::uint32_t C;
             std::uint32_t in_features;
@@ -9742,7 +9758,7 @@ VulkanOpResult run_vulkan_compact_counter_forward_u8(VulkanRuntime& runtime,
             std::uint32_t batch;
             std::uint32_t mode;
         } db_push{static_cast<std::uint32_t>(C), static_cast<std::uint32_t>(in_features),
-                  static_cast<std::uint32_t>(out_features), static_cast<std::uint32_t>(batch), 0u};
+                  static_cast<std::uint32_t>(out_features), static_cast<std::uint32_t>(batch), db_mode};
         const std::vector<const VulkanBuffer*> db_buffers = {&x, &state, &scale, &out};
         const char* word_mode = std::getenv("MOTIFCL_VK_COUNTER_WORD_LOAD");
         const bool word_load = out_features % 4 == 0 && word_mode && *word_mode == '1';
@@ -9895,6 +9911,7 @@ VulkanOpResult run_vulkan_compact_counter_backward_input_u8(VulkanRuntime& runti
     // is what has to be a multiple of four for the vec4 activation view; odd
     // out_features keeps the older scalar kernel.
     if (out_features % 4 == 0) {
+        const std::uint32_t db_mode = 1u | (counter_gemm_guarded_forced() ? 0x100u : 0u);
         const struct {
             std::uint32_t C;
             std::uint32_t in_features;
@@ -9902,7 +9919,7 @@ VulkanOpResult run_vulkan_compact_counter_backward_input_u8(VulkanRuntime& runti
             std::uint32_t batch;
             std::uint32_t mode;
         } db_push{static_cast<std::uint32_t>(C), static_cast<std::uint32_t>(in_features),
-                  static_cast<std::uint32_t>(out_features), static_cast<std::uint32_t>(batch), 1u};
+                  static_cast<std::uint32_t>(out_features), static_cast<std::uint32_t>(batch), db_mode};
         const std::vector<const VulkanBuffer*> db_buffers = {&grad_out, &state, &scale, &grad_x};
         const char* word_mode = std::getenv("MOTIFCL_VK_COUNTER_WORD_LOAD");
         const bool word_load = word_mode && *word_mode == '1';

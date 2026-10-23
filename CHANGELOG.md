@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Counter GEMM full-tile pipeline: +12.1% trainer throughput (2026-10-24)
+
+- `counter_gemm_db` selects a bounds-free, hoisted-address pipeline for tiles
+  that are completely inside the matrix (all trainer shapes except edge tiles,
+  which keep the guarded pipeline in the same shader). The choice is a
+  per-workgroup uniform branch, so there is no extra dispatch and the arithmetic
+  order is unchanged: 1.48-1.95x on the counter GEMM at the trainer shapes and
+  +12.1% end to end (10707 -> 12007 tok/s, step 191.3 -> 170.5 ms), with
+  bit-identical training losses and final validation loss.
+  `MOTIFCL_COUNTER_GEMM_GUARDED=1` forces the guarded pipeline for A/B in one
+  binary. Evidence: `reports/vulkan-moe-sparse-2026-10-21.md`, Phase H.
+
 ### MoE sparse execution, counter-GEMM measurement, allocation classes (2026-10-21/22)
 
 - Sparse Vulkan MoE7 forward: `moe_route_top1_f32` (router dot product, bias,
