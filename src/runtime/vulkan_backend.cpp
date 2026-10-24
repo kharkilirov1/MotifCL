@@ -5768,6 +5768,7 @@ struct VulkanRuntime::Impl {
             last_submit_us = std::chrono::duration<double, std::micro>(
                 std::chrono::steady_clock::now() - submit_t0).count();
             last_gpu_us = -1.0;
+            result.success = true;
             return result;
         }
         const VkResult wait_rc = wait_for_fences(device, 1, &fast_fence, 1, ~std::uint64_t{0});

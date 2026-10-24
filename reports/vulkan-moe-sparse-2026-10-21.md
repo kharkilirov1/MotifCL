@@ -2017,3 +2017,26 @@ One process note from the same session: the identical binary measured 143.7 ms p
 the morning and 159.2 ms an hour later with the tree unchanged, so the card throttles under
 sustained load. Only same-session A/B pairs are evidence here; absolute tok/s figures are
 per-session.
+
+# Phase AE — The deferred-submit API was broken and is now witnessed
+
+Phase AC added `batch_end_async()` / `batch_wait()` but nothing exercised them, and the new
+`tests/test_vulkan_batch_async.cpp` immediately found that they never worked: the deferred
+branch of `submit_fast_commands()` returned before setting `result.success`, so every
+`batch_end_async()` reported failure with an empty error string. Fixed by setting the flag on
+that path.
+
+The test now covers what a wrong implementation breaks first:
+
+- submission order: two deferred batches where the second consumes the first's output must
+  match the synchronous chain (1e-5);
+- buffer reuse: a same-sized buffer is allocated, downloaded and dropped between the two
+  deferred submissions, so a pool that recycled it while the first batch was still running
+  would corrupt the second result;
+- slot recycling: a plain synchronous batch after deferred ones still produces the right
+  answer (the slots hand their fences, descriptor sets and kept-alive buffers back);
+- the elementwise path through a deferred slot.
+
+With the trainer unchanged (still on the synchronous `batch_end()`), the 6-step run keeps
+producing the same 430 checkpoint files, and CTest is now 41 passed / 30 skipped / 0 failed
+of 71.

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Deferred-submit API fixed and witnessed (2026-10-24)
+
+- The new `tests/test_vulkan_batch_async.cpp` found that `batch_end_async()` could never
+  succeed: the deferred branch of `submit_fast_commands()` returned without setting
+  `result.success`, so every deferred submission reported failure with an empty error
+  string. Fixed.
+- The test covers submission order across two deferred batches (second consumes the first's
+  output, compared with the synchronous chain), buffer reuse while a batch is in flight (a
+  same-sized tensor is allocated, downloaded and dropped between the two submissions), slot
+  recycling after deferred submissions, and the elementwise path through a deferred slot.
+- The trainer stays on the synchronous `batch_end()`; the 6-step run still produces the same
+  430 checkpoint files. CTest: 41 passed / 30 skipped / 0 failed of 71.
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase AE.
+
 ### GEMM inventory per step, and the narrow-GEMM dead end (2026-10-24, no code change)
 
 - Shape log of the double-buffered GEMM path resolves the 333 dispatches of a step: expert
