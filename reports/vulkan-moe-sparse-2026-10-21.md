@@ -1744,3 +1744,48 @@ kernel.
 1059 -> **888.7 us per layer** (-16%), i.e. 6.3 -> 5.4 ms per step; the 10-step kernel
 window 1388 -> 1371.9 ms and the trainer's steady step 141.7-142.0 ->
 **140.9-141.1 ms** (14427-14449 -> 14519-14534 tok/s).
+
+# Phase X — Two shared-memory staging attempts that lost, and a GEMM shape census
+
+Phase V left the stage-1 backward at 1575 us per layer, about twice its traffic bound,
+and the obvious next step was to stage K/V through shared memory the way Phase U did for
+dK/dV. That was built and measured, and it lost.
+
+## X.1 Staging the K/V history in stage 1: rejected
+
+A dedicated hd48 body staged each 64-key K/V tile into 12 KiB of shared memory (the
+existing probability/row caches are 20 KiB, so the workgroup comes to 31 KiB) and had
+every lane reduce its key's dot from the tile, in the same key assignment and the same
+d component order as the inline body. The output stayed bit-identical, but the kernel
+went from **1575 to 2460.7 us per layer**. Two effects: 31 KiB of shared memory admits
+two workgroups per CU instead of three, so there are fewer waves to cover the tile
+barriers, and the causal shape makes the tiles lopsided - a workgroup near the start of
+the sequence stages a tile with only eight active keys, so most of the staging is paid
+for nothing. Reverted; the inline vec4 body is the better trade on this card.
+
+## X.2 Larger staging chunks in the dK/dV kernel: rejected
+
+Phase U's staged dK/dV kernel stages the row history 16 rows at a time, double-buffered
+(3 KiB per buffer at head_dim 48). Doubling to 32 rows (6 KiB per buffer, six loads per
+lane instead of three) halved the barrier count and doubled the loads in flight, but
+measured **441 -> 842 us per layer**: the bigger chunks and the doubled staging buffers
+cost more than the barriers saved. CHUNK 16 stands.
+
+## X.3 GEMM shape census (temporary instrumentation, not committed)
+
+A shape log on the generic nn GEMM path (two steps) shows 84 calls per step over five
+distinct shapes:
+
+| shape (m, k, n) | calls/step | what it is |
+|---|---:|---|
+| 2048, 288, 192 | 48 | expert down projection |
+| 2048, 384, 288 | 48 | expert up projection |
+| 2048, 288, 7 | 42 | router logits |
+| 2048, 288, 288 | 24 | attention projections |
+| 2048, 288, 32000 | 3.5 | LM-head forward |
+
+The router projection is the forward twin of the [288, 7] transposed gradient GEMMs
+noted in Phase R: a 2048-row batch against a seven-column output, which the generic
+kernel runs at a few workgroups of parallelism. Both are candidates for one batched
+narrow-shape kernel rather than four hundred small dispatches per step, but that work
+changes summation order and so is a separate decision.

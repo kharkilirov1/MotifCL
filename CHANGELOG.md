@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Two staging attempts rejected; GEMM shape census (2026-10-24, no code change)
+
+- Staging the stage-1 attention backward K/V history through shared memory (12 KiB of
+  tiles on top of the 20 KiB of caches, 31 KiB per workgroup) is bit-identical but
+  slower: 1575 -> 2460.7 us per layer, because 31 KiB admits two workgroups per CU
+  instead of three and the causal tiles are lopsided (a workgroup near the sequence start
+  stages a tile with eight active keys). Reverted.
+- Doubling the staged dK/dV kernel's chunk from 16 to 32 rows: 441 -> 842 us per layer.
+  Reverted; CHUNK 16 stands.
+- Shape census of the generic nn GEMM path (temporary instrumentation): 84 calls per step
+  over five shapes, including the [2048, 288, 7] router projection (42 calls) - the
+  forward twin of the [288, 7] transposed gradient GEMMs from Phase R. A batched
+  narrow-shape kernel is the only way to help those, and it changes summation order.
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase X.
+
 ### Causal attention forward: K rows read as vec4, -16% on that kernel (2026-10-24)
 
 - `gqa_fwd_causal8_vec_f32` declares the K buffer as vec4 and adds the four components in
