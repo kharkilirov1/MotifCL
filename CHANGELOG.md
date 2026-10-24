@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Cached cross-entropy backward: vec4 form measured, no gain (2026-10-24, no code change)
+
+- A four-columns-per-invocation form of `ce_bwd_cached_f32` (vec4 logits and gradient,
+  per-row statistics and target loaded once per four elements, element-identical
+  arithmetic) measured 4673 us per call against 4562 us scalar, and 4586 us with 256
+  threads per workgroup - the kernel is not instruction-bound, the read/write mix plus
+  the per-row statistics indirection caps it at ~115 GB/s. Reverted.
+- Consequence recorded: the remaining large items (LM head 37 ms, CE pair 7.2 ms) can only
+  improve by removing traffic - fusing the CE backward into the head gradient GEMMs so the
+  262 MB dlogits buffer is never materialised - which is a graph-level change.
+- The Phase X GEMM shape census is corrected: its counts came from runs that also executed
+  the final validation forward, so per-step figures are inflated (the shape set is right).
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase Y.
+
 ### Two staging attempts rejected; GEMM shape census (2026-10-24, no code change)
 
 - Staging the stage-1 attention backward K/V history through shared memory (12 KiB of

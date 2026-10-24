@@ -1789,3 +1789,27 @@ noted in Phase R: a 2048-row batch against a seven-column output, which the gene
 kernel runs at a few workgroups of parallelism. Both are candidates for one batched
 narrow-shape kernel rather than four hundred small dispatches per step, but that work
 changes summation order and so is a separate decision.
+
+*Correction (Phase Y).* Those counts came from runs that also executed the final
+validation forward, so the per-step numbers are inflated - the shape set is right, the
+call counts are not. The per-kernel profile remains the authority for time.
+
+# Phase Y — The cached cross-entropy backward is at its bandwidth ceiling
+
+`ce_bwd_cached_f32` (4.6 ms/step, 3.3%) reads logits and writes grad_logits, one element
+per invocation, at an effective 115 GB/s. It looked like the vectorisation wins of
+Phases V and W: four columns per invocation moves both sides as vec4 and loads the
+per-row statistics and target once per four elements instead of once per element.
+
+It does not help. Measured 4562 us (scalar) vs **4673 us** (vec4, 128 threads per
+workgroup) and **4586 us** (vec4, 256 threads) - all inside the same band. The kernel is
+not instruction-bound: the read/write mix plus the per-row statistics indirection caps it
+at ~115 GB/s and neither wider accesses nor larger workgroups move that. Reverted, like
+the earlier attempt recorded in Phase M.
+
+What this leaves: the LM head's 37 ms (bandwidth-bound at 163 GB/s with wide tiles already
+rejected) and the CE pair (7.2 ms together) can only be improved by *removing* traffic -
+fusing the CE backward into the head gradient GEMMs so the 262 MB dlogits buffer is never
+materialised - not by making the existing kernels faster. That fusion needs the CE
+backward node and the head matmul backward to become one node, so it is a graph-level
+change rather than a kernel one.
