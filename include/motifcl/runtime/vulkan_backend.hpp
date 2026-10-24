@@ -194,6 +194,14 @@ public:
     // primary command buffer; batch_end() submits once and waits on a fence.
     bool batch_begin();
     VulkanOpResult batch_end();
+    // Submit the open batch and return without waiting for the GPU. The runtime keeps
+    // two submission slots: the next batch_begin() records into the other one, and the
+    // slot that is still running is waited for before it is reused (or immediately by
+    // batch_wait()). Descriptor sets and buffers referenced by an in-flight submission
+    // are held until its fence signals, so neither is recycled early.
+    VulkanOpResult batch_end_async();
+    // Wait for every deferred submission and return their sets/buffers to the pools.
+    VulkanOpResult batch_wait();
     bool batch_active() const;
 
     // GPU timing via VK_QUERY_TYPE_TIMESTAMP around the most recent

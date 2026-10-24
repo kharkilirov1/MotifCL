@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Deferred batch submission; the pipeline it enables cannot pay (2026-10-24)
+
+- `VulkanRuntime::batch_end_async()` submits an open batch and returns without waiting,
+  and `batch_wait()` waits for every pending submission. The runtime keeps two submission
+  slots with their own command buffer, fence, descriptor sets and kept-alive buffers: a
+  command buffer the GPU still owns is never reset, and a set or buffer referenced by an
+  in-flight submission is never recycled early. `batch_end()` is unchanged (submit + wait);
+  with the trainer still on it the 6-step run produces the same 430 checkpoint files and
+  CTest stays 40 passed / 30 skipped / 0 failed of 70.
+- The pipeline the API was built for is rejected on measurement: the backward cannot be
+  recorded before the routing readback because the zero-gradient expert skip decides which
+  kernels to record, and that skip is worth 9-10 ms per step (default 143.7 ms against
+  152.8 ms with the skip off, 153.7 ms in one-batch mode, 155.6 ms one-batch without the
+  skip) - twice what the pipeline could hide. Recorded in
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase AC, together with the conclusion that
+  ~141 ms against ~132 ms of GPU work is close to this design's floor.
+
 ### Two kernels confirmed at the memory limit; dispatch inventory (2026-10-24, no code change)
 
 - `add_f32` (3.31 ms/step, 89 calls, MoE expert accumulation) already runs at 190 GB/s; a

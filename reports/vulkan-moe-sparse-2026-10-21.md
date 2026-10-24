@@ -1944,3 +1944,36 @@ one of those launches is latency, not throughput. Packing a block's counter laye
 arena would let each block update and decode with a single dispatch (238 -> ~24), which is
 the concrete next target after the pipeline: worth roughly 1.8 ms of recording and 0.5-1 ms
 of GPU launch overhead.
+
+# Phase AC — Deferred submit built; the pipeline it was for cannot pay
+
+Phase AA proposed a two-batch pipeline to hide the ~7 ms of host recording. The runtime now
+has the machinery: `batch_end_async()` submits a batch and returns without waiting, and
+`batch_wait()` waits for every pending submission. Two submission slots carry their own
+command buffer, fence, descriptor sets and kept-alive buffers, so a command buffer that the
+GPU still owns is never reset or recycled, and a descriptor set or buffer referenced by an
+in-flight submission is never handed out again. The synchronous `batch_end()` is unchanged
+(async + wait), and with the whole trainer still on it the refactor is invisible: the 6-step
+run produces the same 430 checkpoint files, and CTest is 40/30/0.
+
+Then the pipeline was measured out of existence. A step's host work is only ~7 ms of which
+the forward recording is 0.7 ms; the backward recording (4.4 ms) is what is worth hiding -
+and the backward cannot be recorded until the routing counts are read back, because the
+zero-gradient expert skip decides *which* kernels to record. That skip is not optional:
+
+| configuration | steady step |
+|---|---:|
+| default (split, zero-grad skip) | **143.7 ms** |
+| split, skip off | 152.8 ms |
+| one batch | 153.7 ms |
+| one batch, skip off | 155.6 ms |
+
+The skip is worth **9-10 ms per step**, twice what the pipeline could ever hide, so any
+scheme that records the backward before the routing readback is a large regression. The
+one-batch mode is 10 ms worse for the same reason (it records the backward with no routing
+information at all, so nothing is skipped).
+
+Conclusion: the remaining ~7 ms of host work per step is not reachable by pipelining, and a
+step of ~141 ms against ~132 ms of GPU work is close to this design's floor. The remaining
+honest target is the counter subsystem's 238 dispatches (Phase AB) and the ~9.4 ms stage-1
+attention backward.

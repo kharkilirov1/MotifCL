@@ -924,6 +924,7 @@ using PFN_vkCreateFence = VkResult (*)(VkDevice device, const VkFenceCreateInfo*
                                        const void* pAllocator, VkFence* pFence);
 using PFN_vkDestroyFence = void (*)(VkDevice device, VkFence fence, const void* pAllocator);
 using PFN_vkResetFences = VkResult (*)(VkDevice device, std::uint32_t fenceCount, const VkFence* pFences);
+using PFN_vkResetCommandBuffer = VkResult (*)(VkCommandBuffer commandBuffer, std::uint32_t flags);
 using PFN_vkWaitForFences = VkResult (*)(VkDevice device, std::uint32_t fenceCount, const VkFence* pFences,
                                          VkBool32 waitAll, std::uint64_t timeout);
 using PFN_vkResetCommandPool = VkResult (*)(VkDevice device, VkCommandPool commandPool, VkFlags flags);
@@ -4804,6 +4805,7 @@ struct VulkanRuntime::Impl {
     PFN_vkCreateFence create_fence = nullptr;
     PFN_vkDestroyFence destroy_fence = nullptr;
     PFN_vkResetFences reset_fences = nullptr;
+    PFN_vkResetCommandBuffer reset_command_buffer = nullptr;
     PFN_vkWaitForFences wait_for_fences = nullptr;
     PFN_vkResetCommandPool reset_command_pool = nullptr;
     PFN_vkCmdPushConstants cmd_push_constants = nullptr;
@@ -4843,6 +4845,18 @@ struct VulkanRuntime::Impl {
     std::vector<std::pair<std::uint32_t, VkDescriptorSet>> inflight_descriptor_sets;
 
     VkCommandPool fast_command_pool = nullptr;
+    // Two submission slots so a batch can be submitted without blocking the host:
+    // slot N's command buffer and fence stay owned by the GPU until its fence signals,
+    // and while they do the host records the next batch into the other slot. Descriptor
+    // sets and kept-alive buffers travel with the slot (a descriptor set or buffer that
+    // an in-flight submission references must not be recycled or reused).
+    static constexpr int kFastSlots = 2;
+    VkCommandBuffer fast_command_buffers[kFastSlots] = {nullptr, nullptr};
+    VkFence fast_fences[kFastSlots] = {nullptr, nullptr};
+    bool fast_slot_pending[kFastSlots] = {false, false};
+    std::vector<std::pair<std::uint32_t, VkDescriptorSet>> fast_slot_sets[kFastSlots];
+    std::vector<std::shared_ptr<VulkanBuffer::Impl>> fast_slot_keepalive[kFastSlots];
+    int fast_slot = 0;
     VkCommandBuffer fast_command_buffer = nullptr;
     VkFence fast_fence = nullptr;
     VkCommandPool transfer_command_pool = nullptr;
@@ -5209,6 +5223,7 @@ struct VulkanRuntime::Impl {
 
     bool fast_functions_present() const {
         return create_fence && destroy_fence && reset_fences && wait_for_fences && reset_command_pool &&
+               reset_command_buffer &&
                cmd_push_constants && cmd_pipeline_barrier && cmd_copy_buffer && create_command_pool &&
                allocate_command_buffers && begin_command_buffer && end_command_buffer && queue_submit;
     }
@@ -5283,13 +5298,14 @@ struct VulkanRuntime::Impl {
             nullptr,
             fast_command_pool,
             VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            1,
+            static_cast<std::uint32_t>(kFastSlots),
         };
-        if (allocate_command_buffers(device, &fast_alloc, &fast_command_buffer) != VK_SUCCESS ||
-            !fast_command_buffer) {
+        if (allocate_command_buffers(device, &fast_alloc, fast_command_buffers) != VK_SUCCESS ||
+            !fast_command_buffers[0] || !fast_command_buffers[1]) {
             fast_error = "vkAllocateCommandBuffers failed for cached dispatch";
             return false;
         }
+        fast_command_buffer = fast_command_buffers[0];
         const VkCommandBufferAllocateInfo transfer_alloc{
             VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             nullptr,
@@ -5303,10 +5319,14 @@ struct VulkanRuntime::Impl {
             return false;
         }
         const VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0};
-        if (create_fence(device, &fence_info, nullptr, &fast_fence) != VK_SUCCESS || !fast_fence) {
-            fast_error = "vkCreateFence failed for cached dispatch";
-            return false;
+        for (int slot = 0; slot < kFastSlots; ++slot) {
+            if (create_fence(device, &fence_info, nullptr, &fast_fences[slot]) != VK_SUCCESS ||
+                !fast_fences[slot]) {
+                fast_error = "vkCreateFence failed for cached dispatch";
+                return false;
+            }
         }
+        fast_fence = fast_fences[0];
         if (create_fence(device, &fence_info, nullptr, &transfer_fence) != VK_SUCCESS || !transfer_fence) {
             fast_error = "vkCreateFence failed for staging transfers";
             return false;
@@ -5597,9 +5617,58 @@ struct VulkanRuntime::Impl {
         batch_keepalive.clear();
     }
 
+    // Wait for one slot's submission (if any) and hand its sets/buffers back.
+    bool wait_slot(int slot) {
+        if (!fast_slot_pending[slot]) return true;
+        const VkResult wait_rc = wait_for_fences(device, 1, &fast_fences[slot], 1, ~std::uint64_t{0});
+        if (wait_rc != VK_SUCCESS) {
+            fast_error = "vkWaitForFences failed for a deferred submission";
+            return false;
+        }
+        const VkResult reset_rc = reset_fences(device, 1, &fast_fences[slot]);
+        if (reset_rc != VK_SUCCESS) {
+            fast_error = "vkResetFences failed for a deferred submission";
+            return false;
+        }
+        fast_slot_pending[slot] = false;
+        for (auto& entry : fast_slot_sets[slot]) {
+            free_descriptor_sets[entry.first].push_back(entry.second);
+        }
+        fast_slot_sets[slot].clear();
+        fast_slot_keepalive[slot].clear();
+        return true;
+    }
+
+    bool wait_all_slots() {
+        for (int slot = 0; slot < kFastSlots; ++slot) {
+            if (!wait_slot(slot)) return false;
+        }
+        return true;
+    }
+
+    // Park the current batch's sets and kept-alive buffers with the slot that owns the
+    // submission, and take up the next slot's (empty) vectors.
+    void park_current_slot_state(int slot) {
+        std::swap(fast_slot_sets[slot], inflight_descriptor_sets);
+        std::swap(fast_slot_keepalive[slot], batch_keepalive);
+    }
+
     bool begin_fast_commands(bool timed) {
-        if (reset_command_pool(device, fast_command_pool, 0u) != VK_SUCCESS) {
-            fast_error = "vkResetCommandPool failed for cached dispatch";
+        // Pick the slot whose previous submission has completed; if none has, wait the
+        // older one. A command buffer still owned by the GPU is never reset.
+        if (fast_slot_pending[fast_slot]) {
+            const int other = (fast_slot + 1) % kFastSlots;
+            const int victim = fast_slot_pending[other] ? other : fast_slot;
+            if (!wait_slot(victim)) return false;
+        }
+        if (fast_slot_pending[fast_slot]) {
+            fast_error = "no free deferred-submission slot";
+            return false;
+        }
+        fast_command_buffer = fast_command_buffers[fast_slot];
+        fast_fence = fast_fences[fast_slot];
+        if (reset_command_buffer(fast_command_buffer, 0u) != VK_SUCCESS) {
+            fast_error = "vkResetCommandBuffer failed for cached dispatch";
             return false;
         }
         const VkCommandBufferBeginInfo begin_info{
@@ -5638,7 +5707,7 @@ struct VulkanRuntime::Impl {
         return true;
     }
 
-    VulkanOpResult submit_fast_commands() {
+    VulkanOpResult submit_fast_commands(bool wait_for_completion = true) {
         VulkanOpResult result;
         result.device_name = device_name;
         auto fail_submit = [&](const std::string& message) {
@@ -5688,10 +5757,22 @@ struct VulkanRuntime::Impl {
         if (submit_rc != VK_SUCCESS) {
             return fail_submit("vkQueueSubmit failed for cached dispatch (" + std::string(vk_result_str(submit_rc)) + " / " + std::to_string(submit_rc) + ")");
         }
+        ++submit_count;
+        if (!wait_for_completion) {
+            // Deferred: the fence signals later. Park this slot's descriptor sets and
+            // kept-alive buffers with the slot; the host may now record into the other
+            // slot, and this one is waited for before it is reused.
+            park_current_slot_state(fast_slot);
+            fast_slot_pending[fast_slot] = true;
+            fast_slot = (fast_slot + 1) % kFastSlots;
+            last_submit_us = std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - submit_t0).count();
+            last_gpu_us = -1.0;
+            return result;
+        }
         const VkResult wait_rc = wait_for_fences(device, 1, &fast_fence, 1, ~std::uint64_t{0});
         last_submit_us = std::chrono::duration<double, std::micro>(
             std::chrono::steady_clock::now() - submit_t0).count();
-        ++submit_count;
         if (wait_rc != VK_SUCCESS) {
             return fail_submit("vkWaitForFences failed for cached dispatch (" + std::string(vk_result_str(wait_rc)) + " / " + std::to_string(wait_rc) + ")");
         }
@@ -5955,6 +6036,45 @@ struct VulkanRuntime::Impl {
             return result;
         }
         return submit_fast_commands();
+    }
+
+    // Submit the open batch without waiting: the slot's fence is waited for before that
+    // slot is reused or at do_batch_wait(). Lets the host record the next batch while the
+    // GPU still executes this one.
+    VulkanOpResult do_batch_end_async() {
+        VulkanOpResult result;
+        result.device_name = device_name;
+        if (!batch_open) {
+            result.error = "Vulkan batch is not open";
+            return result;
+        }
+        batch_open = false;
+        if (!batch_error.empty()) {
+            reset_command_buffer(fast_command_buffer, 0u);
+            recycle_inflight_sets();
+            result.error = batch_error;
+            batch_error.clear();
+            return result;
+        }
+        if (batch_dispatch_count == 0) {
+            end_command_buffer(fast_command_buffer);
+            reset_command_buffer(fast_command_buffer, 0u);
+            recycle_inflight_sets();
+            result.success = true;
+            return result;
+        }
+        return submit_fast_commands(false);
+    }
+
+    VulkanOpResult do_batch_wait() {
+        VulkanOpResult result;
+        result.device_name = device_name;
+        if (!wait_all_slots()) {
+            result.error = fast_error;
+            return result;
+        }
+        result.success = true;
+        return result;
     }
 
     // ---- staging transfers for device-local buffers -----------------------
@@ -6472,6 +6592,7 @@ struct VulkanRuntime::Impl {
         create_fence = load_device(PFN_vkCreateFence{}, "vkCreateFence");
         destroy_fence = load_device(PFN_vkDestroyFence{}, "vkDestroyFence");
         reset_fences = load_device(PFN_vkResetFences{}, "vkResetFences");
+        reset_command_buffer = load_device(PFN_vkResetCommandBuffer{}, "vkResetCommandBuffer");
         wait_for_fences = load_device(PFN_vkWaitForFences{}, "vkWaitForFences");
         reset_command_pool = load_device(PFN_vkResetCommandPool{}, "vkResetCommandPool");
         cmd_push_constants = load_device(PFN_vkCmdPushConstants{}, "vkCmdPushConstants");
@@ -6959,6 +7080,24 @@ const VulkanDeviceCaps& VulkanRuntime::caps() const {
 
 bool VulkanRuntime::batch_begin() {
     return impl_ && impl_->ready && impl_->do_batch_begin();
+}
+
+VulkanOpResult VulkanRuntime::batch_end_async() {
+    VulkanOpResult result;
+    if (!impl_) {
+        result.error = "Vulkan runtime is not initialized";
+        return result;
+    }
+    return impl_->do_batch_end_async();
+}
+
+VulkanOpResult VulkanRuntime::batch_wait() {
+    VulkanOpResult result;
+    if (!impl_) {
+        result.error = "Vulkan runtime is not initialized";
+        return result;
+    }
+    return impl_->do_batch_wait();
 }
 
 VulkanOpResult VulkanRuntime::batch_end() {
