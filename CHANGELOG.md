@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Step-gap accounting and pipeline design (2026-10-24, no code change)
+
+- With the head fused, a steady step is 140.8-141.4 ms while the GPU runs 127.6-128.1 ms
+  of forward+backward plus 4.02 ms of optimizer: 9.8 ms of the step is not GPU time, and
+  the trainer's phase counters place it in the host recording of the forward+backward
+  graph (7.3 ms, done with the GPU idle because nothing has been submitted yet) plus the
+  submit wait (5.1 ms), with the optimizer's 4 ms of GPU time already overlapping the
+  next recording.
+- Two ways to close it without restructuring measured neutral over 15-step windows:
+  `MOTIFCL_MOE_SPLIT_FWD_BWD=1` (142.8 ms vs 142.7-143.0 ms) and
+  `MOTIFCL_MOE_GPU_BALANCE=1` (143.2 ms), separately and together.
+- Recorded design for the next attempt: a two-batch pipeline that records step N+1's
+  forward+backward while the GPU runs step N's batch and submits it behind step N's
+  optimizer batch. Queue order already carries the parameter dependency, so the work is
+  a second activation generation (now affordable: 250 MB of VRAM headroom after Phase Z)
+  and a buffer pool that keeps an in-flight batch's buffers out of the free list.
+  Acceptance test: the same 430 checkpoint files. Expected up to ~7 ms (~5%).
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase AA.
+
 ### Cross-entropy backward folded into the head GEMMs (2026-10-24)
 
 - New `head_ce_fused(xf, weight, targets)` op (`include/motifcl/ops/loss.hpp`) returns the

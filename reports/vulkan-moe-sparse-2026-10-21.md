@@ -1863,3 +1863,45 @@ against 128.1-128.4 ms, i.e. about 0.4 ms (~0.3%). The real prize is memory: the
 262 MB dlogits buffer is gone, so the trainer runs with 250 MB of headroom where it had
 170 MB. That headroom is what a double-buffered activation set for host/device overlap
 would need, which is the remaining known 2-4%.
+
+# Phase AA — Where the last ~9 ms of every step goes, and why hiding it needs a pipeline
+
+With the head fused (Phase Z) the steady step is 140.8-141.4 ms while the GPU executes
+127.6-128.1 ms of forward+backward and 4.02 ms of optimizer, i.e. 9.8 ms of the step is
+not GPU time. The trainer's own accounting puts it there:
+
+| phase | ms/step |
+|---|---:|
+| upload | 0.004 |
+| forward recording | 0.7 |
+| forward+backward recording | 6.6 |
+| backward recording (split mode only) | 4.4 |
+| submit wait | 5.1 |
+| balance / optimizer | 0.3 |
+| device sync (`loss.item()`) | 0.02 |
+
+The structure of a step explains it: the host records the whole forward+backward graph
+(~7.3 ms) with the GPU idle because nothing has been submitted yet; the batch is
+submitted, the host waits for it, reads the loss and the routing counts back, records
+the optimizer batch, submits it, and only then starts recording the next step. The
+optimizer's 4 ms of GPU time does overlap the start of the next recording, which is why
+the gap is ~9.8 ms rather than ~13 ms.
+
+Two experiments to move that gap without restructuring, both neutral within noise over
+15-step windows: `MOTIFCL_MOE_SPLIT_FWD_BWD=1` (142.8 ms against 142.7-143.0 ms - it
+trades the forward+backward recording for a forward-length stall, and the zero-gradient
+expert skip pays for it) and `MOTIFCL_MOE_GPU_BALANCE=1` (143.2 ms), alone and together.
+
+The only way to hide the recording is a two-batch pipeline: submit step N's
+forward+backward, and while the GPU runs it, record step N+1's forward+backward into a
+second in-flight batch, then submit it behind step N's optimizer batch. Queue order
+already enforces the data dependency (step N+1's forward reads the parameters the
+optimizer writes), so the pipeline needs no extra synchronisation - but it does need two
+activation generations alive at once, which before Phase Z did not fit in VRAM and now
+does (250 MB of headroom). It also needs the buffer pool to keep a submitted-but-running
+batch's buffers out of the free list, which is the part to build and verify first; the
+acceptance test is the same as every other change here - the 6-step run must keep
+producing the same 430 checkpoint files, since a pipeline changes no arithmetic.
+
+Expected payoff if it works: up to 7 ms of the 9.8 ms (~5%), taking the step from ~141 ms
+to ~134 ms.
