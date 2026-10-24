@@ -2076,3 +2076,37 @@ change only traded an `ivec` read for a float-to-int conversion per staged eleme
 weight gradient gained nothing measurable: its row index is shared by sixteen lanes per
 k tile, so the second (target) load was already a broadcast that costs nothing. Net
 +0.2-0.4 ms, so the packed table was reverted and Phase AF's form stands.
+
+# Phase AH — The counter update path is 19% of the step, and the profiler hides it
+
+Every earlier budget in this report came from the kernel profiler, which attributes
+2.5 ms/step to `counter_update_apply_f32` and ~1.5 ms to `counter_decode_weight_f32`. A
+direct experiment disagrees: with the update path short-circuited (a temporary env knob
+that returns from `apply_update_backward` before it dispatches anything, so training is
+wrong but the rest of the step is untouched), the step drops **142.4 -> 115.6 ms**, and the
+decode knob changes nothing.
+
+    142.4 ms   baseline
+    115.6 ms   update path skipped
+    145.5 ms   decode skipped (noise: stale weights reroute the experts)
+    114.2 ms   both skipped
+
+So the counter update path costs **26.8 ms per step - 19% of the step**, twenty times what
+the profiler reports. It dispatches, per counter layer, one transposed-A GEMM
+(`m=384, k=2048, n=288` for the expert projections) plus one update kernel, and there are
+96 counter layers per step, so the shaped work is 96 x 226 GMAC. At 64x64 tiles each of
+those GEMMs moves ~30 MB (the weight-gradient operand is re-read once per n tile, the
+activation once per m tile), i.e. 2.9 GB per step, which is ~15 ms at the card's 190 GB/s -
+most of the 26.8 ms, with the rest being dispatch and barrier overhead across 192 tiny
+launches that each only fill part of the card (30 workgroups at the 64 tile, 108 at the 32
+tile).
+
+Two things follow. First, the counter subsystem is by far the largest remaining target,
+not the 4 ms the profile suggested. Second, its cost is traffic, not tiles: the 64x64 tile
+already moves the least data, which is why forcing the 64x64 tile on these small
+traffic-heavy shapes measured **worse** (146.4 against 143.5 ms) - fewer workgroups means
+the memory system is fed less well. Cutting the traffic needs bigger output tiles, and a
+bigger tile only pays if there are enough workgroups to keep the card busy, which for these
+shapes means batching the seven identical expert-up weight gradients of a block into one
+dispatch (grid.z = layer) - a change that needs the per-layer operands reachable from one
+descriptor set, i.e. the arena the counter subsystem has so far avoided.

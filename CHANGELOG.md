@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### The counter update path is 19% of the step, not 4% (2026-10-24, no code change)
+
+- A direct experiment (temporary knobs that short-circuit the counter update path) measures
+  what no profile here had shown: skipping it takes the step from 142.4 to 115.6 ms, so the
+  counter update path costs **26.8 ms per step (19%)**, against the 2.5 + 1.5 ms the kernel
+  profiler attributes to `counter_update_apply_f32` and `counter_decode_weight_f32`. It is
+  96 transposed-A weight-gradient GEMMs (`m=384, k=2048, n=288` for the expert layers) plus
+  96 update kernels per step; the GEMMs alone move ~2.9 GB of operands, ~15 ms at this
+  card's 190 GB/s.
+- The cost is traffic, not tile choice: forcing the 64x64 tile on these small traffic-heavy
+  shapes measured worse (146.4 against 143.5 ms) because fewer workgroups feed the memory
+  system less well. Cutting the traffic needs bigger output tiles, which only pay when
+  enough workgroups exist - for these shapes that means batching a block's seven identical
+  expert-up weight gradients into one dispatch behind a per-layer operand arena.
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase AH.
+
 ### Packed CE statistics: measured, rejected (2026-10-24, no code change)
 
 - Packing `(max, inv_sum, target, 0)` into one vec4 table per row (one 2048-row dispatch per
