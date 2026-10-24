@@ -2059,3 +2059,20 @@ arithmetic untouched, so the results stay bit-identical: the 6-step run reproduc
 the unfused path. Same-session A/B (15 steps each, two pairs): fused head **141.6 / 142.1 ms**
 against unfused **142.8 / 142.8 ms**, i.e. folding the CE backward now wins by ~1 ms per step
 where Phase Z measured it neutral - the cache is what makes the fusion pay.
+
+## AF.1 Packing the statistics into one vec4 per row: measured, rejected
+
+The obvious follow-up was to pack `(max, inv_sum, target, 0)` into a single vec4 table (a
+one-dispatch 2048-row kernel per step) so both transform sides load one value instead of a
+statistics pair plus a target. Implemented and measured over two profile runs per side:
+
+| kernel | Phase AF | packed table |
+|---|---:|---:|
+| input gradient (`ce_a`) | 15.99 ms | 16.27 / 16.62 ms |
+| weight gradient (`ce_b`) | 13.34 ms | 13.06 / 13.42 ms |
+
+The input gradient got slower: its rows already come from the shared-memory cache, so the
+change only traded an `ivec` read for a float-to-int conversion per staged element. The
+weight gradient gained nothing measurable: its row index is shared by sixteen lanes per
+k tile, so the second (target) load was already a broadcast that costs nothing. Net
++0.2-0.4 ms, so the packed table was reverted and Phase AF's form stands.

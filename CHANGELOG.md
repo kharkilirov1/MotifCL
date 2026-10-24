@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Packed CE statistics: measured, rejected (2026-10-24, no code change)
+
+- Packing `(max, inv_sum, target, 0)` into one vec4 table per row (one 2048-row dispatch per
+  step) was implemented and measured over repeated profile runs: the input-gradient GEMM went
+  15.99 -> 16.27-16.62 ms because its rows already come from the shared-memory cache (the
+  change only added a float-to-int conversion per staged element), and the weight gradient
+  moved 13.34 -> 13.06-13.42 ms because its row index is shared by sixteen lanes per k tile,
+  so the second load was already a free broadcast. Net +0.2-0.4 ms; reverted, Phase AF's
+  form stands. `reports/vulkan-moe-sparse-2026-10-21.md`, AF.1.
+
 ### Fused head CE: row statistics cached in shared memory, -6.4% on the input gradient (2026-10-24)
 
 - The folded CE transform loaded `(max, inv_sum)` and the target from global memory for
