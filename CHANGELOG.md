@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Two kernels confirmed at the memory limit; dispatch inventory (2026-10-24, no code change)
+
+- `add_f32` (3.31 ms/step, 89 calls, MoE expert accumulation) already runs at 190 GB/s; a
+  four-elements-per-invocation form measured 37.24 us against 37.2 us. Not merged.
+- `ce_fwd_stats_f32` (2.54 ms/step) reads the 262 MB logits twice - the row max and the
+  exp sum need separate passes for a bit-exact result - at 206 GB/s. Closed.
+- Dispatch inventory: ~990 dispatches per step, 7.3 ms of host recording. The counter
+  subsystem is 238 of them (24%) for 4.0 ms of GPU although each updates a 216-byte row
+  and a 1.2 KiB slice, i.e. pure launch latency; packing a block's counter layers into one
+  arena would collapse it to ~24 dispatches (worth ~1.8 ms of recording and 0.5-1 ms of
+  GPU), the next target after the pipeline.
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase AB.
+
 ### Step-gap accounting and pipeline design (2026-10-24, no code change)
 
 - With the head fused, a steady step is 140.8-141.4 ms while the GPU runs 127.6-128.1 ms

@@ -1905,3 +1905,42 @@ producing the same 430 checkpoint files, since a pipeline changes no arithmetic.
 
 Expected payoff if it works: up to 7 ms of the 9.8 ms (~5%), taking the step from ~141 ms
 to ~134 ms.
+
+# Phase AB — Two more kernels that are already at the memory system's limit
+
+Two costs looked like the vec4 wins of Phases V/W and are not:
+
+- `add_f32` (3.31 ms/step over 89 calls, the MoE expert accumulation) moves two operands
+  and one result of 2.36 MB each in 37.24 us, i.e. **190 GB/s** - the same rate the
+  best-behaved elementwise kernels reach on this card. A four-elements-per-invocation
+  form measured 37.24 us against 37.2 us, unchanged: the kernel is at the memory system's
+  limit, not instruction-bound. Not merged.
+- `ce_fwd_stats_f32` (2.54 ms/step) reads the 262 MB logits twice (one pass for the row
+  max, one for the exp sum, both required for a bit-exact result) in 2.54 ms, i.e.
+  **206 GB/s**. Also closed.
+
+# Dispatch inventory of one training step (~990 dispatches)
+
+Recording 990 dispatches costs 7.3 ms of host time (~7.4 us each), so the count matters
+as much as the GPU time. Per step:
+
+| kernel | calls/step | GPU ms/step |
+|---|---:|---:|
+| `mm_f32_db32` | 284 | 46.0 |
+| `counter_decode_weight_f32` | 132 | 1.5 |
+| `counter_update_apply_f32` | 106 | 2.5 |
+| `add_f32` | 89 | 3.3 |
+| `mm_f32_db64` | 49 | 17.4 |
+| `swiglu_f32` | 48 | 1.4 |
+| `swiglu_bwd_f32` | 41 | 1.9 |
+| `fog_hard_route7_candidate_bwd_f32` | 35 | 0.8 |
+| `rope_pair_f32` | 24 | 0.7 |
+| `adam_update_fast_f32` | 21 | 2.8 |
+| rest (rmsnorm, counter decay, zero, ce, gqa, ...) | ~160 | ~13 |
+
+The counter subsystem alone is **238 dispatches (24% of the step's dispatches) for 4.0 ms
+of GPU**; its state is one 216-byte row plus a 1.2 KiB weight slice per layer, so every
+one of those launches is latency, not throughput. Packing a block's counter layers into one
+arena would let each block update and decode with a single dispatch (238 -> ~24), which is
+the concrete next target after the pipeline: worth roughly 1.8 ms of recording and 0.5-1 ms
+of GPU launch overhead.
