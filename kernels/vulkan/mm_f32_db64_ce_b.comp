@@ -1,0 +1,16 @@
+// Double-buffered 64x64 FP32 GEMM with the softmax-cross-entropy backward folded into
+// the B staging read (see mm_f32_db_body.glsl). Used by the fused head loss so that
+// dlogits is never materialised.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#define TILE_M 64
+#define TILE_N 64
+#define LANES 256
+#define LX 16
+#define LY 16
+#define FUSE_CE_B
+
+layout(local_size_x = LX, local_size_y = LY) in;
+
+#include "mm_f32_db_body.glsl"

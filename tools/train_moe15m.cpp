@@ -324,7 +324,7 @@ int main() {
         };
         if (start_step > 0) load_ckpt();
 
-        auto forward_logits = [&](const Tensor& ids, std::int64_t bs) {
+        auto forward_hidden = [&](const Tensor& ids, std::int64_t bs) {
             auto x = nn::token_position_embedding(ids, emb, pos_w);
             Tensor cur = x;
             for (auto& blk : blocks) {
@@ -340,11 +340,27 @@ int main() {
                 auto m = blk.moe->forward(b2);
                 cur = add(h, m);
             }
-            auto xf = rmsnorm(cur, norm_f, eps);
+            return rmsnorm(cur, norm_f, eps);
+        };
+
+        auto forward_logits = [&](const Tensor& ids, std::int64_t bs) {
+            auto xf = forward_hidden(ids, bs);
             return tie_head ? matmul_transpose_b(xf, emb) : matmul(xf, head);
         };
 
+        // Fused head loss: the cross-entropy gradient is folded into the head's two
+        // gradient GEMMs, so the [rows, classes] dlogits buffer is never materialised.
+        // The folded kernels reproduce the standalone cached CE backward element for
+        // element, so training stays bit-identical; MOTIFCL_HEAD_CE_FUSED=0 keeps the
+        // separate CE node for A/B.
+        const char* fused_env = std::getenv("MOTIFCL_HEAD_CE_FUSED");
+        const bool fused_head_loss = !(fused_env && *fused_env == '0') && !tie_head &&
+                                     head.requires_grad() && backend.is_vulkan();
         auto forward_loss = [&](const Tensor& ids, const Tensor& targets, std::int64_t bs) {
+            if (fused_head_loss) {
+                auto xf = forward_hidden(ids, bs);
+                return head_ce_fused(xf, head, targets);
+            }
             return softmax_cross_entropy(forward_logits(ids, bs), targets);
         };
 

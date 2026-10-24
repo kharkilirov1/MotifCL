@@ -981,6 +981,34 @@ VulkanOpResult run_vulkan_position_embedding_backward(VulkanRuntime& runtime,
 // === RoPE (Slice E2) — interleaved and split-half layouts ===
 // rope_f32 is reused for backward via the inverse flag (negate angle), exactly
 // as the OpenCL rope_impl helper does.
+// Fused softmax-cross-entropy + linear-head gradients. dlogits is never materialised:
+// both GEMMs recompute it from the logits operand, the per-row (max, inv_sum)
+// statistics and the row target while staging their operand. Every value and operation
+// matches the standalone cached CE-backward kernel, so the results are bit-identical to
+// multiplying a materialised dlogits. Constants and layouts are those of the
+// double-buffered 64x64 kernel the head already used.
+//   grad_input  [rows, in]      = dlogits[rows, classes] * weight[out, classes]^T
+VulkanOpResult run_vulkan_matmul_ce_nt(VulkanRuntime& runtime,
+                                       const VulkanBuffer& logits,
+                                       const VulkanBuffer& weight,
+                                       const VulkanBuffer& row_stats,
+                                       const VulkanBuffer& targets,
+                                       const VulkanBuffer& grad_out,
+                                       VulkanBuffer& out,
+                                       std::size_t rows,
+                                       std::size_t classes,
+                                       std::size_t in_features);
+//   grad_weight [out, classes]  = x[rows, in]^T * dlogits[rows, classes]
+VulkanOpResult run_vulkan_matmul_ce_tn(VulkanRuntime& runtime,
+                                       const VulkanBuffer& x,
+                                       const VulkanBuffer& logits,
+                                       const VulkanBuffer& row_stats,
+                                       const VulkanBuffer& targets,
+                                       const VulkanBuffer& grad_out,
+                                       VulkanBuffer& out,
+                                       std::size_t in_features,
+                                       std::size_t rows,
+                                       std::size_t classes);
 VulkanOpResult run_vulkan_rope(VulkanRuntime& runtime,
                                const VulkanBuffer& x,
                                VulkanBuffer& out,

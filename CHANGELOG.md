@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Cross-entropy backward folded into the head GEMMs (2026-10-24)
+
+- New `head_ce_fused(xf, weight, targets)` op (`include/motifcl/ops/loss.hpp`) returns the
+  same loss as `softmax_cross_entropy(matmul(xf, weight), targets)` but its single
+  autograd node computes both head gradients with `mm_f32_db64_ce_a` /
+  `mm_f32_db64_ce_b`, which recover `dlogits = grad_scale * (softmax(logits) - onehot)`
+  from the stats already produced by `ce_fwd_stats` while staging their operand. The
+  `[rows, classes]` dlogits buffer is never materialised. The trainer uses it by default
+  for the untied head; `MOTIFCL_HEAD_CE_FUSED=0` restores the separate CE node.
+- Exact, not approximate: `tests/test_head_ce_fused.cpp` proves the loss and both
+  gradients are bit-identical to the unfused path and match a double-precision CPU
+  reference (2e-5), and a 6-step training run produces the same 430 checkpoint files.
+- Cost: the fused input-gradient GEMM pays the exp recomputation once per n tile
+  (17.09 ms against 15.3 + a share of the 4.56 ms CE kernel) and the weight-gradient one
+  likewise (13.56 against 11.4), so the GPU saving is ~0.4 ms/step (127.6-128.1 against
+  128.1-128.4 ms of GPU). The real gain is memory: VRAM peak 2400 -> 2144 MB and used
+  2233 -> 1983 MB, headroom a double-buffered activation set would need.
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase Z.
+
 ### Cached cross-entropy backward: vec4 form measured, no gain (2026-10-24, no code change)
 
 - A four-columns-per-invocation form of `ce_bwd_cached_f32` (vec4 logits and gradient,

@@ -35,6 +35,7 @@ set(MOTIFCL_TESTS
     test_vulkan_counter_fused
     test_vulkan_gqa_p0
     test_vulkan_gqa_training
+    test_head_ce_fused
     test_vulkan_kv_decode_p0
     test_vulkan_q4_fused_p0
     test_vulkan_row_bias_p0

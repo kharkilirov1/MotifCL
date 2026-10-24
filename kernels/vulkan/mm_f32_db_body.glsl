@@ -24,6 +24,17 @@
 layout(std430, set = 0, binding = 0) readonly buffer ABuf { vec4 A4[]; };
 layout(std430, set = 0, binding = 1) readonly buffer BBuf { vec4 B4[]; };
 layout(std430, set = 0, binding = 2) writeonly buffer CBuf { vec4 C4[]; };
+#if defined(FUSE_CE_A) || defined(FUSE_CE_B)
+// Softmax-cross-entropy backward folded into the staging read: the logical operand is
+// dlogits = scale * (softmax(logits) - onehot), computed from the logits operand, the
+// per-row (max, inv_sum) statistics and the per-row target instead of being read from a
+// materialised 262 MB buffer. Every value and operation matches the standalone cached
+// CE-backward kernel element for element, so the products - and therefore the GEMM
+// results - are bit-identical to multiplying the materialised dlogits.
+layout(std430, set = 0, binding = 3) readonly buffer CeStatsBuf { vec2 ce_stats[]; };
+layout(std430, set = 0, binding = 4) readonly buffer CeTargetsBuf { int ce_targets[]; };
+layout(std430, set = 0, binding = 5) readonly buffer CeGradOutBuf { float ce_grad_out[]; };
+#endif
 
 layout(push_constant) uniform Push {
     uint M;
@@ -31,7 +42,26 @@ layout(push_constant) uniform Push {
     uint N;
     uint a_layout;
     uint b_layout;
+#if defined(FUSE_CE_A) || defined(FUSE_CE_B)
+    float ce_rows;
+#endif
 } p;
+
+#if defined(FUSE_CE_A) || defined(FUSE_CE_B)
+// dlogits element for (row, col0..col0+3), identical to
+//   scale * (exp(logits - max[row]) * inv_sum[row] - (col == target[row]))
+vec4 ce_dlogits(vec4 logits, uint row, uint col0) {
+    const vec2 stats = ce_stats[row];
+    const int target = ce_targets[row];
+    const float scale = ce_grad_out[0] / p.ce_rows;
+    const vec4 prob = exp(logits - vec4(stats.x)) * stats.y;
+    const vec4 onehot = vec4(int(col0 + 0u) == target ? 1.0 : 0.0,
+                             int(col0 + 1u) == target ? 1.0 : 0.0,
+                             int(col0 + 2u) == target ? 1.0 : 0.0,
+                             int(col0 + 3u) == target ? 1.0 : 0.0);
+    return scale * (prob - onehot);
+}
+#endif
 
 #define KT 16
 #define MQ (TILE_M / 4)
@@ -54,7 +84,12 @@ void load_a(uint lid, uint m0, uint kt, out vec4 r0, out vec4 r1) {
             const uint gm = m0 + r;
             const uint gk = kt + kq * 4u;
             vec4 v = vec4(0.0);
-            if (gm < p.M && gk < p.K) v = A4[(gm * p.K + gk) >> 2];
+            if (gm < p.M && gk < p.K) {
+                v = A4[(gm * p.K + gk) >> 2];
+#ifdef FUSE_CE_A
+                v = ce_dlogits(v, gm, gk);
+#endif
+            }
             if (i == 0) r0 = v; else r1 = v;
         }
     } else {
@@ -82,7 +117,12 @@ void load_b(uint lid, uint n0, uint kt, out vec4 r0, out vec4 r1) {
             const uint gn = n0 + nq * 4u;
             const uint gk = kt + kk;
             vec4 v = vec4(0.0);
-            if (gk < p.K && gn < p.N) v = B4[(gk * p.N + gn) >> 2];
+            if (gk < p.K && gn < p.N) {
+                v = B4[(gk * p.N + gn) >> 2];
+#ifdef FUSE_CE_B
+                v = ce_dlogits(v, gk, gn);
+#endif
+            }
             if (i == 0) r0 = v; else r1 = v;
         }
     } else {

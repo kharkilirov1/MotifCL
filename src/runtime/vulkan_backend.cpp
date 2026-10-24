@@ -11409,3 +11409,77 @@ VulkanOpResult run_vulkan_moe7_sparse_forward(VulkanRuntime& runtime,
 }
 
 } // namespace motifcl
+
+namespace motifcl {
+
+VulkanOpResult run_vulkan_matmul_ce_nt(VulkanRuntime& runtime,
+                                       const VulkanBuffer& logits,
+                                       const VulkanBuffer& weight,
+                                       const VulkanBuffer& row_stats,
+                                       const VulkanBuffer& targets,
+                                       const VulkanBuffer& grad_out,
+                                       VulkanBuffer& out,
+                                       std::size_t rows,
+                                       std::size_t classes,
+                                       std::size_t in_features) {
+    VulkanOpResult result;
+    if (rows == 0 || classes == 0 || in_features == 0) {
+        result.error = "Vulkan CE-fused gradient requires non-zero shapes";
+        return result;
+    }
+    if (rows % 64 != 0 || classes % 4 != 0 || in_features % 4 != 0) {
+        result.error = "Vulkan CE-fused gradient needs rows/64 and classes/in multiples of four";
+        return result;
+    }
+    struct Push {
+        std::uint32_t M;
+        std::uint32_t K;
+        std::uint32_t N;
+        std::uint32_t a_layout;
+        std::uint32_t b_layout;
+        float ce_rows;
+    } push{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(classes),
+           static_cast<std::uint32_t>(in_features), 0u, 1u, static_cast<float>(rows)};
+    const std::vector<const VulkanBuffer*> buffers = {&logits, &weight, &out, &row_stats, &targets, &grad_out};
+    const std::uint32_t gx = static_cast<std::uint32_t>((in_features + 63) / 64);
+    const std::uint32_t gy = static_cast<std::uint32_t>((rows + 63) / 64);
+    return runtime.dispatch_cached(vkspirv::k_mm_f32_db64_ce_a, vkspirv::k_mm_f32_db64_ce_a_words, buffers,
+                                   &push, sizeof(push), gx, gy, 1);
+}
+
+VulkanOpResult run_vulkan_matmul_ce_tn(VulkanRuntime& runtime,
+                                       const VulkanBuffer& x,
+                                       const VulkanBuffer& logits,
+                                       const VulkanBuffer& row_stats,
+                                       const VulkanBuffer& targets,
+                                       const VulkanBuffer& grad_out,
+                                       VulkanBuffer& out,
+                                       std::size_t in_features,
+                                       std::size_t rows,
+                                       std::size_t classes) {
+    VulkanOpResult result;
+    if (rows == 0 || classes == 0 || in_features == 0) {
+        result.error = "Vulkan CE-fused weight gradient requires non-zero shapes";
+        return result;
+    }
+    if (rows % 4 != 0 || classes % 64 != 0 || in_features % 4 != 0) {
+        result.error = "Vulkan CE-fused weight gradient needs classes/64 and rows/in multiples of four";
+        return result;
+    }
+    struct Push {
+        std::uint32_t M;
+        std::uint32_t K;
+        std::uint32_t N;
+        std::uint32_t a_layout;
+        std::uint32_t b_layout;
+        float ce_rows;
+    } push{static_cast<std::uint32_t>(in_features), static_cast<std::uint32_t>(rows),
+           static_cast<std::uint32_t>(classes), 1u, 0u, static_cast<float>(rows)};
+    const std::vector<const VulkanBuffer*> buffers = {&x, &logits, &out, &row_stats, &targets, &grad_out};
+    const std::uint32_t gx = static_cast<std::uint32_t>((classes + 63) / 64);
+    const std::uint32_t gy = static_cast<std::uint32_t>((in_features + 63) / 64);
+    return runtime.dispatch_cached(vkspirv::k_mm_f32_db64_ce_b, vkspirv::k_mm_f32_db64_ce_b_words, buffers,
+                                   &push, sizeof(push), gx, gy, 1);
+}
+
+}  // namespace motifcl

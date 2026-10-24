@@ -68,6 +68,8 @@
     { vkspirv::k_mean_reduce_f32_subgroup, "mean_reduce_f32_subgroup" },
     { vkspirv::k_mm_f32_db32, "mm_f32_db32" },
     { vkspirv::k_mm_f32_db64, "mm_f32_db64" },
+    { vkspirv::k_mm_f32_db64_ce_a, "mm_f32_db64_ce_a" },
+    { vkspirv::k_mm_f32_db64_ce_b, "mm_f32_db64_ce_b" },
     { vkspirv::k_mm_f32_m1n, "mm_f32_m1n" },
     { vkspirv::k_mm_f32_m1nt, "mm_f32_m1nt" },
     { vkspirv::k_mm_f32_nn, "mm_f32_nn" },

@@ -5,6 +5,7 @@
 #include <motifcl/core/error.hpp>
 #include <motifcl/ops/basic_ops.hpp>
 #include <motifcl/ops/indexing.hpp>
+#include <motifcl/ops/matmul.hpp>
 #include <motifcl/runtime/backend.hpp>
 #include <motifcl/runtime/vulkan_backend.hpp>
 
@@ -74,6 +75,54 @@ struct SoftmaxCrossEntropyBackwardNode : autograd::Node {
 };
 
 } // namespace
+
+// Fused head+CE node: the logits tensor is produced outside the graph (the node owns
+// both head gradients), and the backward pass recomputes dlogits inside the two head
+// GEMMs from logits + row stats + targets, so the [rows, classes] buffer is never built.
+struct HeadCEFusedNode : autograd::Node {
+    Tensor xf, weight, logits, targets, row_stats;
+    HeadCEFusedNode(Tensor xf, Tensor weight, Tensor logits, Tensor targets, Tensor row_stats)
+        : xf(std::move(xf)), weight(std::move(weight)), logits(std::move(logits)),
+          targets(std::move(targets)), row_stats(std::move(row_stats)) {}
+    std::vector<Tensor> inputs() const override { return {xf, weight}; }
+    void backward(const Tensor& grad_output) override {
+        MCL_CHECK(grad_output.dtype() == DType::F32 && grad_output.numel() == 1,
+                  "head_ce_fused grad_out must be an f32 scalar");
+        MCL_CHECK(logits.ndim() == 2 && xf.ndim() == 2 && weight.ndim() == 2,
+                  "head_ce_fused backward expects rank-2 tensors");
+        auto& backend = xf.backend();
+        auto& runtime = backend.vulkan_runtime();
+        const auto rows = static_cast<std::size_t>(logits.shape()[0]);
+        const auto classes = static_cast<std::size_t>(logits.shape()[1]);
+        const auto in_features = static_cast<std::size_t>(xf.shape()[1]);
+        if (xf.requires_grad()) {
+            auto grad_xf = Tensor::empty(backend, xf.shape(), DType::F32);
+            const auto run = run_vulkan_matmul_ce_nt(
+                runtime, logits.storage().vulkan_buffer, weight.storage().vulkan_buffer,
+                row_stats.storage().vulkan_buffer, targets.storage().vulkan_buffer,
+                grad_output.storage().vulkan_buffer, grad_xf.storage().vulkan_buffer, rows, classes,
+                in_features);
+            MCL_CHECK(run.success, std::string("vulkan fused head grad_input failed: ") + run.error);
+            autograd::record_op("head_ce_fused_grad_input_vulkan_f32",
+                                {logits.id(), weight.id(), targets.id(), grad_output.id(), row_stats.id()},
+                                {grad_xf.id()});
+            xf.backward(grad_xf);
+        }
+        if (weight.requires_grad()) {
+            auto grad_w = Tensor::empty(backend, weight.shape(), DType::F32);
+            const auto run = run_vulkan_matmul_ce_tn(
+                runtime, xf.storage().vulkan_buffer, logits.storage().vulkan_buffer,
+                row_stats.storage().vulkan_buffer, targets.storage().vulkan_buffer,
+                grad_output.storage().vulkan_buffer, grad_w.storage().vulkan_buffer, in_features, rows,
+                classes);
+            MCL_CHECK(run.success, std::string("vulkan fused head grad_weight failed: ") + run.error);
+            autograd::record_op("head_ce_fused_grad_weight_vulkan_f32",
+                                {xf.id(), logits.id(), targets.id(), grad_output.id(), row_stats.id()},
+                                {grad_w.id()});
+            weight.backward(grad_w);
+        }
+    }
+};
 
 Tensor mse_loss(const Tensor& pred, const Tensor& target) {
     MCL_CHECK(pred.dtype() == DType::F32 && target.dtype() == DType::F32, "mse_loss supports f32 only");
@@ -211,6 +260,48 @@ Tensor softmax_cross_entropy_backward_op(const Tensor& logits, const Tensor& tar
     k.set_arg(5, cols);
     k.launch1d(round_up(static_cast<std::size_t>(rows), 256), 256);
     autograd::record_op("softmax_cross_entropy_backward_f32_i32", {logits.id(), targets.id(), grad_out.id()}, {out.id()});
+    return out;
+}
+
+Tensor head_ce_fused(const Tensor& xf, const Tensor& weight, const Tensor& targets) {
+    MCL_CHECK(xf.dtype() == DType::F32 && weight.dtype() == DType::F32 && targets.dtype() == DType::I32,
+              "head_ce_fused expects f32 activations/weights and i32 targets");
+    MCL_CHECK(xf.ndim() == 2 && weight.ndim() == 2, "head_ce_fused expects rank-2 tensors");
+    MCL_CHECK(targets.numel() == xf.shape()[0], "head_ce_fused needs one target per row");
+    MCL_CHECK(xf.backend_ptr() == weight.backend_ptr() && xf.backend_ptr() == targets.backend_ptr(),
+              "head_ce_fused requires one backend");
+    auto& backend = xf.backend();
+    MCL_CHECK(backend.is_vulkan(), "head_ce_fused requires the Vulkan backend");
+    const int rows = static_cast<int>(xf.shape()[0]);
+    const int in_features = static_cast<int>(xf.shape()[1]);
+    // The head weight is stored [in, classes] (it feeds matmul(xf, weight), the nn layout).
+    MCL_CHECK(weight.shape()[0] == in_features, "head_ce_fused weight width mismatch");
+    const int classes = static_cast<int>(weight.shape()[1]);
+    MCL_CHECK(rows % 64 == 0 && classes % 64 == 0 && in_features % 4 == 0,
+              "head_ce_fused needs rows/classes multiples of 64 and in_features a multiple of four");
+
+    Tensor logits, row_stats, partial, out;
+    {
+        // The logits are inputs to the fused node, not a graph node: the node owns both
+        // head gradients, so the matmul must not also record a backward.
+        autograd::NoGradGuard guard;
+        logits = matmul(xf, weight);
+        row_stats = Tensor::empty(backend, {rows, 2}, DType::F32);
+        partial = Tensor::empty(backend, {rows}, DType::F32);
+        out = Tensor::empty(backend, {}, DType::F32);
+        const auto run = run_vulkan_softmax_cross_entropy_cached(
+            backend.vulkan_runtime(), logits.storage().vulkan_buffer, targets.storage().vulkan_buffer,
+            partial.storage().vulkan_buffer, row_stats.storage().vulkan_buffer, out.storage().vulkan_buffer,
+            static_cast<std::size_t>(rows), static_cast<std::size_t>(classes));
+        MCL_CHECK(run.success, std::string("vulkan fused head cross-entropy failed: ") + run.error);
+    }
+    autograd::record_op("head_ce_fused_vulkan_f32", {xf.id(), weight.id(), targets.id()},
+                        {out.id(), logits.id(), row_stats.id()});
+    if (autograd::is_enabled() && (xf.requires_grad() || weight.requires_grad())) {
+        out.set_requires_grad(true);
+        out._set_grad_fn(
+            std::make_shared<HeadCEFusedNode>(xf, weight, logits, targets, std::move(row_stats)));
+    }
     return out;
 }
 

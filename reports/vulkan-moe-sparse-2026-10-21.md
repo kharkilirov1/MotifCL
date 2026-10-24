@@ -1813,3 +1813,53 @@ fusing the CE backward into the head gradient GEMMs so the 262 MB dlogits buffer
 materialised - not by making the existing kernels faster. That fusion needs the CE
 backward node and the head matmul backward to become one node, so it is a graph-level
 change rather than a kernel one.
+
+# Phase Z — CE backward folded into the head GEMMs: exact, and it frees 262 MB
+
+Phase Y's conclusion was that the head plus cross-entropy can only get cheaper by not
+materialising dlogits, which is a graph change. This phase made that change.
+
+Two 64x64 double-buffered GEMM wrappers share the existing body: `mm_f32_db64_ce_a`
+folds the CE backward into the A staging read (the head's input gradient) and
+`mm_f32_db64_ce_b` into the B staging read (the head's weight gradient). Their staging
+read applies, per element of the operand that used to be dlogits,
+
+    dlogits = grad_scale * (exp(logits - max[row]) * inv_sum[row] - (col == target[row]))
+
+with `grad_scale` read on the device from the loss gradient, and the per-row statistics
+taken from the same `ce_fwd_stats` output the cached CE backward used. Every value and
+operation is the one the standalone cached kernel performs, in the same order, so the
+products - and therefore both gradients - are bit-identical to multiplying a
+materialised dlogits.
+
+The graph change: a new op `head_ce_fused(xf, weight, targets)` (weight in the nn
+`[in, classes]` layout) produces the same scalar loss as
+`softmax_cross_entropy(matmul(xf, weight), targets)`. It computes the logits and the CE
+statistics once (outside the graph, under a no-grad guard) and installs one node whose
+backward runs the two fused GEMMs and hands the gradients to `xf` and `weight`; the
+dlogits tensor never exists. The trainer uses it by default for the untied head,
+`MOTIFCL_HEAD_CE_FUSED=0` restores the separate CE node.
+
+Verification:
+
+- `tests/test_head_ce_fused.cpp` (new, in CTest): the fused loss, input gradient and
+  weight gradient are bit-identical to the unfused path and match a double-precision CPU
+  reference within 2e-5;
+- a 6-step full training run produces the same 430 checkpoint files as before.
+
+Cost and benefit:
+
+| | before | after |
+|---|---:|---:|
+| head input gradient | 15.3 ms | 17.09 ms (fused) |
+| head weight gradient | 11.4 ms | 13.56 ms (fused) |
+| cached CE backward | 4.56 ms | gone |
+| VRAM peak / used | 2400 / 2233 MB | **2144 / 1983 MB** |
+
+The fused GEMMs pay the recomputation of `exp` five times for the input gradient (its A
+operand is re-read once per n tile) and five times for the weight gradient, which eats
+most of what removing the CE kernel saves: measured 127.6-128.1 ms of GPU per step
+against 128.1-128.4 ms, i.e. about 0.4 ms (~0.3%). The real prize is memory: the
+262 MB dlogits buffer is gone, so the trainer runs with 250 MB of headroom where it had
+170 MB. That headroom is what a double-buffered activation set for host/device overlap
+would need, which is the remaining known 2-4%.
