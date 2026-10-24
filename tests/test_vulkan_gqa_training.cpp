@@ -301,8 +301,10 @@ void run_causal_training_case(motifcl::Backend& backend, int tokens,
         {
             const char* bwd_rows_env = std::getenv("MOTIFCL_VK_GQA_BWD_ROWS");
             const int rows = bwd_rows_env ? std::atoi(bwd_rows_env) : 8;
-            const std::string kernel = rows <= 4 ? "gqa_bwd_probs_causal_rows4_f32"
-                                                 : "gqa_bwd_probs_causal_rows8_f32";
+            const std::string kernel =
+                rows <= 4                 ? "gqa_bwd_probs_causal_rows4_f32"
+                : dim % 4 == 0            ? "gqa_bwd_probs_causal_rows8_vec_f32"
+                                          : "gqa_bwd_probs_causal_rows8_f32";
             require_kernel_calls(got.profile, kernel, wave64 ? 1 : 0);
         }
         // head_dim 48 and 64 have a staged dK/dV variant whose accumulator width is a

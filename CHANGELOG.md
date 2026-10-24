@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Attention backward stage 1: K/V rows read as vec4, -21% on that kernel (2026-10-24)
+
+- `gqa_bwd_probs_causal_rows8_vec_f32` reads each key's K and V row as aligned vec4
+  (head_dim and every row start are multiples of four) and adds the four components in
+  ascending d order, so the result is bit-identical to the scalar body (6-step run: the
+  same 430 checkpoint files). Non-multiple-of-four head widths keep the scalar kernel.
+- 1983.8 -> 1574.8 us per layer (-21%), 11.9 -> 9.4 ms per step; the 10-step kernel
+  window 1411 -> 1388 ms and the trainer's steady step 143.9-144.0 -> 141.7-142.0 ms
+  (14221-14232 -> 14427-14449 tok/s).
+- `test_vulkan_gqa_training` derives the expected stage-1 kernel from head_dim.
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase V.
+
 ### Attention backward dK/dV: row history staged through shared memory, 2.3x (2026-10-24)
 
 - New `gqa_bwd_dkv_causal_tile_staged_body.glsl` with `hd48`/`hd64` wrappers. The old

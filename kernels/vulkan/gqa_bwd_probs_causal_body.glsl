@@ -4,8 +4,17 @@
 layout(local_size_x = 64) in;
 
 layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+#ifdef KV_VEC4
+// head_dim is a multiple of four here, and so is every K/V row start, so the row of
+// one key is a run of head_dim/4 aligned vec4. One lane owns one key and reads its
+// whole row: the four components are added in ascending d order, which keeps the
+// summation order (and the result) identical to the scalar body.
+layout(std430, set = 0, binding = 1) readonly buffer KBuf { vec4 k4[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VBuf { vec4 v4[]; };
+#else
 layout(std430, set = 0, binding = 1) readonly buffer KBuf { float k[]; };
 layout(std430, set = 0, binding = 2) readonly buffer VBuf { float v[]; };
+#endif
 layout(std430, set = 0, binding = 3) readonly buffer DoutBuf { float dout[]; };
 layout(std430, set = 0, binding = 4) writeonly buffer PBuf { float p_out[]; };
 layout(std430, set = 0, binding = 5) writeonly buffer DsBuf { float ds_out[]; };
@@ -64,10 +73,26 @@ void main() {
         const uint kb = (b * p.key_tokens + tk) * kv_channels + kv_head * p.head_dim;
         float dot[ROWS];
         for (uint j = 0u; j < uint(ROWS); ++j) dot[j] = 0.0;
+#ifdef KV_VEC4
+        const uint kbase = kb >> 2;
+        for (uint i = 0u; i < (p.head_dim >> 2); ++i) {
+            const vec4 kv = k4[kbase + i];
+            const uint d0 = i * 4u;
+            for (uint j = 0u; j < uint(ROWS); ++j) {
+                float acc = dot[j];
+                acc += qs[j][d0 + 0u] * kv.x;
+                acc += qs[j][d0 + 1u] * kv.y;
+                acc += qs[j][d0 + 2u] * kv.z;
+                acc += qs[j][d0 + 3u] * kv.w;
+                dot[j] = acc;
+            }
+        }
+#else
         for (uint d = 0u; d < p.head_dim; ++d) {
             const float kd = k[kb + d];
             for (uint j = 0u; j < uint(ROWS); ++j) dot[j] += qs[j][d] * kd;
         }
+#endif
         for (uint j = 0u; j < uint(ROWS); ++j) {
             float s = dot[j] * p.scale;
             if (tk > r0 + j) s = neg_inf;
@@ -104,10 +129,26 @@ void main() {
         const uint vb = (b * p.key_tokens + tk) * kv_channels + kv_head * p.head_dim;
         float dp[ROWS];
         for (uint j = 0u; j < uint(ROWS); ++j) dp[j] = 0.0;
+#ifdef KV_VEC4
+        const uint vbase = vb >> 2;
+        for (uint i = 0u; i < (p.head_dim >> 2); ++i) {
+            const vec4 vv = v4[vbase + i];
+            const uint d0 = i * 4u;
+            for (uint j = 0u; j < uint(ROWS); ++j) {
+                float acc = dp[j];
+                acc += ds_in[j][d0 + 0u] * vv.x;
+                acc += ds_in[j][d0 + 1u] * vv.y;
+                acc += ds_in[j][d0 + 2u] * vv.z;
+                acc += ds_in[j][d0 + 3u] * vv.w;
+                dp[j] = acc;
+            }
+        }
+#else
         for (uint d = 0u; d < p.head_dim; ++d) {
             const float vd = v[vb + d];
             for (uint j = 0u; j < uint(ROWS); ++j) dp[j] += ds_in[j][d] * vd;
         }
+#endif
         for (uint j = 0u; j < uint(ROWS); ++j) {
             dps[j][tk] = dp[j];
             lane_dot[j] += dp[j] * probs[j][tk] * inv[j];
@@ -144,10 +185,22 @@ void main() {
         const uint kb = kv_head * p.head_dim + d;
         float acc[ROWS];
         for (uint j = 0u; j < uint(ROWS); ++j) acc[j] = 0.0;
+#ifdef KV_VEC4
+        // This pass is already coalesced across lanes (lane == d), so it keeps one
+        // scalar read per key; the vec4 view selects the lane's component.
+        const uint comp = d & 3u;
+        for (uint tk = 0u; tk < p.key_tokens; ++tk) {
+            const uint at = (b * p.key_tokens + tk) * kv_channels + kv_head * p.head_dim + (d & ~3u);
+            const vec4 kv = k4[at >> 2];
+            const float kd = comp == 0u ? kv.x : (comp == 1u ? kv.y : (comp == 2u ? kv.z : kv.w));
+            for (uint j = 0u; j < uint(ROWS); ++j) acc[j] += dps[j][tk] * kd;
+        }
+#else
         for (uint tk = 0u; tk < p.key_tokens; ++tk) {
             const float kd = k[(b * p.key_tokens + tk) * kv_channels + kb];
             for (uint j = 0u; j < uint(ROWS); ++j) acc[j] += dps[j][tk] * kd;
         }
+#endif
         const uint qb = h * p.head_dim + d;
         for (uint j = 0u; j < uint(ROWS); ++j) {
             if (r0 + j < T) dq[(b * T + r0 + j) * q_channels + qb] = acc[j] * p.scale;

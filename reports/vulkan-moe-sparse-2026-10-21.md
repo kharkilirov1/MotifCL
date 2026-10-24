@@ -1700,3 +1700,29 @@ steady step from 147.2-147.3 to **143.9-144.0 ms** (13908 -> 14221-14232 tok/s).
 trainer's head width is 48 (288 / 6 heads), so the hd48 wrapper is the one in use;
 hd64 covers the other common width and any other width still takes the generic tile
 kernel.
+
+# Phase V — Stage-1 attention backward reads K/V rows as vec4: another 21%
+
+The stage-1 backward (`gqa_bwd_probs_causal_rows8_f32`, 11.9 ms/step, ~5% of peak) has
+one lane per key and reads that key's whole K row, then V row, then K again for dQ.
+The rows are contiguous runs of head_dim floats, but the body read them one scalar at a
+time: 48 dependent 4-byte loads per key per pass, each consumed immediately by the
+accumulator FMAs.
+
+Because head_dim and every K/V row start are multiples of four, the row of a key is a
+run of head_dim/4 aligned vec4. The eight-row body now takes a `KV_VEC4` variant
+(`gqa_bwd_probs_causal_rows8_vec_f32`) that reads them that way and adds the four
+components in ascending d order - same products, same order, so the result is
+bit-identical (6-step run: the same 430 checkpoint files).
+
+Kernel time 1983.8 -> **1574.8 us per layer** (-21%), i.e. 11.9 -> 9.4 ms per step; the
+10-step window drops 1411 -> 1388 ms and the trainer's steady step 143.9-144.0 ->
+**141.7-142.0 ms** (14221-14232 -> 14427-14449 tok/s). The scalar body stays for
+head widths that are not a multiple of four (the test's D7 case), and the host chooses
+between them from head_dim; test_vulkan_gqa_training derives the expected name.
+
+What is left in this kernel is latency, not bandwidth: after the vec4 change the
+remaining gap to the traffic bound is ~2x, and closing it needs the K/V tiles staged
+through shared memory (a 64-key tile is 12 KiB at head_dim 48, which together with the
+existing 20 KiB of probability/row caches is exactly the 32 KiB budget - the experiment
+belongs to its own phase because it trades occupancy for latency).

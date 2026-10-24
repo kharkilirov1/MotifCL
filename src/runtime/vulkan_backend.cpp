@@ -10934,10 +10934,16 @@ VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtim
         // rejected (160.4 vs 150.5 ms/step) because 40 KiB of shared memory leaves
         // one workgroup per CU and the 16 row accumulators spill.
         const bool rows4 = bwd_rows <= 4;
-        const auto* probs_spirv = rows4 ? vkspirv::k_gqa_bwd_probs_causal_rows4_f32
-                                        : vkspirv::k_gqa_bwd_probs_causal_rows8_f32;
-        const auto probs_words = rows4 ? vkspirv::k_gqa_bwd_probs_causal_rows4_f32_words
-                                       : vkspirv::k_gqa_bwd_probs_causal_rows8_f32_words;
+        // head_dim a multiple of four lets the eight-row kernel read each key's K/V row
+        // as aligned vec4; the components are added in ascending d order, so the
+        // result is bit-identical to the scalar body.
+        const bool kv_vec4 = !rows4 && head_dim % 4 == 0;
+        const auto* probs_spirv = rows4   ? vkspirv::k_gqa_bwd_probs_causal_rows4_f32
+                                  : kv_vec4 ? vkspirv::k_gqa_bwd_probs_causal_rows8_vec_f32
+                                            : vkspirv::k_gqa_bwd_probs_causal_rows8_f32;
+        const auto probs_words = rows4   ? vkspirv::k_gqa_bwd_probs_causal_rows4_f32_words
+                                 : kv_vec4 ? vkspirv::k_gqa_bwd_probs_causal_rows8_vec_f32_words
+                                           : vkspirv::k_gqa_bwd_probs_causal_rows8_f32_words;
         const std::uint32_t probs_rows = rows4 ? 4u : 8u;
         auto fast_stage = runtime.dispatch_cached(
             probs_spirv, probs_words, probs_buffers, &fast_push, sizeof(fast_push),
