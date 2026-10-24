@@ -1,0 +1,47 @@
+// RoPE (interleaved pair layout), one invocation per even/odd pair.
+//
+// The per-element form recomputed cos/sin (and pow) for both halves of the pair and
+// read the pair twice, which put it at ~80 GB/s. Here one invocation owns the pair:
+// the angle is computed once, the pair is read as one vec2 and written as one vec2.
+// The arithmetic is unchanged element for element (same cos/sin, same multiply and
+// add order), so the results are bit-identical to kernels/vulkan/rope_f32.comp.
+//
+// Only the fully-rotary layout is handled (rotary_dim == head_dim); the caller keeps
+// the per-element kernel for partial-rotary shapes whose tail elements are copied.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { vec2 xp[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer OBuf { vec2 outv[]; };
+
+layout(push_constant) uniform Push {
+    int batch;
+    int tokens;
+    int channels;
+    int n_head;
+    int head_dim;
+    int rotary_dim;
+    int token_offset;
+    float theta;
+    int inverse;
+} p;
+
+void main() {
+    const int gid = int(gl_GlobalInvocationID.x);
+    const int pairs_per_row = p.channels / 2;
+    const int total = p.batch * p.tokens * pairs_per_row;
+    if (gid >= total) return;
+    const int pair = gid % pairs_per_row;
+    const int token = (gid / pairs_per_row) % p.tokens;
+    const int b = gid / (p.tokens * pairs_per_row);
+    const int pair_in_head = pair % (p.head_dim / 2);
+    const int pair_d = pair_in_head * 2;
+    const float exponent = float(pair_d) / float(p.head_dim);
+    float angle = float(p.token_offset + token) / pow(p.theta, exponent);
+    if (p.inverse != 0) angle = -angle;
+    const float cs = cos(angle);
+    const float sn = sin(angle);
+    const vec2 v = xp[gid];
+    outv[gid] = vec2(v.x * cs - v.y * sn, v.x * sn + v.y * cs);
+}

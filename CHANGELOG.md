@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### RoPE: one invocation per rotated pair (2026-10-24)
+
+- `rope_pair_f32` computes the angle (and its `pow`) once per even/odd pair instead of
+  once per element for each half, and moves the pair as one `vec2` in and one `vec2`
+  out. 58.9 -> 32.3 us per call, bit-identical (6-step run: the same 430 checkpoint
+  files), steady step 147.6-147.9 -> 147.2-147.3 ms. Partial-rotary layouts keep the
+  per-element kernel.
+- Rejected on measurement and reverted: staging the counter-update row in shared
+  memory (23.2 -> 27.3 us per layer; the row is 216 bytes and already cache-resident),
+  a vec4 Adam kernel (132.7 -> 137.6 us; already bandwidth-bound and coalesced), and
+  the memory-placement knobs (`SMALL_HOST_BYTES` 64K/256K, `PREFER_DEVICE_LOCAL`,
+  `HOST_VISIBLE` = 819.7 ms/step). `reports/vulkan-moe-sparse-2026-10-21.md`, Phase T.
+
 ### Counter bookkeeping: cheaper decode kernel and an opt-in mirror cache (2026-10-24)
 
 - `counter_decode_weight_f32` tabulates `code/(2C-1) - 1` once per workgroup in

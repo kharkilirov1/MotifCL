@@ -101,6 +101,7 @@
     { vkspirv::k_rmsnorm_row_inv_f32, "rmsnorm_row_inv_f32" },
     { vkspirv::k_rope_cache_append_decode_f32_rb4, "rope_cache_append_decode_f32_rb4" },
     { vkspirv::k_rope_f32, "rope_f32" },
+    { vkspirv::k_rope_pair_f32, "rope_pair_f32" },
     { vkspirv::k_rope_positions_f32, "rope_positions_f32" },
     { vkspirv::k_rope_positions_split_half_f32, "rope_positions_split_half_f32" },
     { vkspirv::k_rope_split_half_f32, "rope_split_half_f32" },

@@ -4435,6 +4435,16 @@ VulkanOpResult run_vulkan_rope(VulkanRuntime& runtime,
            theta,
            inverse ? 1 : 0};
     const std::vector<const VulkanBuffer*> buffers = {&x, &out};
+    // Fully-rotary layouts use one invocation per even/odd pair: the angle (and its
+    // pow) is then computed once per pair instead of twice per element, and the pair
+    // is read and written as one vec2. Partial-rotary shapes keep the per-element
+    // form because their tail elements are copied through.
+    const bool pair_path = head_dim % 2 == 0 && (rotary_dim == 0 || rotary_dim >= head_dim);
+    if (pair_path) {
+        return runtime.dispatch_cached(vkspirv::k_rope_pair_f32, vkspirv::k_rope_pair_f32_words,
+                                       buffers, &push, sizeof(push),
+                                       static_cast<std::uint32_t>((total / 2 + 63) / 64), 1, 1);
+    }
     return runtime.dispatch_cached(vkspirv::k_rope_f32, vkspirv::k_rope_f32_words,
                                    buffers, &push, sizeof(push),
                                    static_cast<std::uint32_t>((total + 63) / 64), 1, 1);
@@ -9224,6 +9234,10 @@ VulkanOpResult run_vulkan_adam_update_fast(VulkanRuntime& runtime,
         float c1;
         float c2;
     } push{static_cast<std::uint32_t>(elements), lr, beta1, beta2, eps, weight_decay, c1, c2};
+    // A vec4 form of this kernel was measured and rejected: it is already
+    // bandwidth-bound and coalesced, and grouping four elements per invocation made
+    // the update slightly slower (137.6 vs 132.7 us per call) because the extra
+    // per-thread work buys nothing the memory system was not already getting.
     const std::vector<const VulkanBuffer*> buffers = {&param, &grad, &m, &v};
     return runtime.dispatch_cached(vkspirv::k_adam_update_fast_f32, vkspirv::k_adam_update_fast_f32_words,
                                    buffers, &push, sizeof(push),

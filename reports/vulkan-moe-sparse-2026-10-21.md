@@ -1646,3 +1646,34 @@ enabled produces the same 430 checkpoint files as before, and the cache A/B isol
 its effect: 148.8 ms/step with the cache off vs **147.6-147.9 ms** with it on
 (13761-13762 -> 13843-13879 tok/s, +0.7%). Together with the kernel change this
 round is 149.0 -> 147.7 ms per steady step.
+
+# Phase T — RoPE by pair; three more elementwise/bookkeeping attempts rejected
+
+## T.1 RoPE one invocation per pair (kept, bit-identical)
+
+`rope_f32` ran one invocation per element and, for the rotary half, computed `pow`,
+`cos` and `sin` for *both* halves of each even/odd pair and read the pair twice. The
+pair kernel (`rope_pair_f32`) owns the pair: one angle, one `vec2` load, one `vec2`
+store, same arithmetic. Measured 58.9 -> **32.3 us per call** (24 calls per step), and
+it is bit-identical: the 6-step checkpoint set is unchanged (430 files). Steady step
+147.6-147.9 -> **147.2-147.3 ms**. Partial-rotary shapes (tail elements copied
+through) keep the per-element kernel, which the host selects.
+
+## T.2 Rejected: memory placement knobs, staged counter-update row, vec4 Adam
+
+- Memory placement, 15-step steady means against a 149.2 ms baseline:
+  `MOTIFCL_VK_SMALL_HOST_BYTES=65536` 149.1, `=262144` 150.1,
+  `MOTIFCL_VK_PREFER_DEVICE_LOCAL=1` 149.2, `MOTIFCL_VK_HOST_VISIBLE=1` 819.7
+  (catastrophic). Nothing to gain; the 128 KiB host-visible rule is right.
+- Counter update kernel: staging the packed row and its grad_w row in shared memory
+  (one global pass instead of two) made it *slower*, 23.2 -> 27.3 us per layer,
+  because the row is 216 bytes and the second pass was already cache-resident while
+  the extra shared traffic, barrier and registers cost more. Reverted.
+- Adam as a vec4 kernel: 132.7 -> 137.6 us per call. The update is already
+  bandwidth-bound and perfectly coalesced, so four elements per invocation only add
+  per-thread work. Reverted (the scalar kernel carries a comment recording this).
+
+At this point the elementwise family is at 139-190 GB/s and the remaining kernels are
+either bandwidth-bound or limited by the tiny output shape of the [.,7] router GEMMs
+(193 us per call at 5 workgroups of parallelism, where the only fix is a k-split that
+would change the summation order).
