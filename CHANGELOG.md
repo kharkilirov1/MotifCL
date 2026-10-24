@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### GEMM inventory per step, and the narrow-GEMM dead end (2026-10-24, no code change)
+
+- Shape log of the double-buffered GEMM path resolves the 333 dispatches of a step: expert
+  and shared-expert projections (up/down forward, input gradient, weight gradient) at 48/48/
+  40/40/40/40 calls, attention projections 24 forward and 39 for the two gradients, and one
+  head forward - ~73 GMAC in total, every shape already in the tile the heuristic picks. A
+  forced-tile screen inside one session agrees: auto 159.0/159.6 ms, forced 64 164.9 ms,
+  forced 32 165.8 ms.
+- A one-lane-per-row kernel for the narrow router/balance gradients (`n=7`, 193 us per call
+  in the generic 16-column-tile kernel) measured 1718 us per call and was reverted: 288 lanes
+  are five workgroups, and the padded tile hides that latency better than lane-per-row does.
+  Bit-identical while it lasted (same 430 checkpoint files). Second narrow-GEMM attempt to
+  lose; recorded in `reports/vulkan-moe-sparse-2026-10-21.md`, Phase AD.
+- Process note recorded there too: the same binary measured 143.7 ms and 159.2 ms an hour
+  apart on an unchanged tree, so the card throttles and only same-session A/B pairs count.
+
 ### Deferred batch submission; the pipeline it enables cannot pay (2026-10-24)
 
 - `VulkanRuntime::batch_end_async()` submits an open batch and returns without waiting,

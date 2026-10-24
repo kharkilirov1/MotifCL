@@ -1977,3 +1977,43 @@ Conclusion: the remaining ~7 ms of host work per step is not reachable by pipeli
 step of ~141 ms against ~132 ms of GPU work is close to this design's floor. The remaining
 honest target is the counter subsystem's 238 dispatches (Phase AB) and the ~9.4 ms stage-1
 attention backward.
+
+# Phase AD — GEMM inventory per step, and the narrow-GEMM dead end
+
+A shape log on the double-buffered GEMM path (capped at one step's worth of dispatches)
+resolves what the 284 `mm_f32_db32` and 49 `mm_f32_db64` calls per step actually are:
+
+| tile | m, k, n | layouts | calls/step | GMAC/step | what |
+|---|---|---|---:|---:|---|
+| db64 | 2048, 288, 384 | 0, 1 | 48 | 10.9 | expert/up forward (8 per layer) |
+| db32 | 2048, 192, 288 | 0, 1 | 48 | 5.4 | expert/down forward |
+| db32 | 2048, 288, 192 | 0, 0 | 40 | 4.5 | shared-expert forward |
+| db32 | 288, 2048, 192 | 1, 0 | 40 | 4.5 | shared-expert weight gradient |
+| db32 | 2048, 384, 288 | 0, 0 | 40 | 9.1 | expert/up input gradient |
+| db32 | 384, 2048, 288 | 1, 0 | 40 | 9.1 | expert/up weight gradient |
+| db32 | 2048, 288, 288 | 0, 1 | 24 | 4.1 | attention projections forward |
+| db32 | 2048, 288, 288 | 0, 0 | 20 | 3.4 | attention input gradient |
+| db32 | 288, 2048, 288 | 1, 0 | 19 | 3.2 | attention weight gradient |
+| db64 | 2048, 288, 32000 | 0, 0 | 1 | 18.9 | head forward |
+
+So ~73 GMAC per step of double-buffered GEMM (plus 37.7 GMAC in the two frozen-CE head
+gradients from Phase Z), every shape at least 64 columns or rows wide, and all of them in a
+tile that the heuristic already picked. A forced-tile screen inside one session confirms the
+heuristic: auto 159.0/159.6 ms, forced 64 164.9 ms, forced 32 165.8 ms.
+
+The narrow-output GEMM did not survive measurement. The router and balance gradients
+(`m=288, k=2048, n=7`) run at 193 us per call in the generic kernel, which pads n to 16
+columns, so one lane per output row looked like a tenfold win: 288 lanes, each walking k once
+with eight accumulators, reading A coalesced and B broadcast, accumulating in strict
+ascending k so the result would be bit-identical (it was - the 6-step run reproduced the same
+430 checkpoint files). It measured **1718 us per call**, nine times slower: 288 lanes are five
+workgroups on a 36-CU card, and each lane's 2048-step walk with four loads in flight is
+latency the sixteen-column tile hides by keeping nineteen workgroups resident and its B tile
+broadcast out of shared memory. Reverted. This is the second narrow-GEMM attempt to lose
+(Phase R's was the first); on this card a narrow output is better served by padding the tile
+than by trading tiles for lanes.
+
+One process note from the same session: the identical binary measured 143.7 ms per step in
+the morning and 159.2 ms an hour later with the tree unchanged, so the card throttles under
+sustained load. Only same-session A/B pairs are evidence here; absolute tok/s figures are
+per-session.
