@@ -48,9 +48,33 @@ layout(push_constant) uniform Push {
 } p;
 
 #if defined(FUSE_CE_A) || defined(FUSE_CE_B)
+// The per-row statistics of the input gradient's rows are fetched once into shared
+// memory: the A staging re-reads each element once per n tile, so loading (max,
+// inv_sum) and the target from global memory per staged vec4 dominated the transform's
+// cost. Non-current tiles are skipped, and a row that falls outside M gets a harmless
+// entry.
+shared vec2 ce_stats_s[TILE_M];
+shared int ce_targets_s[TILE_M];
+
 // dlogits element for (row, col0..col0+3), identical to
 //   scale * (exp(logits - max[row]) * inv_sum[row] - (col == target[row]))
-vec4 ce_dlogits(vec4 logits, uint row, uint col0) {
+// row_local indexes the shared cache (FUSE_CE_A: the row is in this workgroup's m range).
+vec4 ce_dlogits_cached(vec4 logits, uint row_local, uint col0) {
+    const vec2 stats = ce_stats_s[row_local];
+    const int target = ce_targets_s[row_local];
+    const float scale = ce_grad_out[0] / p.ce_rows;
+    const vec4 prob = exp(logits - vec4(stats.x)) * stats.y;
+    const vec4 onehot = vec4(int(col0 + 0u) == target ? 1.0 : 0.0,
+                             int(col0 + 1u) == target ? 1.0 : 0.0,
+                             int(col0 + 2u) == target ? 1.0 : 0.0,
+                             int(col0 + 3u) == target ? 1.0 : 0.0);
+    return scale * (prob - onehot);
+}
+
+// FUSE_CE_B transforms a B row whose index is the batch's token (the k dimension), so a
+// workgroup walks every row once and there is nothing to cache; the statistics live in a
+// 24 KiB table that stays in L2.
+vec4 ce_dlogits_row(vec4 logits, uint row, uint col0) {
     const vec2 stats = ce_stats[row];
     const int target = ce_targets[row];
     const float scale = ce_grad_out[0] / p.ce_rows;
@@ -87,7 +111,7 @@ void load_a(uint lid, uint m0, uint kt, out vec4 r0, out vec4 r1) {
             if (gm < p.M && gk < p.K) {
                 v = A4[(gm * p.K + gk) >> 2];
 #ifdef FUSE_CE_A
-                v = ce_dlogits(v, gm, gk);
+                v = ce_dlogits_cached(v, gm - m0, gk);
 #endif
             }
             if (i == 0) r0 = v; else r1 = v;
@@ -120,7 +144,7 @@ void load_b(uint lid, uint n0, uint kt, out vec4 r0, out vec4 r1) {
             if (gk < p.K && gn < p.N) {
                 v = B4[(gk * p.N + gn) >> 2];
 #ifdef FUSE_CE_B
-                v = ce_dlogits(v, gk, gn);
+                v = ce_dlogits_row(v, gk, gn);
 #endif
             }
             if (i == 0) r0 = v; else r1 = v;
@@ -199,6 +223,20 @@ void main() {
     const uint m0 = uint(gl_WorkGroupID.y) * uint(TILE_M);
     const uint n0 = uint(gl_WorkGroupID.x) * uint(TILE_N);
     const uint ktiles = (p.K + uint(KT) - 1u) / uint(KT);
+
+#ifdef FUSE_CE_A
+    if (lid < uint(TILE_M)) {
+        const uint gm = m0 + lid;
+        if (gm < p.M) {
+            ce_stats_s[lid] = ce_stats[gm];
+            ce_targets_s[lid] = ce_targets[gm];
+        } else {
+            ce_stats_s[lid] = vec2(0.0);
+            ce_targets_s[lid] = -1;
+        }
+    }
+    barrier();
+#endif
 
     vec4 ra0 = vec4(0.0);
     vec4 ra1 = vec4(0.0);

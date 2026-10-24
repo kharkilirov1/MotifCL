@@ -2040,3 +2040,22 @@ The test now covers what a wrong implementation breaks first:
 With the trainer unchanged (still on the synchronous `batch_end()`), the 6-step run keeps
 producing the same 430 checkpoint files, and CTest is now 41 passed / 30 skipped / 0 failed
 of 71.
+
+# Phase AF — The fused head finally pays: statistics cached in shared memory
+
+Phase Z's folded CE transform cost more than it should because every staged vec4 of the
+input-gradient operand also loaded `(max, inv_sum)` and the target from global memory:
+the A staging re-reads each element once per n tile, so a 2048-row, 32000-column operand
+issued tens of millions of those loads per call for two arrays that are only
+2048 x 12 bytes. The transform now copies the workgroup's row statistics and targets into
+shared memory once (64 rows, 640 bytes) before the first staging read and indexes them
+locally; the weight-gradient side keeps the global form, because its rows are the batch's
+tokens - every workgroup walks all 2048 of them once, so there is nothing to cache and the
+24 KiB table stays in L2.
+
+The input-gradient GEMM drops 17.09 -> **15.99 ms per step** (-6.4%) with the transform's
+arithmetic untouched, so the results stay bit-identical: the 6-step run reproduces the same
+430 checkpoint files and `test_head_ce_fused` still reports both gradients bit-identical to
+the unfused path. Same-session A/B (15 steps each, two pairs): fused head **141.6 / 142.1 ms**
+against unfused **142.8 / 142.8 ms**, i.e. folding the CE backward now wins by ~1 ms per step
+where Phase Z measured it neutral - the cache is what makes the fusion pay.

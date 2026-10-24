@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Fused head CE: row statistics cached in shared memory, -6.4% on the input gradient (2026-10-24)
+
+- The folded CE transform loaded `(max, inv_sum)` and the target from global memory for
+  every staged vec4, so the input-gradient operand (re-read once per n tile) issued tens of
+  millions of loads for a 24 KiB table. The workgroup now copies its 64 rows' statistics and
+  targets into shared memory (640 bytes) before the first staging read; the weight-gradient
+  side keeps the global form because its rows are the batch tokens.
+- Input-gradient GEMM 17.09 -> 15.99 ms per step (-6.4%), transform arithmetic untouched:
+  the 6-step run still reproduces the same 430 checkpoint files and `test_head_ce_fused`
+  still shows both gradients bit-identical to the unfused path.
+- Same-session A/B (15 steps, two pairs): fused 141.6 / 142.1 ms against unfused
+  142.8 / 142.8 ms, so folding the CE backward now wins ~1 ms per step instead of being
+  neutral. CTest: 41 passed / 30 skipped / 0 failed of 71.
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase AF.
+
 ### Deferred-submit API fixed and witnessed (2026-10-24)
 
 - The new `tests/test_vulkan_batch_async.cpp` found that `batch_end_async()` could never
