@@ -1,0 +1,23 @@
+// Tiled causal GQA attention backward stage 2 (dK, dV) with the q/dout history
+// staged through shared memory, specialised for one head width.
+//
+// The generic tile kernel keeps one lane per key and loads the q (or dout) slice for
+// every row directly from global memory: sixteen broadcast vec4 loads whose latency
+// the accumulator FMAs cannot hide, which left it at ~14% of peak. The body stages
+// rows in chunks of 16 into shared memory (coalesced, double-buffered) and reduces
+// from there; DMAX (== head_dim / 4) is a compile-time accumulator width so the
+// guards disappear. Rows ascend in the same order through the same accumulators with
+// the same products, so the output is bit-identical to
+// gqa_bwd_dkv_causal_tile_f32.
+//
+// Preconditions (checked by the caller): causal, no mask, query_offset == 0,
+// key_stride == key_tokens == query_tokens <= 256, head_dim == v_head_dim, and
+// head_dim one of the widths with a wrapper here.
+#version 450
+
+layout(local_size_x = 64) in;
+
+#define DMAX 16
+#define CHUNK 16
+
+#include "gqa_bwd_dkv_causal_tile_staged_body.glsl"

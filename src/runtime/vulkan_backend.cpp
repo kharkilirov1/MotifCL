@@ -10948,6 +10948,23 @@ VulkanOpResult run_vulkan_grouped_query_attention_backward(VulkanRuntime& runtim
         // one 64-key tile per workgroup, q/dout rows broadcast to the lanes.
         const std::vector<const VulkanBuffer*> dkv_buffers = {&q,     &grad_out, &probs_scratch,
                                                               &ds_scratch, &grad_k, &grad_v};
+        // head_dim 48 and 64 have a staged variant whose accumulator width is a
+        // compile-time constant; both are bit-identical to the generic tile kernel
+        // (rows ascend through the same accumulators in the same order).
+        if (head_dim == 48) {
+            return runtime.dispatch_cached(vkspirv::k_gqa_bwd_dkv_causal_tile_hd48_f32,
+                                           vkspirv::k_gqa_bwd_dkv_causal_tile_hd48_f32_words, dkv_buffers,
+                                           &fast_push, sizeof(fast_push),
+                                           static_cast<std::uint32_t>((key_tokens + 63) / 64),
+                                           static_cast<std::uint32_t>(n_kv_head), static_cast<std::uint32_t>(batch));
+        }
+        if (head_dim == 64) {
+            return runtime.dispatch_cached(vkspirv::k_gqa_bwd_dkv_causal_tile_hd64_f32,
+                                           vkspirv::k_gqa_bwd_dkv_causal_tile_hd64_f32_words, dkv_buffers,
+                                           &fast_push, sizeof(fast_push),
+                                           static_cast<std::uint32_t>((key_tokens + 63) / 64),
+                                           static_cast<std::uint32_t>(n_kv_head), static_cast<std::uint32_t>(batch));
+        }
         if (head_dim % 4 == 0) {
             return runtime.dispatch_cached(vkspirv::k_gqa_bwd_dkv_causal_tile_f32,
                                            vkspirv::k_gqa_bwd_dkv_causal_tile_f32_words, dkv_buffers,

@@ -41,6 +41,8 @@
     { vkspirv::k_gelu_bwd_f32, "gelu_bwd_f32" },
     { vkspirv::k_gelu_f32, "gelu_f32" },
     { vkspirv::k_gqa_bwd_dkv_causal_tile_f32, "gqa_bwd_dkv_causal_tile_f32" },
+    { vkspirv::k_gqa_bwd_dkv_causal_tile_hd48_f32, "gqa_bwd_dkv_causal_tile_hd48_f32" },
+    { vkspirv::k_gqa_bwd_dkv_causal_tile_hd64_f32, "gqa_bwd_dkv_causal_tile_hd64_f32" },
     { vkspirv::k_gqa_bwd_dkv_f32, "gqa_bwd_dkv_f32" },
     { vkspirv::k_gqa_bwd_dq_f32, "gqa_bwd_dq_f32" },
     { vkspirv::k_gqa_bwd_probs_causal_rows4_f32, "gqa_bwd_probs_causal_rows4_f32" },

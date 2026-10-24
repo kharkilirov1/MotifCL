@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Attention backward dK/dV: row history staged through shared memory, 2.3x (2026-10-24)
+
+- New `gqa_bwd_dkv_causal_tile_staged_body.glsl` with `hd48`/`hd64` wrappers. The old
+  tile kernel loaded the q (or dout) slice for every row straight from global memory -
+  twelve to sixteen broadcast vec4 loads per row whose latency the accumulator FMAs
+  could not hide - and guarded the innermost loop on a runtime `dmax`. The staged
+  version copies rows in chunks of 16 into shared memory (coalesced, double-buffered)
+  and makes `DMAX = head_dim / 4` a compile-time constant.
+- 1028 -> 442.7 us per layer (2.3x), 6.2 -> 2.7 ms per step; the 10-step kernel window
+  drops 1445 -> 1411 ms and the steady step 147.2-147.3 -> 143.9-144.0 ms
+  (13908 -> 14221-14232 tok/s). Bit-identical: the 6-step checkpoint set is unchanged
+  (430 files). The trainer uses the hd48 wrapper (288 / 6 heads); other widths keep the
+  generic tile kernel.
+- `reports/vulkan-moe-sparse-2026-10-21.md`, Phase U.
+
 ### RoPE: one invocation per rotated pair (2026-10-24)
 
 - `rope_pair_f32` computes the angle (and its `pow`) once per even/odd pair instead of

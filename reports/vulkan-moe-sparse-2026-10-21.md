@@ -1677,3 +1677,26 @@ At this point the elementwise family is at 139-190 GB/s and the remaining kernel
 either bandwidth-bound or limited by the tiny output shape of the [.,7] router GEMMs
 (193 us per call at 5 workgroups of parallelism, where the only fix is a k-split that
 would change the summation order).
+
+# Phase U — dK/dV staged through shared memory: 2.3x on that kernel
+
+The stage-2 attention backward (`gqa_bwd_dkv_causal_tile_f32`) keeps one lane per key
+and walks the whole row history with a direct global load of the q (or dout) slice for
+every row: twelve-to-sixteen broadcast vec4 loads whose latency its accumulator FMAs
+cannot hide, and a runtime `if (i < dmax)` guard in the innermost loop. It measured
+1028 us per layer, ~14% of peak.
+
+The new body (`gqa_bwd_dkv_causal_tile_staged_body.glsl` plus `hd48`/`hd64` wrappers)
+stages the row history in chunks of 16 into shared memory: every lane copies a fixed
+number of vec4 per chunk, so the loads are coalesced across the workgroup, and the
+chunk is double-buffered so the next one loads while the current one is reduced.
+`DMAX = head_dim / 4` becomes a compile-time constant, which removes the inner guard.
+Rows still ascend through the same accumulators with the same products, so the output
+is bit-identical: a 6-step run produces the same 430 checkpoint files as before.
+
+Kernel time 1028 -> **442.7 us per layer** (2.3x), i.e. 6.2 -> 2.7 ms per step; the
+10-step kernel window drops from 1445 to 1411 ms (3.4 ms per step) and the trainer's
+steady step from 147.2-147.3 to **143.9-144.0 ms** (13908 -> 14221-14232 tok/s). The
+trainer's head width is 48 (288 / 6 heads), so the hd48 wrapper is the one in use;
+hd64 covers the other common width and any other width still takes the generic tile
+kernel.

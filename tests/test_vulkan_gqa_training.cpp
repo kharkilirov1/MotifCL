@@ -305,8 +305,17 @@ void run_causal_training_case(motifcl::Backend& backend, int tokens,
                                                  : "gqa_bwd_probs_causal_rows8_f32";
             require_kernel_calls(got.profile, kernel, wave64 ? 1 : 0);
         }
+        // head_dim 48 and 64 have a staged dK/dV variant whose accumulator width is a
+        // compile-time constant; other widths that are vec4-multiple take the generic
+        // tile kernel, and the rest the row-per-key kernel.
+        const std::string dkv =
+            dim == 48   ? "gqa_bwd_dkv_causal_tile_hd48_f32"
+            : dim == 64 ? "gqa_bwd_dkv_causal_tile_hd64_f32"
+            : dim % 4 == 0 ? "gqa_bwd_dkv_causal_tile_f32"
+                           : "gqa_bwd_dkv_f32";
+        require_kernel_calls(got.profile, dkv, wave64 ? 1 : 0);
         require_kernel_calls(got.profile, "gqa_bwd_dkv_causal_tile_f32",
-                             wave64 && dim % 4 == 0 ? 1 : 0);
+                             wave64 && dim % 4 == 0 && dim != 48 && dim != 64 ? 1 : 0);
         require_kernel_calls(got.profile, "gqa_bwd_dkv_f32",
                              !wave64 || dim % 4 != 0 ? 1 : 0);
         require_kernel_calls(got.profile, "gqa_fwd_general_f32", wave64 ? 0 : 1);
