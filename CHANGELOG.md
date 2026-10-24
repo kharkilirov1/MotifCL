@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Causal attention forward: K rows read as vec4, -16% on that kernel (2026-10-24)
+
+- `gqa_fwd_causal8_vec_f32` declares the K buffer as vec4 and adds the four components in
+  ascending d order, so every row is byte-identical to the scalar body (6-step run: the
+  same 430 checkpoint files). Non-multiple-of-four head widths keep the scalar kernel;
+  the host chooses from head_dim.
+- 1059 -> 888.7 us per layer (-16%), 6.3 -> 5.4 ms per step; the 10-step kernel window
+  1388 -> 1371.9 ms and the trainer's steady step 141.7-142.0 -> 140.9-141.1 ms
+  (14427-14449 -> 14519-14534 tok/s).
+- `test_vulkan_gqa_causal8_fwd` matches the rows-8 family by its common prefix, so it
+  accepts either variant while still comparing bitwise against the four-row kernel.
+  `reports/vulkan-moe-sparse-2026-10-21.md`, Phase W.
+
 ### Attention backward stage 1: K/V rows read as vec4, -21% on that kernel (2026-10-24)
 
 - `gqa_bwd_probs_causal_rows8_vec_f32` reads each key's K and V row as aligned vec4

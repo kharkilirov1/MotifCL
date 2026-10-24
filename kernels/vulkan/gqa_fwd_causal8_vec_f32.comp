@@ -1,0 +1,140 @@
+// Causal GQA forward, ROWS=8 consecutive query rows per workgroup, reading each
+// key's K row as aligned vec4 (used when head_dim is a multiple of four).
+//
+// The scalar body loads the K row one float at a time, 48 dependent 4-byte loads per
+// key that the eight accumulator FMAs cannot hide. A key's K row is a run of
+// head_dim floats at a four-aligned start, so it is read as head_dim/4 vec4 here and
+// the four components are added in ascending d order - same products, same order, so
+// every row is byte-identical to gqa_fwd_causal8_f32.
+// Same per-row arithmetic as gqa_fwd_causal4_f32: one key vector load per key,
+// identical d-ordered dot products, identical per-row subgroup reductions (two
+// vec4 reductions instead of one), identical V reuse in the output pass. Only
+// the number of simultaneously processed rows changes, so every row must be
+// byte-identical to the ROWS=4 kernel.
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KBuf { vec4 k4[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VBuf { float v[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer OutBuf { float o[]; };
+layout(push_constant) uniform Push { uint batch; uint query_tokens; uint key_tokens; uint n_head; uint n_kv_head; uint head_dim; float scale; } p;
+#define ROWS 8
+#define MAXK 256
+#define MAXD 64
+shared float qs[ROWS][MAXD];
+shared float probs[ROWS][MAXK];
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint r0 = gl_WorkGroupID.x * uint(ROWS);
+    const uint h = gl_WorkGroupID.y;
+    const uint b = gl_WorkGroupID.z;
+    const uint T = p.query_tokens;
+    if (h >= p.n_head || b >= p.batch || r0 >= T) return;
+    const uint group_size = p.n_head / p.n_kv_head;
+    const uint kv_head = h / group_size;
+    const uint q_channels = p.n_head * p.head_dim;
+    const uint kv_channels = p.n_kv_head * p.head_dim;
+    const float neg_inf = -3.402823466e+38;
+    for (uint j = 0u; j < uint(ROWS); ++j) {
+        const uint tq = r0 + j;
+        if (tq < T) {
+            const uint qb = (b * T + tq) * q_channels + h * p.head_dim;
+            for (uint d = lane; d < p.head_dim; d += 64u) qs[j][d] = q[qb + d];
+        }
+    }
+    barrier();
+    vec4 lane_max0 = vec4(neg_inf);
+    vec4 lane_max1 = vec4(neg_inf);
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        vec4 s0 = vec4(neg_inf);
+        vec4 s1 = vec4(neg_inf);
+        if (tk <= r0 + uint(ROWS - 1)) {
+            const uint kb = (b * p.key_tokens + tk) * kv_channels + kv_head * p.head_dim;
+            float dot[8];
+            for (uint j = 0u; j < 8u; ++j) dot[j] = 0.0;
+            const uint kbase = kb >> 2;
+            for (uint i = 0u; i < (p.head_dim >> 2); ++i) {
+                const vec4 kv = k4[kbase + i];
+                const uint d0 = i * 4u;
+                for (uint j = 0u; j < 8u; ++j) {
+                    float a = dot[j];
+                    a += qs[j][d0 + 0u] * kv.x;
+                    a += qs[j][d0 + 1u] * kv.y;
+                    a += qs[j][d0 + 2u] * kv.z;
+                    a += qs[j][d0 + 3u] * kv.w;
+                    dot[j] = a;
+                }
+            }
+            s0 = vec4(dot[0], dot[1], dot[2], dot[3]) * p.scale;
+            s1 = vec4(dot[4], dot[5], dot[6], dot[7]) * p.scale;
+            if (tk > r0 + 0u) s0.x = neg_inf;
+            if (tk > r0 + 1u) s0.y = neg_inf;
+            if (tk > r0 + 2u) s0.z = neg_inf;
+            if (tk > r0 + 3u) s0.w = neg_inf;
+            if (tk > r0 + 4u) s1.x = neg_inf;
+            if (tk > r0 + 5u) s1.y = neg_inf;
+            if (tk > r0 + 6u) s1.z = neg_inf;
+        }
+        probs[0][tk] = s0.x; probs[1][tk] = s0.y; probs[2][tk] = s0.z; probs[3][tk] = s0.w;
+        probs[4][tk] = s1.x; probs[5][tk] = s1.y; probs[6][tk] = s1.z; probs[7][tk] = s1.w;
+        lane_max0 = max(lane_max0, s0);
+        lane_max1 = max(lane_max1, s1);
+    }
+    vec4 row_max0 = subgroupMax(lane_max0);
+    vec4 row_max1 = subgroupMax(lane_max1);
+    if (row_max0.x == neg_inf) row_max0.x = 0.0;
+    if (row_max0.y == neg_inf) row_max0.y = 0.0;
+    if (row_max0.z == neg_inf) row_max0.z = 0.0;
+    if (row_max0.w == neg_inf) row_max0.w = 0.0;
+    if (row_max1.x == neg_inf) row_max1.x = 0.0;
+    if (row_max1.y == neg_inf) row_max1.y = 0.0;
+    if (row_max1.z == neg_inf) row_max1.z = 0.0;
+    if (row_max1.w == neg_inf) row_max1.w = 0.0;
+    vec4 lane_sum0 = vec4(0.0);
+    vec4 lane_sum1 = vec4(0.0);
+    for (uint tk = lane; tk < p.key_tokens; tk += 64u) {
+        vec4 e0;
+        vec4 e1;
+        e0.x = probs[0][tk] == neg_inf ? 0.0 : exp(probs[0][tk] - row_max0.x);
+        e0.y = probs[1][tk] == neg_inf ? 0.0 : exp(probs[1][tk] - row_max0.y);
+        e0.z = probs[2][tk] == neg_inf ? 0.0 : exp(probs[2][tk] - row_max0.z);
+        e0.w = probs[3][tk] == neg_inf ? 0.0 : exp(probs[3][tk] - row_max0.w);
+        e1.x = probs[4][tk] == neg_inf ? 0.0 : exp(probs[4][tk] - row_max1.x);
+        e1.y = probs[5][tk] == neg_inf ? 0.0 : exp(probs[5][tk] - row_max1.y);
+        e1.z = probs[6][tk] == neg_inf ? 0.0 : exp(probs[6][tk] - row_max1.z);
+        e1.w = probs[7][tk] == neg_inf ? 0.0 : exp(probs[7][tk] - row_max1.w);
+        probs[0][tk] = e0.x; probs[1][tk] = e0.y; probs[2][tk] = e0.z; probs[3][tk] = e0.w;
+        probs[4][tk] = e1.x; probs[5][tk] = e1.y; probs[6][tk] = e1.z; probs[7][tk] = e1.w;
+        lane_sum0 += e0;
+        lane_sum1 += e1;
+    }
+    vec4 sum0 = subgroupAdd(lane_sum0);
+    vec4 sum1 = subgroupAdd(lane_sum1);
+    vec4 inv0 = vec4(sum0.x > 0.0 ? 1.0 / sum0.x : 0.0, sum0.y > 0.0 ? 1.0 / sum0.y : 0.0,
+                     sum0.z > 0.0 ? 1.0 / sum0.z : 0.0, sum0.w > 0.0 ? 1.0 / sum0.w : 0.0);
+    vec4 inv1 = vec4(sum1.x > 0.0 ? 1.0 / sum1.x : 0.0, sum1.y > 0.0 ? 1.0 / sum1.y : 0.0,
+                     sum1.z > 0.0 ? 1.0 / sum1.z : 0.0, sum1.w > 0.0 ? 1.0 / sum1.w : 0.0);
+    barrier();
+    if (lane < p.head_dim) {
+        const uint d = lane;
+        const uint vb = kv_head * p.head_dim + d;
+        float a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0, a4 = 0.0, a5 = 0.0, a6 = 0.0, a7 = 0.0;
+        for (uint tk = 0u; tk < p.key_tokens; ++tk) {
+            const float vv = v[(b * p.key_tokens + tk) * kv_channels + vb];
+            a0 += probs[0][tk] * vv; a1 += probs[1][tk] * vv; a2 += probs[2][tk] * vv; a3 += probs[3][tk] * vv;
+            a4 += probs[4][tk] * vv; a5 += probs[5][tk] * vv; a6 += probs[6][tk] * vv; a7 += probs[7][tk] * vv;
+        }
+        const uint oc = p.n_head * p.head_dim;
+        const uint ob = h * p.head_dim + d;
+        if (r0 + 0u < T) o[(b * T + r0 + 0u) * oc + ob] = a0 * inv0.x;
+        if (r0 + 1u < T) o[(b * T + r0 + 1u) * oc + ob] = a1 * inv0.y;
+        if (r0 + 2u < T) o[(b * T + r0 + 2u) * oc + ob] = a2 * inv0.z;
+        if (r0 + 3u < T) o[(b * T + r0 + 3u) * oc + ob] = a3 * inv0.w;
+        if (r0 + 4u < T) o[(b * T + r0 + 4u) * oc + ob] = a4 * inv1.x;
+        if (r0 + 5u < T) o[(b * T + r0 + 5u) * oc + ob] = a5 * inv1.y;
+        if (r0 + 6u < T) o[(b * T + r0 + 6u) * oc + ob] = a6 * inv1.z;
+        if (r0 + 7u < T) o[(b * T + r0 + 7u) * oc + ob] = a7 * inv1.w;
+    }
+}

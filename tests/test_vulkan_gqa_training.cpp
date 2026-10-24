@@ -296,7 +296,9 @@ void run_causal_training_case(motifcl::Backend& backend, int tokens,
         // four-row kernel).
         const char* rows_env = std::getenv("MOTIFCL_VK_GQA_FWD_ROWS");
         const bool rows4 = rows_env && std::string(rows_env) == "4";
-        const std::string causal_fwd = rows4 ? "gqa_fwd_causal4_f32" : "gqa_fwd_causal8_f32";
+        const std::string causal_fwd = rows4 ? "gqa_fwd_causal4_f32"
+                                      : dim % 4 == 0 ? "gqa_fwd_causal8_vec_f32"
+                                                     : "gqa_fwd_causal8_f32";
         require_kernel_calls(got.profile, causal_fwd, wave64 ? 1 : 0);
         {
             const char* bwd_rows_env = std::getenv("MOTIFCL_VK_GQA_BWD_ROWS");

@@ -52,6 +52,7 @@
     { vkspirv::k_gqa_bwd_probs_f32_subgroup, "gqa_bwd_probs_f32_subgroup" },
     { vkspirv::k_gqa_fwd_causal4_f32, "gqa_fwd_causal4_f32" },
     { vkspirv::k_gqa_fwd_causal8_f32, "gqa_fwd_causal8_f32" },
+    { vkspirv::k_gqa_fwd_causal8_vec_f32, "gqa_fwd_causal8_vec_f32" },
     { vkspirv::k_gqa_fwd_f32, "gqa_fwd_f32" },
     { vkspirv::k_gqa_fwd_f32_subgroup, "gqa_fwd_f32_subgroup" },
     { vkspirv::k_gqa_fwd_general_f32, "gqa_fwd_general_f32" },

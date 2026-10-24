@@ -1726,3 +1726,21 @@ remaining gap to the traffic bound is ~2x, and closing it needs the K/V tiles st
 through shared memory (a 64-key tile is 12 KiB at head_dim 48, which together with the
 existing 20 KiB of probability/row caches is exactly the 32 KiB budget - the experiment
 belongs to its own phase because it trades occupancy for latency).
+
+# Phase W — The same vec4 K-row read on the causal forward: -16%
+
+`gqa_fwd_causal8_f32` had the same shape of problem as the stage-1 backward: one lane per
+key, and the K row for that key read one float at a time (48 dependent 4-byte loads per
+key) with the eight accumulator chains unable to hide the latency.
+
+The new `gqa_fwd_causal8_vec_f32` declares the K buffer as vec4 and adds the four
+components in ascending d order, so every row is byte-identical to the scalar body
+(6-step run: the same 430 checkpoint files). Non-multiple-of-four head widths keep the
+scalar kernel; the host chooses from head_dim, and
+`test_vulkan_gqa_causal8_fwd` now matches the rows-8 family by its common prefix so it
+accepts either variant while still comparing its output bitwise against the four-row
+kernel.
+
+1059 -> **888.7 us per layer** (-16%), i.e. 6.3 -> 5.4 ms per step; the 10-step kernel
+window 1388 -> 1371.9 ms and the trainer's steady step 141.7-142.0 ->
+**140.9-141.1 ms** (14427-14449 -> 14519-14534 tok/s).

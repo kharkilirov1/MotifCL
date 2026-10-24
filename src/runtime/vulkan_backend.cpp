@@ -10596,8 +10596,15 @@ VulkanOpResult run_vulkan_grouped_query_attention_general(
             const char* rows_env = std::getenv("MOTIFCL_VK_GQA_FWD_ROWS");
             const bool rows4 = rows_env && std::strcmp(rows_env, "4") == 0;
             if (!rows4) {
-                return runtime.dispatch_cached(vkspirv::k_gqa_fwd_causal8_f32, vkspirv::k_gqa_fwd_causal8_f32_words,
-                                               fast_buffers, &fast_push, sizeof(fast_push),
+                // head_dim a multiple of four lets the eight-row kernel read each key's
+                // K row as aligned vec4; the components are added in ascending d order,
+                // so the rows are byte-identical to the scalar body.
+                const bool k_vec4 = head_dim % 4 == 0;
+                const auto* spirv =
+                    k_vec4 ? vkspirv::k_gqa_fwd_causal8_vec_f32 : vkspirv::k_gqa_fwd_causal8_f32;
+                const auto words =
+                    k_vec4 ? vkspirv::k_gqa_fwd_causal8_vec_f32_words : vkspirv::k_gqa_fwd_causal8_f32_words;
+                return runtime.dispatch_cached(spirv, words, fast_buffers, &fast_push, sizeof(fast_push),
                                                static_cast<std::uint32_t>((query_tokens + 7) / 8),
                                                static_cast<std::uint32_t>(n_head),
                                                static_cast<std::uint32_t>(batch));

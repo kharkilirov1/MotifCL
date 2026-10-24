@@ -42,7 +42,7 @@ Res run_plain(motifcl::VulkanRuntime& rt, const Pack& p, std::int64_t b, std::in
     rt.reset_kernel_profile();
     auto y = motifcl::grouped_query_attention(p.q, p.k, p.v, int(nh), int(nkh), true, b, t, t, 0, 0.0f);
     auto out = y.to_vector<float>();
-    return {out, calls(rt, "gqa_fwd_causal8_f32"), calls(rt, "gqa_fwd_causal4_f32")};
+    return {out, calls(rt, "gqa_fwd_causal8"), calls(rt, "gqa_fwd_causal4_f32")};
 }
 bool micro(motifcl::VulkanRuntime& rt, const Pack& p, std::int64_t b, std::int64_t t, std::int64_t nh, std::int64_t nkh) {
     // Known-answer statistics check: catches the phase-8 best-of error.
@@ -67,7 +67,7 @@ bool micro(motifcl::VulkanRuntime& rt, const Pack& p, std::int64_t b, std::int64
             if (!(us > 0.0) || !std::isfinite(us)) { std::printf("FAIL invalid GPU time (%g)\n", us); return false; }
             s.push_back(us * 1e-3);
             if (i == 0) {
-                const char* want = std::string(rows) == "8" ? "gqa_fwd_causal8_f32" : "gqa_fwd_causal4_f32";
+                const char* want = std::string(rows) == "8" ? "gqa_fwd_causal8" : "gqa_fwd_causal4_f32";
                 if (calls(rt, want) <= 0) { std::printf("FAIL measured dispatch did not select %s\n", want); return false; }
                 *names = want;
             }
@@ -127,7 +127,7 @@ int main() {
             auto old4 = run_plain(rt, pack, c.b, c.t, c.nh, c.nkh, "4");
             auto new8 = run_plain(rt, pack, c.b, c.t, c.nh, c.nkh, "8");
             expect(old4.c4 > 0, std::string(c.tag) + ": forced-old selects gqa_fwd_causal4_f32");
-            expect(new8.c8 > 0, std::string(c.tag) + ": gqa_fwd_causal8_f32 selected (calls=" + std::to_string(new8.c8) + ")");
+            expect(new8.c8 > 0, std::string(c.tag) + ": gqa_fwd_causal8 selected (calls=" + std::to_string(new8.c8) + ")");
             const bool same = old4.y.size() == new8.y.size() && !old4.y.empty() &&
                               std::memcmp(old4.y.data(), new8.y.data(), old4.y.size() * sizeof(float)) == 0;
             expect(same, std::string(c.tag) + ": y byte-identical rows8 vs rows4");
@@ -136,10 +136,10 @@ int main() {
         set_env("MOTIFCL_VK_GQA_FWD_ROWS", "8");
         rt.reset_kernel_profile();
         (void)grouped_query_attention(fb.q, fb.k, fb.v, 6, 6, false, 2, 128, 128, 0, 0.0f);
-        expect(calls(rt, "gqa_fwd_causal8_f32") == 0, "non-causal fallback does not select rows8");
+        expect(calls(rt, "gqa_fwd_causal8") == 0, "non-causal fallback does not select rows8");
         rt.reset_kernel_profile();
         (void)grouped_query_attention_windowed(fb.q, fb.k, fb.v, 6, 6, 32, true, 2, 128, 128, 0, 0.0f);
-        expect(calls(rt, "gqa_fwd_causal8_f32") == 0, "sliding-window fallback does not select rows8");
+        expect(calls(rt, "gqa_fwd_causal8") == 0, "sliding-window fallback does not select rows8");
         auto pack8 = make_pack(be, 8, 256, 6, 6, 48);
         if (!micro(rt, pack8, 8, 256, 6, 6)) ok = false;
     } catch (const std::exception& e) {
